@@ -13,6 +13,7 @@ import pytest
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "standalone_analogy_recovery.py"
+LAUNCHER_PATH = Path(__file__).resolve().parents[1] / "run_experiment.sh"
 
 
 def load_script() -> ModuleType:
@@ -779,6 +780,21 @@ def test_direct_script_execution_defines_all_helpers_before_main(tmp_path: Path)
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["problem_count"] == 1
+
+
+def test_root_launcher_runs_dry_run_from_any_directory(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [str(LAUNCHER_PATH), "--dry-run", "--condition", "none"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["problem_count"] == 1
+    assert payload["condition_count"] == 1
 
 
 def test_shared_candidate_generation_is_excluded_from_each_condition_budget(monkeypatch) -> None:

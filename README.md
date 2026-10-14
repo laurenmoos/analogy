@@ -79,14 +79,17 @@ PYTHONPATH=src .venv/bin/python -m pytest -q
 
 ## Standalone retrieval experiment
 
-The retrieval comparison is independent of the numbered implementation plans and does not import the `analogy` package. Validate its raw benchmark, poetry, physics, and Lean inputs without loading Qwen:
+The retrieval comparison is independent of the numbered implementation plans and does not import the `analogy` package. Run the one-problem, three-condition smoke experiment with:
 
 ```bash
-.venv/bin/python scripts/standalone_analogy_recovery.py --dry-run
+./run_experiment.sh
 ```
 
-Run a one-problem, three-condition smoke experiment:
+Validate the inputs and Lean setup without loading Qwen:
 
 ```bash
-.venv/bin/python scripts/standalone_analogy_recovery.py --problem imp_intro_01 --poetry-limit 8 --physics-limit 8 --retrieval-count 2
+./run_experiment.sh --dry-run
 ```
+
+Additional options are passed to the standalone Python program. For example,
+`./run_experiment.sh --problem imp_elim_01` selects another benchmark problem.

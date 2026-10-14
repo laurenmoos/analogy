@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -588,3 +589,193 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
             model_factory=lambda _: model,
             verifier_factory=lambda _: CompletingVerifier(module),
         )
+
+
+def test_dry_run_validates_real_inputs_without_loading_model(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_script()
+    monkeypatch.setattr(
+        module.QwenModel,
+        "load",
+        classmethod(lambda cls, *args, **kwargs: pytest.fail("model must not load")),
+    )
+
+    status = module.main(
+        [
+            "--dry-run",
+            "--poetry-limit",
+            "2",
+            "--physics-limit",
+            "2",
+            "--problem",
+            "imp_intro_01",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert status == 0
+    assert output["problem_count"] == 1
+    assert output["transition_counts"] == {"physics": 2, "poetry": 2}
+    assert output["condition_count"] == 3
+    assert output["lean_available"] is True
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--dry-run", "--poetry-limit", "0"],
+        ["--dry-run", "--physics-limit", "0"],
+        ["--dry-run", "--poetry-limit", "1", "--physics-limit", "1", "--retrieval-count", "3"],
+        ["--dry-run", "--condition", "none", "--condition", "none"],
+        ["--dry-run", "--problem", "unknown_problem"],
+    ],
+)
+def test_cli_rejects_invalid_experiment_arguments(arguments, capsys) -> None:
+    module = load_script()
+    assert module.main(arguments) == 2
+    assert capsys.readouterr().err
+
+
+def test_cli_rejects_missing_input_and_existing_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_script()
+    missing = tmp_path / "missing.json"
+    assert module.main(["--dry-run", "--problems", str(missing)]) == 2
+    assert capsys.readouterr().err
+
+    output = tmp_path / "occupied"
+    output.mkdir()
+    (output / "keep").write_text("user data", encoding="utf-8")
+    assert module.main(["--output-dir", str(output), "--problem", "imp_intro_01"]) == 2
+    assert capsys.readouterr().err
+
+
+def test_cli_rejects_unavailable_lean(monkeypatch, capsys) -> None:
+    module = load_script()
+    monkeypatch.setattr(module.shutil, "which", lambda executable: None)
+    assert module.main(["--dry-run", "--problem", "imp_intro_01"]) == 2
+    assert "lake" in capsys.readouterr().err
+
+
+def test_three_condition_smoke_uses_real_lean_and_shared_pool(tmp_path: Path) -> None:
+    module = load_script()
+    model = ExperimentModel(module)
+    problem = module.Problem("identity", "(P : Prop) (h : P)", "P")
+    transitions = (
+        module.Transition("p", "poetry", "closed", "open", {}),
+        module.Transition("f", "physics", "off", "on", {}),
+    )
+    project = Path(__file__).resolve().parents[1] / "src" / "analogy" / "lean_gym" / "lean_project"
+    config = module.ExperimentConfig(
+        problems=(problem,),
+        reference_proofs={"identity": module.ReferenceProof("identity", ("exact h",))},
+        transitions=transitions,
+        conditions=(module.Condition.NONE, module.Condition.RANDOM, module.Condition.ANALOGY),
+        seeds=(0,),
+        output_dir=tmp_path / "real-lean-run",
+        cache_dir=tmp_path / "cache",
+        hidden_layer=-1,
+        retrieval_count=1,
+        search_limits=module.SearchLimits(2, 4, 10.0, top_k=1),
+        model_name="fake",
+    )
+
+    output = module.run_experiment(
+        config,
+        model_factory=lambda _: model,
+        verifier_factory=lambda _: module.LeanVerifier(project, timeout_seconds=10.0),
+    )
+
+    trials = [json.loads(line) for line in (output / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
+    attempts = [json.loads(line) for line in (output / "attempts.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(trials) == 3
+    assert {row["condition"] for row in trials} == {"none", "random", "analogy"}
+    assert all(row["solved"] for row in trials)
+    assert {tuple(row["candidates"]) for row in attempts} == {("exact h",)}
+    candidate_calls = [call for call in model.generation_calls if "candidate-v1" in call[0][0].content]
+    assert len(candidate_calls) == 1
+
+
+def test_direct_script_execution_defines_all_helpers_before_main(tmp_path: Path) -> None:
+    problems = tmp_path / "problems.json"
+    proofs = tmp_path / "proofs.json"
+    poetry = tmp_path / "poetry.ndjson.gz"
+    physics = tmp_path / "physics.jsonl"
+    problems.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": {"repository": "test", "license": "MIT"},
+                "problems": [
+                    {
+                        "id": "identity",
+                        "title": "Identity",
+                        "binders": "(P : Prop)",
+                        "target": "P → P",
+                        "source_path": "test",
+                        "source_level": "test",
+                        "connective": "implication",
+                        "difficulty": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    proofs.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "proofs": [{"problem_id": "identity", "tactics": ["intro h", "exact h"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with gzip.open(poetry, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"gid": "a", "s": "closed"}) + "\n")
+        handle.write(json.dumps({"gid": "a", "s": "open"}) + "\n")
+    physics.write_text(
+        json.dumps(
+            {
+                "example_id": "e",
+                "stories": [{"story_id": 0, "sentences": ["off", "on"], "plausible": True}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lean_project = Path(__file__).resolve().parents[1] / "src" / "analogy" / "lean_gym" / "lean_project"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--dry-run",
+            "--problems",
+            str(problems),
+            "--reference-proofs",
+            str(proofs),
+            "--poetry",
+            str(poetry),
+            "--physics",
+            str(physics),
+            "--lean-project",
+            str(lean_project),
+            "--poetry-limit",
+            "1",
+            "--physics-limit",
+            "1",
+            "--retrieval-count",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["problem_count"] == 1

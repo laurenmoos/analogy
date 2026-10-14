@@ -8,6 +8,7 @@ experiment can be inspected and run independently of the numbered plans.
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import hashlib
 import heapq
@@ -16,7 +17,9 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -1569,6 +1572,222 @@ def run_experiment(
     return output
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Standalone poetry/physics retrieval experiment for Lean tactic recovery"
+    )
+    parser.add_argument("--dry-run", action="store_true", help="validate inputs without loading Qwen")
+    parser.add_argument("--problems", type=Path, default=REPOSITORY_ROOT / "src/analogy/lean_gym/corpus/problems.json")
+    parser.add_argument(
+        "--reference-proofs",
+        type=Path,
+        default=REPOSITORY_ROOT / "src/analogy/lean_gym/corpus/reference_proofs.json",
+    )
+    parser.add_argument(
+        "--lean-project",
+        type=Path,
+        default=REPOSITORY_ROOT / "src/analogy/lean_gym/lean_project",
+    )
+    parser.add_argument(
+        "--poetry",
+        type=Path,
+        default=Path("/tmp/analogy-data/gutenberg-poetry-v001.ndjson.gz"),
+    )
+    parser.add_argument(
+        "--physics",
+        type=Path,
+        default=Path("/tmp/analogy-data/trip-ClozeTrain.jsonl"),
+    )
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--cache-dir", type=Path, default=Path("/tmp/analogy-data/standalone-cache"))
+    parser.add_argument("--problem", action="append", dest="problem_ids")
+    parser.add_argument("--condition", action="append", choices=[item.value for item in Condition])
+    parser.add_argument("--seed", action="append", type=int)
+    parser.add_argument("--poetry-limit", type=int, default=64)
+    parser.add_argument("--physics-limit", type=int, default=64)
+    parser.add_argument("--retrieval-count", type=int, default=4)
+    parser.add_argument("--candidate-count", type=int, default=8)
+    parser.add_argument("--max-expansions", type=int, default=32)
+    parser.add_argument("--max-verifier-calls", type=int, default=256)
+    parser.add_argument("--theorem-timeout", type=float, default=300.0)
+    parser.add_argument("--lean-timeout", type=float, default=10.0)
+    parser.add_argument("--lake-executable", default="lake")
+    parser.add_argument("--model-name", default="Qwen/Qwen3-8B")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--hidden-layer", type=int, default=-1)
+    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--model-timeout", type=float, default=60.0)
+    return parser
+
+
+def _require_positive(value: int | float, field: str) -> None:
+    if isinstance(value, bool) or value <= 0:
+        raise ExperimentError(f"{field} must be positive")
+
+
+def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str, dict[str, int]]:
+    for value, field in (
+        (args.poetry_limit, "poetry-limit"),
+        (args.physics_limit, "physics-limit"),
+        (args.retrieval_count, "retrieval-count"),
+        (args.candidate_count, "candidate-count"),
+        (args.max_expansions, "max-expansions"),
+        (args.max_verifier_calls, "max-verifier-calls"),
+        (args.theorem_timeout, "theorem-timeout"),
+        (args.lean_timeout, "lean-timeout"),
+        (args.max_new_tokens, "max-new-tokens"),
+        (args.model_timeout, "model-timeout"),
+    ):
+        _require_positive(value, field)
+    if args.problem_ids and len(set(args.problem_ids)) != len(args.problem_ids):
+        raise ExperimentError("problem selections must be unique")
+    requested_conditions = args.condition or [item.value for item in Condition]
+    if len(set(requested_conditions)) != len(requested_conditions):
+        raise ExperimentError("condition selections must be unique")
+    conditions = tuple(Condition(item) for item in requested_conditions)
+    if Condition.NONE not in conditions:
+        raise ExperimentError("conditions must include none for paired evaluation")
+    if (
+        any(condition is not Condition.NONE for condition in conditions)
+        and args.retrieval_count > args.poetry_limit + args.physics_limit
+    ):
+        raise ExperimentError("retrieval-count exceeds the configured transition index")
+    seeds = tuple(args.seed or [0])
+    if len(set(seeds)) != len(seeds):
+        raise ExperimentError("seed selections must be unique")
+    if args.output_dir is not None and Path(args.output_dir).exists():
+        raise ExperimentError(f"output directory already exists: {args.output_dir}")
+    for path, field in (
+        (args.problems, "problems"),
+        (args.reference_proofs, "reference-proofs"),
+        (args.poetry, "poetry"),
+        (args.physics, "physics"),
+    ):
+        if not Path(path).is_file():
+            raise ExperimentError(f"{field} file does not exist: {path}")
+    if not Path(args.lean_project).is_dir():
+        raise ExperimentError(f"Lean project does not exist: {args.lean_project}")
+    lake_path = shutil.which(args.lake_executable)
+    if lake_path is None:
+        raise ExperimentError(f"lake executable is unavailable: {args.lake_executable}")
+    problems, references = load_benchmark(args.problems, args.reference_proofs)
+    by_id = {item.id: item for item in problems}
+    if args.problem_ids:
+        unknown = sorted(set(args.problem_ids) - by_id.keys())
+        if unknown:
+            raise ExperimentError(f"unknown problem IDs: {unknown}")
+        problems = tuple(by_id[item] for item in args.problem_ids)
+        references = {item.id: references[item.id] for item in problems}
+    poetry = _reservoir_sample(
+        iter_poetry_transitions(args.poetry),
+        args.poetry_limit,
+        random.Random(f"{seeds[0]}:poetry"),
+    )
+    physics = _reservoir_sample(
+        iter_physics_transitions(args.physics),
+        args.physics_limit,
+        random.Random(f"{seeds[0]}:physics"),
+    )
+    if len(poetry) != args.poetry_limit:
+        raise ExperimentError(
+            f"poetry corpus supplied {len(poetry)} transitions, expected {args.poetry_limit}"
+        )
+    if len(physics) != args.physics_limit:
+        raise ExperimentError(
+            f"physics corpus supplied {len(physics)} transitions, expected {args.physics_limit}"
+        )
+    transitions = poetry + physics
+    if any(condition is not Condition.NONE for condition in conditions) and args.retrieval_count > len(transitions):
+        raise ExperimentError("retrieval-count exceeds the eligible transition index")
+    output = args.output_dir or (
+        REPOSITORY_ROOT / "results" / f"standalone-{uuid.uuid4().hex}"
+    )
+    if Path(output).exists():
+        raise ExperimentError(f"output directory already exists: {output}")
+    limits = SearchLimits(
+        args.max_expansions,
+        args.max_verifier_calls,
+        args.theorem_timeout,
+        top_k=args.candidate_count,
+    )
+    config = ExperimentConfig(
+        problems=problems,
+        reference_proofs=references,
+        transitions=transitions,
+        conditions=conditions,
+        seeds=seeds,
+        output_dir=output,
+        cache_dir=args.cache_dir,
+        hidden_layer=args.hidden_layer,
+        retrieval_count=args.retrieval_count,
+        search_limits=limits,
+        model_name=args.model_name,
+        device=args.device,
+        max_new_tokens=args.max_new_tokens,
+        model_timeout_seconds=args.model_timeout,
+    )
+    counts = {"poetry": len(poetry), "physics": len(physics)}
+    return config, Path(args.lean_project), lake_path, counts
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    started = False
+    try:
+        config, lean_project, lake_path, transition_counts = _resolve_cli(args)
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "problem_count": len(config.problems),
+                        "condition_count": len(config.conditions),
+                        "seed_count": len(config.seeds),
+                        "transition_counts": transition_counts,
+                        "lean_available": True,
+                        "model_loaded": False,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        started = True
+        output = run_experiment(
+            config,
+            model_factory=lambda resolved: QwenModel.load(
+                resolved.model_name,
+                resolved.device,
+                resolved.max_new_tokens,
+                resolved.model_timeout_seconds,
+            ),
+            verifier_factory=lambda _: LeanVerifier(
+                lean_project,
+                timeout_seconds=args.lean_timeout,
+                lake_executable=lake_path,
+            ),
+        )
+        summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+        print(
+            json.dumps(
+                {
+                    "output_dir": str(output),
+                    "trial_count": summary["trial_count"],
+                    "conditions": summary["conditions"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    except (ExperimentError, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if started else 2
+
+
 def masked_problem_payload(problem: Problem) -> dict[str, str]:
     """Return the only benchmark fields allowed to enter inference prompts."""
 
@@ -1782,4 +2001,8 @@ def sample_transitions(
     poetry_sample = _reservoir_sample(poetry, per_domain, random.Random(f"{seed}:poetry"))
     physics_sample = _reservoir_sample(physics, per_domain, random.Random(f"{seed}:physics"))
     return poetry_sample + physics_sample
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 

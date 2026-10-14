@@ -76,3 +76,17 @@ Run the complete preservation suite with:
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q
 ```
+
+## Standalone retrieval experiment
+
+The retrieval comparison is independent of the numbered implementation plans and does not import the `analogy` package. Validate its raw benchmark, poetry, physics, and Lean inputs without loading Qwen:
+
+```bash
+.venv/bin/python scripts/standalone_analogy_recovery.py --dry-run
+```
+
+Run a one-problem, three-condition smoke experiment:
+
+```bash
+.venv/bin/python scripts/standalone_analogy_recovery.py --problem imp_intro_01 --poetry-limit 8 --physics-limit 8 --retrieval-count 2
+```

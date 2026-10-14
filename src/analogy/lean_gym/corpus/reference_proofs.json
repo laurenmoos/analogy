@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {"problem_id":"and_intro_01","tactics":["exact todo_list"]},
+    {"problem_id":"and_intro_02","tactics":["exact ⟨p, s⟩"]},
+    {"problem_id":"and_intro_03","tactics":["exact ⟨⟨a, i⟩, ⟨o, u⟩⟩"]},
+    {"problem_id":"and_intro_04","tactics":["exact vm.left"]},
+    {"problem_id":"and_intro_05","tactics":["exact h.right"]},
+    {"problem_id":"imp_intro_01","tactics":["exact bakery_service p"]},
+    {"problem_id":"imp_intro_02","tactics":["exact fun h => h"]},
+    {"problem_id":"imp_intro_03","tactics":["exact fun h => ⟨h.right, h.left⟩"]},
+    {"problem_id":"imp_intro_04","tactics":["exact fun c => h2 (h1 c)"]},
+    {"problem_id":"imp_intro_05","tactics":["exact h5 (h3 (h1 p))"]},
+    {"problem_id":"or_intro_01","tactics":["exact Or.inl s"]},
+    {"problem_id":"or_intro_03","tactics":["exact h3.elim h1 h2"]},
+    {"problem_id":"or_intro_04","tactics":["exact h.elim Or.inr Or.inl"]},
+    {"problem_id":"or_intro_05","tactics":["exact h2.elim (fun c => Or.inl (h1 c)) Or.inr"]},
+    {"problem_id":"or_intro_06","tactics":["rcases h with g | hu","· exact ⟨Or.inl g, Or.inl g⟩","· exact ⟨Or.inr hu.left, Or.inr hu.right⟩"]},
+    {"problem_id":"iff_intro_01","tactics":["exact ⟨hsj, hjs⟩"]},
+    {"problem_id":"iff_intro_02","tactics":["exact ⟨h.mp, h.mpr⟩"]},
+    {"problem_id":"iff_intro_03","tactics":["exact fun p => h1.mp (h2 p)"]},
+    {"problem_id":"iff_intro_04","tactics":["exact fun r => h2 (h1.mpr r)"]},
+    {"problem_id":"iff_intro_05","tactics":["rw [h1]","exact h2"]},
+    {"problem_id":"not_intro_01","tactics":["exact fun f => f"]},
+    {"problem_id":"not_intro_02","tactics":["exact fun s => False.elim (h s)"]},
+    {"problem_id":"not_intro_03","tactics":["exact fun np => np p"]},
+    {"problem_id":"not_intro_04","tactics":["exact fun h => h.right h.left"]},
+    {"problem_id":"not_intro_05","tactics":["exact fun b => h2 (h1 b)"]}
+  ]
+}

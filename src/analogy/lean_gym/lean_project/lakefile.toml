@@ -1,0 +1,6 @@
+name = "LeanGym"
+version = "0.1.0"
+defaultTargets = ["LeanGym"]
+
+[[lean_lib]]
+name = "LeanGym"

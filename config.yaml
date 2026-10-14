@@ -1,0 +1,37 @@
+experiment:
+  stage: baseline
+  minimum_solved: 1
+
+model:
+  name: Qwen/Qwen3-8B
+  device: auto
+  hidden_layer: -1
+  max_new_tokens: 256
+  timeout_seconds: 60.0
+  do_sample: false
+  temperature: 0.3
+  top_p: 0.9
+
+benchmark:
+  corpus: src/analogy/lean_gym/corpus/problems.json
+
+search:
+  top_k: 8
+  max_steps: 32
+  stuck_after: 3
+
+analogy:
+  enabled: false
+  samples: 4
+
+rl:
+  enabled: false
+  algorithm: reinforce
+
+run:
+  output_dir: runs
+  seed: 0
+
+data:
+  root: /tmp/analogy-data
+

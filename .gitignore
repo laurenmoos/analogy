@@ -3,6 +3,7 @@ node_modules/
 .idea/
 .pytest_cache/
 .superpowers/
+.worktrees/
 data/
 results/
 .venv/

@@ -99,6 +99,13 @@ def test_ranking_parser_appends_omitted_indices_in_original_order() -> None:
     assert module.parse_ranking("[2, 0]", candidate_count=4) == (2, 0, 1, 3)
 
 
+def test_ranking_parser_accepts_qwen_json_code_fence() -> None:
+    module = load_script()
+    assert module.parse_ranking(
+        "```json\n[0, 1, 2, 3]\n```", candidate_count=4
+    ) == (0, 1, 2, 3)
+
+
 class FakeBatch(dict):
     def __init__(self, torch_module) -> None:
         super().__init__(

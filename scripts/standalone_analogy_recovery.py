@@ -319,8 +319,18 @@ def parse_ranking(text: str, candidate_count: int) -> tuple[int, ...]:
         raise ExperimentError("candidate_count must be a positive integer")
     try:
         value = json.loads(text)
-    except (json.JSONDecodeError, TypeError) as error:
-        raise ModelOutputError("ranking output must be valid JSON") from error
+    except (json.JSONDecodeError, TypeError) as direct_error:
+        fenced = (
+            re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, re.DOTALL | re.IGNORECASE)
+            if isinstance(text, str)
+            else None
+        )
+        if fenced is None:
+            raise ModelOutputError("ranking output must be valid JSON") from direct_error
+        try:
+            value = json.loads(fenced.group(1))
+        except json.JSONDecodeError as fenced_error:
+            raise ModelOutputError("ranking output must be valid JSON") from fenced_error
     if not isinstance(value, list):
         raise ModelOutputError("ranking output must be an array")
     result: list[int] = []

@@ -369,7 +369,7 @@ class FixedPoolStore:
 
 
 class IdentityRanker:
-    def rank(self, condition, problem, state, candidates, seed):
+    def rank(self, condition, problem, state, accepted, failed, candidates, seed, deadline=None):
         module = load_script()
         return module.RankingDecision(candidates, tuple(range(len(candidates))))
 
@@ -779,3 +779,197 @@ def test_direct_script_execution_defines_all_helpers_before_main(tmp_path: Path)
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["problem_count"] == 1
+
+
+def test_shared_candidate_generation_is_excluded_from_each_condition_budget(monkeypatch) -> None:
+    module = load_script()
+    clock = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    class SlowFirstPool(FixedPoolStore):
+        used = False
+
+        def get(self, *args, **kwargs):
+            if not self.used:
+                clock[0] += 2.0
+                self.used = True
+            return super().get(*args, **kwargs)
+
+    result = module.search_problem(
+        module.Problem("identity", "(P : Prop) (h : P)", "P"),
+        module.Condition.NONE,
+        0,
+        SlowFirstPool(("exact h",)),
+        IdentityRanker(),
+        CompletingVerifier(module),
+        module.SearchLimits(1, 1, 1.0, top_k=1),
+        list().append,
+    )
+
+    assert result.solved is True
+
+
+def test_late_verifier_completion_is_rejected(monkeypatch) -> None:
+    module = load_script()
+    clock = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    class LateVerifier(CompletingVerifier):
+        def try_tactic(self, problem, prefix, candidate, timeout_seconds=None):
+            clock[0] += 100.0
+            return complete_result(self.module)
+
+    result = module.search_problem(
+        module.Problem("identity", "(P : Prop) (h : P)", "P"),
+        module.Condition.NONE,
+        0,
+        FixedPoolStore(("exact h",)),
+        IdentityRanker(),
+        LateVerifier(module),
+        module.SearchLimits(1, 1, 1.0, top_k=1),
+        list().append,
+    )
+
+    assert result.solved is False
+    assert result.status == "timeout"
+
+
+def test_operational_failure_writes_incomplete_artifacts(tmp_path: Path) -> None:
+    module = load_script()
+
+    class FailingModel(ExperimentModel):
+        def generate(self, messages, *, seed: int, **kwargs):
+            if "candidate-v1" in messages[0].content:
+                raise TimeoutError("model stalled")
+            return super().generate(messages, seed=seed)
+
+    problem = module.Problem("identity", "(P : Prop) (h : P)", "P")
+    output = tmp_path / "failed-run"
+    config = module.ExperimentConfig(
+        problems=(problem,),
+        reference_proofs={"identity": module.ReferenceProof("identity", ("exact h",))},
+        transitions=(),
+        conditions=(module.Condition.NONE,),
+        seeds=(0,),
+        output_dir=output,
+        cache_dir=None,
+        hidden_layer=-1,
+        retrieval_count=1,
+        search_limits=module.SearchLimits(1, 1, 5.0, top_k=1),
+        model_name="fake",
+    )
+
+    with pytest.raises(module.ExperimentRunIncomplete):
+        module.run_experiment(
+            config,
+            model_factory=lambda _: FailingModel(module),
+            verifier_factory=lambda _: CompletingVerifier(module),
+        )
+
+    assert json.loads((output / "config.json").read_text())["run_complete"] is False
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["run_complete"] is False
+    assert summary["operational_failures"][0]["status"] == "model_failure"
+
+
+def test_retrieval_query_uses_prefix_failures_and_is_persisted(tmp_path: Path) -> None:
+    module = load_script()
+    model = ExperimentModel(module)
+    problem = module.Problem("identity", "(P : Prop) (h : P)", "P")
+    index = module.build_index(
+        (module.Transition("p", "poetry", "closed", "open", {}),),
+        model,
+        tmp_path / "cache",
+        -1,
+    )
+
+    decision = module.rank_for_condition(
+        module.Condition.ANALOGY,
+        problem,
+        "h : P\n⊢ P",
+        ("exact h",),
+        None,
+        index,
+        model,
+        1,
+        0,
+        accepted=("intro h",),
+        failed=("assumption",),
+    )
+
+    rendered = "\n".join(
+        message.content for messages, _ in model.generation_calls for message in messages
+    )
+    assert "intro h" in rendered
+    assert "assumption" in rendered
+    assert decision.proof_need.description in rendered
+
+
+def test_manifest_records_inputs_model_lean_environment_and_problem_statements(tmp_path: Path) -> None:
+    module = load_script()
+    problem = module.Problem("identity", "(P : Prop) (h : P)", "P")
+    config = module.ExperimentConfig(
+        problems=(problem,),
+        reference_proofs={"identity": module.ReferenceProof("identity", ("exact h",))},
+        transitions=(),
+        conditions=(module.Condition.NONE,),
+        seeds=(7,),
+        output_dir=tmp_path / "run",
+        cache_dir=None,
+        hidden_layer=-1,
+        retrieval_count=1,
+        search_limits=module.SearchLimits(1, 1, 5.0, top_k=1),
+        model_name="fake",
+        input_manifest={"problems": {"path": "/data/problems.json", "sha256": "abc"}},
+        lean_configuration={"project": "/lean", "version": "Lean 4.x"},
+    )
+
+    module.run_experiment(
+        config,
+        model_factory=lambda _: ExperimentModel(module),
+        verifier_factory=lambda _: CompletingVerifier(module),
+    )
+    manifest = json.loads((config.output_dir / "config.json").read_text())
+    attempt = json.loads((config.output_dir / "attempts.jsonl").read_text().splitlines()[0])
+
+    assert manifest["inputs"]["problems"]["sha256"] == "abc"
+    assert manifest["problems"][0]["target"] == "P"
+    assert manifest["model"]["resolved_revision"] == "spy-revision"
+    assert manifest["lean"]["version"] == "Lean 4.x"
+    assert manifest["environment"]["python"]
+    assert attempt["operation_seeds"]["candidate"]
+
+
+def test_none_only_cli_accepts_missing_and_short_retrieval_corpora(tmp_path: Path) -> None:
+    module = load_script()
+    parser = module.build_parser()
+    args = parser.parse_args(
+        [
+            "--dry-run",
+            "--condition", "none",
+            "--poetry", str(tmp_path / "missing-poetry.gz"),
+            "--physics", str(tmp_path / "missing-physics.jsonl"),
+            "--problem", "imp_intro_01",
+        ]
+    )
+
+    config, _, _, counts = module._resolve_cli(args)
+
+    assert config.transitions == ()
+    assert counts == {"poetry": 0, "physics": 0}
+
+
+def test_dry_run_probes_lean_instead_of_trusting_executable_path(tmp_path: Path, capsys) -> None:
+    module = load_script()
+    status = module.main(
+        [
+            "--dry-run",
+            "--condition", "none",
+            "--lean-project", str(tmp_path),
+            "--lake-executable", "/usr/bin/false",
+            "--problem", "imp_intro_01",
+        ]
+    )
+
+    assert status == 2
+    assert "Lean" in capsys.readouterr().err

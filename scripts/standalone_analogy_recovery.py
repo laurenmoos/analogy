@@ -12,9 +12,11 @@ import argparse
 import gzip
 import hashlib
 import heapq
+import inspect
 import json
 import math
 import os
+import platform
 import random
 import re
 import shutil
@@ -24,7 +26,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -41,6 +43,10 @@ class ModelOutputError(ExperimentError):
 
 class ModelConfigurationError(ExperimentError):
     """Raised when the configured model cannot satisfy the experiment."""
+
+
+class ExperimentRunIncomplete(ExperimentError):
+    """Raised after preserving artifacts for a run with operational failures."""
 
 
 def _nonblank(value: Any, field: str, *, allow_empty: bool = False) -> str:
@@ -247,6 +253,7 @@ def ranking_prompt(
     state: str,
     candidates: tuple[str, ...],
     transformations: tuple[str, ...],
+    proof_need: str | None = None,
 ) -> tuple[Message, ...]:
     payload = masked_problem_payload(problem)
     numbered = "\n".join(f"{index}: {item}" for index, item in enumerate(candidates))
@@ -260,6 +267,7 @@ def ranking_prompt(
         Message(
             "user",
             f"Overall target: {payload['target']}\nCurrent goals:\n{state}\n"
+            f"Structural proof need:\n{proof_need or '(none)'}\n"
             f"Structural transformations:\n{analogies}\nCandidates:\n{numbered}",
         ),
     )
@@ -403,20 +411,29 @@ class QwenModel:
             enable_thinking=False,
         )
 
-    def generate(self, messages: tuple[Message, ...], *, seed: int) -> str:
+    def generate(
+        self,
+        messages: tuple[Message, ...],
+        *,
+        seed: int,
+        timeout_seconds: float | None = None,
+    ) -> str:
         prompt = self._render(messages)
         inputs = self._tokenizer([prompt], return_tensors="pt").to(self._device)
         self._torch.manual_seed(seed)
+        effective_timeout = self._timeout_seconds
+        if timeout_seconds is not None:
+            effective_timeout = min(effective_timeout, max(float(timeout_seconds), 0.001))
         started = time.monotonic()
         with self._torch.inference_mode():
             generated = self._model.generate(
                 **inputs,
                 do_sample=False,
                 max_new_tokens=self._max_new_tokens,
-                max_time=self._timeout_seconds,
+                max_time=effective_timeout,
             )
-        if time.monotonic() - started >= self._timeout_seconds:
-            raise TimeoutError(f"generation exceeded {self._timeout_seconds:g} seconds")
+        if time.monotonic() - started >= effective_timeout:
+            raise TimeoutError(f"generation exceeded {effective_timeout:g} seconds")
         input_length = int(inputs["input_ids"].shape[-1])
         return self._tokenizer.decode(generated[0][input_length:], skip_special_tokens=True)
 
@@ -661,6 +678,26 @@ def random_retrieve(
     return tuple(RetrievalHit(item, None) for item in selected)
 
 
+def _generate_before_deadline(
+    model: TextModel,
+    messages: tuple[Message, ...],
+    *,
+    seed: int,
+    deadline: float | None,
+) -> str:
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("theorem timeout")
+    parameters = inspect.signature(model.generate).parameters
+    if "timeout_seconds" in parameters:
+        result = model.generate(messages, seed=seed, timeout_seconds=remaining)
+    else:
+        result = model.generate(messages, seed=seed)
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("theorem timeout")
+    return result
+
+
 def rank_for_condition(
     condition: Condition,
     problem: Problem,
@@ -673,6 +710,9 @@ def rank_for_condition(
     seed: int,
     *,
     layer: int = -1,
+    accepted: tuple[str, ...] = (),
+    failed: tuple[str, ...] = (),
+    deadline: float | None = None,
 ) -> RankingDecision:
     if not isinstance(condition, Condition):
         raise ExperimentError("condition must be a Condition")
@@ -683,13 +723,17 @@ def rank_for_condition(
     current_need = proof_need
     if condition is not Condition.NONE:
         if current_need is None:
-            description = model.generate(
-                proof_need_prompt(problem, state, (), ()),
+            description = _generate_before_deadline(
+                model,
+                proof_need_prompt(problem, state, accepted, failed),
                 seed=derived_seed(seed, problem.id, sha256_text(state), "proof-need"),
+                deadline=deadline,
             ).strip()
             if not description:
                 raise ModelOutputError("proof need description must not be blank")
             current_need = ProofNeed(description, model.embed(description, layer))
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("theorem timeout")
         if condition is Condition.ANALOGY:
             hits = cosine_retrieve(current_need.embedding, index, retrieval_count)
         else:
@@ -699,9 +743,17 @@ def rank_for_condition(
                 derived_seed(seed, problem.id, sha256_text(state), "random-retrieval"),
             )
     transformations = tuple(hit.item.transformation for hit in hits)
-    generated = model.generate(
-        ranking_prompt(problem, state, candidates, transformations),
+    generated = _generate_before_deadline(
+        model,
+        ranking_prompt(
+            problem,
+            state,
+            candidates,
+            transformations,
+            current_need.description if current_need is not None else None,
+        ),
         seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "ranking"),
+        deadline=deadline,
     )
     indices = parse_ranking(generated, len(candidates))
     return RankingDecision(candidates, indices, hits, current_need)
@@ -807,26 +859,41 @@ class LeanVerifier:
         self.max_output_bytes = max_output_bytes
         self.lake_executable = lake_executable
 
-    def initial_state(self, problem: Problem) -> LeanResult:
-        return self._state_after(problem, ())
+    def initial_state(
+        self, problem: Problem, *, timeout_seconds: float | None = None
+    ) -> LeanResult:
+        return self._state_after(problem, (), timeout_seconds=timeout_seconds)
 
     def try_tactic(
         self,
         problem: Problem,
         prefix: tuple[str, ...],
         candidate: str,
+        *,
+        timeout_seconds: float | None = None,
     ) -> LeanResult:
         invalid = self._validate_tactics(prefix + (candidate,))
         if invalid is not None:
             return invalid
-        return self._state_after(problem, prefix + (candidate,))
+        return self._state_after(
+            problem, prefix + (candidate,), timeout_seconds=timeout_seconds
+        )
 
-    def _state_after(self, problem: Problem, tactics: tuple[str, ...]) -> LeanResult:
+    def _state_after(
+        self,
+        problem: Problem,
+        tactics: tuple[str, ...],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> LeanResult:
         invalid = self._validate_tactics(tactics)
         if invalid is not None:
             return invalid
         source, trace_line = self._render_probe(problem, tactics)
-        run = self._run_lean(source)
+        local_deadline = (
+            None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        )
+        run = self._run_lean(source, timeout_seconds=timeout_seconds)
         if run.timed_out:
             return self._result(LeanStatus.TIMEOUT, False, None, run)
         if run.internal_error:
@@ -838,7 +905,14 @@ class LeanVerifier:
             if item.kind == "trace" and item.line == trace_line
         ]
         if not errors and run.exit_code == 0 and len(traces) == 1 and not traces[0].message.strip():
-            return self._verify_complete(problem, tactics)
+            remaining = (
+                None if local_deadline is None else local_deadline - time.monotonic()
+            )
+            if remaining is not None and remaining <= 0:
+                return LeanResult(
+                    LeanStatus.TIMEOUT, False, None, ("theorem timeout",), None, run.duration_ms
+                )
+            return self._verify_complete(problem, tactics, timeout_seconds=remaining)
         if errors or run.exit_code != 0 or len(traces) != 1 or not traces[0].message.strip():
             return self._result(LeanStatus.REJECTED, False, None, run)
         if not any(item.kind == "hasSorry" for item in run.diagnostics):
@@ -857,8 +931,16 @@ class LeanVerifier:
             run,
         )
 
-    def _verify_complete(self, problem: Problem, tactics: tuple[str, ...]) -> LeanResult:
-        run = self._run_lean(self._render_final(problem, tactics))
+    def _verify_complete(
+        self,
+        problem: Problem,
+        tactics: tuple[str, ...],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> LeanResult:
+        run = self._run_lean(
+            self._render_final(problem, tactics), timeout_seconds=timeout_seconds
+        )
         if run.timed_out:
             return self._result(LeanStatus.TIMEOUT, False, None, run)
         if run.internal_error:
@@ -903,8 +985,13 @@ class LeanVerifier:
         lines.extend(f"  {tactic}" for tactic in tactics)
         return "\n".join(lines) + "\n"
 
-    def _run_lean(self, source: str) -> _LeanRun:
+    def _run_lean(
+        self, source: str, *, timeout_seconds: float | None = None
+    ) -> _LeanRun:
         started = time.monotonic_ns()
+        effective_timeout = self.timeout_seconds
+        if timeout_seconds is not None:
+            effective_timeout = min(effective_timeout, max(float(timeout_seconds), 0.001))
         source_path: Path | None = None
         try:
             with tempfile.TemporaryDirectory(prefix="standalone-lean-") as directory:
@@ -919,7 +1006,7 @@ class LeanVerifier:
                     cwd=self.project_root,
                     capture_output=True,
                     text=False,
-                    timeout=self.timeout_seconds,
+                    timeout=effective_timeout,
                     check=False,
                     env=environment,
                 )
@@ -927,7 +1014,7 @@ class LeanVerifier:
             duration = (time.monotonic_ns() - started) // 1_000_000
             return _LeanRun(
                 None,
-                (_LeanDiagnostic("error", "timeout", f"Lean exceeded {self.timeout_seconds:g} seconds", None),),
+                (_LeanDiagnostic("error", "timeout", f"Lean exceeded {effective_timeout:g} seconds", None),),
                 duration,
                 timed_out=True,
             )
@@ -1026,6 +1113,8 @@ class AttemptRecord:
     retrieval_hits: tuple[str, ...] = ()
     retrieval_domains: tuple[str, ...] = ()
     retrieval_similarities: tuple[float | None, ...] = ()
+    proof_need: Mapping[str, Any] | None = None
+    operation_seeds: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1057,9 +1146,55 @@ class SearchRanker(Protocol):
         condition: Condition,
         problem: Problem,
         state: str,
+        accepted: tuple[str, ...],
+        failed: tuple[str, ...],
         candidates: tuple[str, ...],
         seed: int,
+        deadline: float | None = None,
     ) -> RankingDecision: ...
+
+
+def _call_with_remaining(call: Callable[..., Any], *args: Any, deadline: float) -> Any:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("theorem timeout")
+    parameters = inspect.signature(call).parameters
+    if "timeout_seconds" in parameters:
+        result = call(*args, timeout_seconds=remaining)
+    else:
+        result = call(*args)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("theorem timeout")
+    return result
+
+
+def _attempt_metadata(
+    decision: RankingDecision,
+    problem: Problem,
+    state: str,
+    seed: int,
+    condition: Condition,
+) -> tuple[Mapping[str, Any] | None, Mapping[str, int]]:
+    need = decision.proof_need
+    proof_need = None
+    if need is not None:
+        proof_need = {
+            "description": need.description,
+            "embedding": {
+                "text_hash": need.embedding.text_hash,
+                "model_revision": need.embedding.model_revision,
+                "layer": need.embedding.layer,
+                "token_index": need.embedding.token_index,
+                "dimension": need.embedding.dimension,
+            },
+        }
+    state_hash = sha256_text(state)
+    return proof_need, {
+        "candidate": derived_seed(seed, problem.id, state_hash, "candidates"),
+        "proof_need": derived_seed(seed, problem.id, state_hash, "proof-need"),
+        "random_retrieval": derived_seed(seed, problem.id, state_hash, "random-retrieval"),
+        "ranking": derived_seed(seed, problem.id, state_hash, condition.value, "ranking"),
+    }
 
 
 def search_problem(
@@ -1074,7 +1209,13 @@ def search_problem(
 ) -> TrialResult:
     started = time.monotonic()
     deadline = started + limits.theorem_timeout_seconds
-    initial = verifier.initial_state(problem)
+    try:
+        initial = _call_with_remaining(verifier.initial_state, problem, deadline=deadline)
+    except TimeoutError:
+        return TrialResult(
+            problem.id, condition.value, seed, "timeout", False, (), 0, 0, 0, 0, 0,
+            "theorem timeout", time.monotonic() - started,
+        )
     if initial.status is not LeanStatus.OPEN or not initial.state:
         return TrialResult(
             problem.id,
@@ -1105,6 +1246,7 @@ def search_problem(
     rejected = 0
     repeated = 0
     novel = 0
+    status = ""
 
     while frontier:
         if time.monotonic() >= deadline:
@@ -1120,6 +1262,7 @@ def search_problem(
         expansions += 1
         failed = tuple(failed_by_state.get(fingerprint, ()))
         try:
+            pool_started = time.monotonic()
             candidates = pool_store.get(
                 problem,
                 state,
@@ -1128,17 +1271,55 @@ def search_problem(
                 seed=seed,
                 top_k=limits.top_k,
             )
-            decision = ranker.rank(condition, problem, state, candidates, seed)
+            deadline += time.monotonic() - pool_started
+            decision = ranker.rank(
+                condition,
+                problem,
+                state,
+                prefix,
+                failed,
+                candidates,
+                seed,
+                deadline=deadline,
+            )
+        except TimeoutError as error:
+            if time.monotonic() >= deadline or str(error) == "theorem timeout":
+                status = "timeout"
+                failure = "theorem timeout"
+            else:
+                status = "model_failure"
+                failure = f"TimeoutError: {error}"
+            break
         except Exception as error:
             status = "model_failure"
             failure = f"{type(error).__name__}: {error}"
             break
         for candidate in decision.ordered_candidates:
-            if verifier_calls >= limits.max_verifier_calls or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
+                status = "timeout"
+                failure = "theorem timeout"
+                break
+            if verifier_calls >= limits.max_verifier_calls:
+                status = "budget_exhausted"
+                failure = "search budget exhausted"
                 break
             verifier_calls += 1
-            result = verifier.try_tactic(problem, prefix, candidate)
+            try:
+                result = _call_with_remaining(
+                    verifier.try_tactic,
+                    problem,
+                    prefix,
+                    candidate,
+                    deadline=deadline,
+                )
+            except TimeoutError:
+                status = "timeout"
+                failure = "theorem timeout"
+                break
             successor_fingerprint: str | None = None
+            proof_need, operation_seeds = _attempt_metadata(
+                decision, problem, state, seed, condition
+            )
             if result.status is LeanStatus.COMPLETE and result.accepted:
                 disposition = "complete"
                 attempt_sink(
@@ -1157,6 +1338,8 @@ def search_problem(
                         tuple(hit.item.transition.id for hit in decision.hits),
                         tuple(hit.item.transition.domain for hit in decision.hits),
                         tuple(hit.similarity for hit in decision.hits),
+                        proof_need,
+                        operation_seeds,
                     )
                 )
                 tactics = prefix + (candidate,)
@@ -1211,8 +1394,20 @@ def search_problem(
                     tuple(hit.item.transition.id for hit in decision.hits),
                     tuple(hit.item.transition.domain for hit in decision.hits),
                     tuple(hit.similarity for hit in decision.hits),
+                    proof_need,
+                    operation_seeds,
                 )
             )
+            if result.status is LeanStatus.INTERNAL_ERROR:
+                status = "verifier_failure"
+                failure = "; ".join(result.diagnostics) or "Lean verifier internal error"
+                break
+            if result.status is LeanStatus.TIMEOUT:
+                status = "timeout"
+                failure = "theorem timeout"
+                break
+        if status in {"timeout", "budget_exhausted", "verifier_failure"}:
+            break
     else:
         status = "exhausted"
         failure = "search frontier exhausted"
@@ -1250,6 +1445,8 @@ class ExperimentConfig:
     device: str = "auto"
     max_new_tokens: int = 256
     model_timeout_seconds: float = 60.0
+    input_manifest: Mapping[str, Any] = field(default_factory=dict)
+    lean_configuration: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         problems = tuple(self.problems)
@@ -1279,6 +1476,8 @@ class ExperimentConfig:
         object.__setattr__(self, "seeds", seeds)
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(self, "cache_dir", None if self.cache_dir is None else Path(self.cache_dir))
+        object.__setattr__(self, "input_manifest", MappingProxyType(dict(self.input_manifest)))
+        object.__setattr__(self, "lean_configuration", MappingProxyType(dict(self.lean_configuration)))
 
 
 def _jsonable(value: Any) -> Any:
@@ -1406,8 +1605,21 @@ def summarize_trials(trials: Sequence[TrialResult]) -> dict[str, object]:
                 if not baseline[key].solved
             ),
         }
+    operational_statuses = {"initialization_failed", "model_failure", "verifier_failure"}
+    operational_failures = [
+        {
+            "problem_id": item.problem_id,
+            "condition": item.condition,
+            "seed": item.seed,
+            "status": item.status,
+            "failure": item.failure,
+        }
+        for item in normalized
+        if item.status in operational_statuses
+    ]
     return {
-        "run_complete": True,
+        "run_complete": not operational_failures,
+        "operational_failures": operational_failures,
         "trial_count": len(normalized),
         "subgroups": {
             "baseline_solved": baseline_solved,
@@ -1436,8 +1648,11 @@ class ConditionRanker:
         condition: Condition,
         problem: Problem,
         state: str,
+        accepted: tuple[str, ...],
+        failed: tuple[str, ...],
         candidates: tuple[str, ...],
         seed: int,
+        deadline: float | None = None,
     ) -> RankingDecision:
         return rank_for_condition(
             condition,
@@ -1450,18 +1665,38 @@ class ConditionRanker:
             self.retrieval_count,
             seed,
             layer=self.layer,
+            accepted=accepted,
+            failed=failed,
+            deadline=deadline,
         )
 
 
-def _run_config_payload(config: ExperimentConfig, *, complete: bool) -> dict[str, Any]:
+def _run_config_payload(
+    config: ExperimentConfig,
+    *,
+    complete: bool,
+    model_revision: str | None = None,
+    operational_failures: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
     return {
         "run_complete": complete,
-        "problem_ids": [item.id for item in config.problems],
+        "problems": [_jsonable(item) for item in config.problems],
         "conditions": [item.value for item in config.conditions],
         "seeds": list(config.seeds),
         "transition_count": len(config.transitions),
+        "transition_counts": {
+            domain: sum(item.domain == domain for item in config.transitions)
+            for domain in ("poetry", "physics")
+        },
+        "inputs": _jsonable(config.input_manifest),
+        "lean": _jsonable(config.lean_configuration),
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+        },
         "model": {
             "name": config.model_name,
+            "resolved_revision": model_revision,
             "device": config.device,
             "hidden_layer": config.hidden_layer,
             "max_new_tokens": config.max_new_tokens,
@@ -1470,6 +1705,8 @@ def _run_config_payload(config: ExperimentConfig, *, complete: bool) -> dict[str
         "retrieval_count": config.retrieval_count,
         "search_limits": _jsonable(config.search_limits),
         "prompt_versions": dict(PROMPT_VERSIONS),
+        "operation_seed_scheme": "sha256(base_seed, problem_id, state_sha256, operation)-u64-v1",
+        "operational_failures": list(operational_failures),
     }
 
 
@@ -1568,7 +1805,21 @@ def run_experiment(
         raise ExperimentError("run did not produce exactly one result per requested trial")
     summary = summarize_trials(trials)
     _atomic_json(output / "summary.json", summary)
-    _atomic_json(output / "config.json", _run_config_payload(config, complete=True))
+    failures = summary["operational_failures"]
+    complete = bool(summary["run_complete"])
+    _atomic_json(
+        output / "config.json",
+        _run_config_payload(
+            config,
+            complete=complete,
+            model_revision=model.model_revision,
+            operational_failures=failures,
+        ),
+    )
+    if not complete:
+        raise ExperimentRunIncomplete(
+            f"experiment preserved {len(failures)} operational failure(s) in {output}"
+        )
     return output
 
 
@@ -1628,6 +1879,42 @@ def _require_positive(value: int | float, field: str) -> None:
         raise ExperimentError(f"{field} must be positive")
 
 
+def _file_manifest(path: Path) -> dict[str, str]:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"path": str(Path(path).resolve()), "sha256": digest.hexdigest()}
+
+
+def _probe_lean(project: Path, lake_path: str, timeout_seconds: float) -> dict[str, Any]:
+    environment = {**os.environ, "ELAN_TOOLCHAIN": "leanprover/lean4:v4.29.1"}
+    try:
+        completed = subprocess.run(
+            [lake_path, "env", "lean", "--version"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ExperimentError(f"Lean probe failed: {error}") from error
+    version = (completed.stdout + completed.stderr).strip()
+    if completed.returncode != 0 or not version:
+        raise ExperimentError(
+            f"Lean probe failed with exit code {completed.returncode}: {version or '(no output)'}"
+        )
+    return {
+        "project": str(Path(project).resolve()),
+        "lake_executable": str(Path(lake_path).resolve()),
+        "toolchain": environment["ELAN_TOOLCHAIN"],
+        "version": version,
+        "per_call_timeout_seconds": timeout_seconds,
+    }
+
+
 def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str, dict[str, int]]:
     for value, field in (
         (args.poetry_limit, "poetry-limit"),
@@ -1663,16 +1950,20 @@ def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str,
     for path, field in (
         (args.problems, "problems"),
         (args.reference_proofs, "reference-proofs"),
-        (args.poetry, "poetry"),
-        (args.physics, "physics"),
     ):
         if not Path(path).is_file():
             raise ExperimentError(f"{field} file does not exist: {path}")
+    needs_retrieval = any(condition is not Condition.NONE for condition in conditions)
+    if needs_retrieval:
+        for path, field in ((args.poetry, "poetry"), (args.physics, "physics")):
+            if not Path(path).is_file():
+                raise ExperimentError(f"{field} file does not exist: {path}")
     if not Path(args.lean_project).is_dir():
         raise ExperimentError(f"Lean project does not exist: {args.lean_project}")
     lake_path = shutil.which(args.lake_executable)
     if lake_path is None:
         raise ExperimentError(f"lake executable is unavailable: {args.lake_executable}")
+    lean_configuration = _probe_lean(Path(args.lean_project), lake_path, args.lean_timeout)
     problems, references = load_benchmark(args.problems, args.reference_proofs)
     by_id = {item.id: item for item in problems}
     if args.problem_ids:
@@ -1681,24 +1972,24 @@ def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str,
             raise ExperimentError(f"unknown problem IDs: {unknown}")
         problems = tuple(by_id[item] for item in args.problem_ids)
         references = {item.id: references[item.id] for item in problems}
-    poetry = _reservoir_sample(
-        iter_poetry_transitions(args.poetry),
-        args.poetry_limit,
-        random.Random(f"{seeds[0]}:poetry"),
-    )
-    physics = _reservoir_sample(
-        iter_physics_transitions(args.physics),
-        args.physics_limit,
-        random.Random(f"{seeds[0]}:physics"),
-    )
-    if len(poetry) != args.poetry_limit:
-        raise ExperimentError(
-            f"poetry corpus supplied {len(poetry)} transitions, expected {args.poetry_limit}"
+    poetry = (
+        _reservoir_sample(
+            iter_poetry_transitions(args.poetry),
+            args.poetry_limit,
+            random.Random(f"{seeds[0]}:poetry"),
         )
-    if len(physics) != args.physics_limit:
-        raise ExperimentError(
-            f"physics corpus supplied {len(physics)} transitions, expected {args.physics_limit}"
+        if needs_retrieval
+        else ()
+    )
+    physics = (
+        _reservoir_sample(
+            iter_physics_transitions(args.physics),
+            args.physics_limit,
+            random.Random(f"{seeds[0]}:physics"),
         )
+        if needs_retrieval
+        else ()
+    )
     transitions = poetry + physics
     if any(condition is not Condition.NONE for condition in conditions) and args.retrieval_count > len(transitions):
         raise ExperimentError("retrieval-count exceeds the eligible transition index")
@@ -1728,6 +2019,19 @@ def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str,
         device=args.device,
         max_new_tokens=args.max_new_tokens,
         model_timeout_seconds=args.model_timeout,
+        input_manifest={
+            "problems": _file_manifest(args.problems),
+            "reference_proofs": _file_manifest(args.reference_proofs),
+            **(
+                {
+                    "poetry": _file_manifest(args.poetry),
+                    "physics": _file_manifest(args.physics),
+                }
+                if needs_retrieval
+                else {}
+            ),
+        },
+        lean_configuration=lean_configuration,
     )
     counts = {"poetry": len(poetry), "physics": len(physics)}
     return config, Path(args.lean_project), lake_path, counts

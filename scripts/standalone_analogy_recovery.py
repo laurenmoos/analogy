@@ -15,6 +15,7 @@ import math
 import random
 import re
 import time
+import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -440,6 +441,291 @@ class QwenModel:
             model_revision=self.model_revision,
             text_hash=sha256_text(text),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedTransition:
+    transition: Transition
+    transformation: str
+    embedding: Embedding
+    cache_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.transition, Transition):
+            raise ExperimentError("indexed transition requires a Transition")
+        _nonblank(self.transformation, "indexed_transition.transformation")
+        if not isinstance(self.embedding, Embedding):
+            raise ExperimentError("indexed transition requires an Embedding")
+        _nonblank(self.cache_key, "indexed_transition.cache_key")
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalHit:
+    item: IndexedTransition
+    similarity: float | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item, IndexedTransition):
+            raise ExperimentError("retrieval hit requires an IndexedTransition")
+        if self.similarity is not None and not math.isfinite(float(self.similarity)):
+            raise ExperimentError("retrieval similarity must be finite or None")
+
+
+@dataclass(frozen=True, slots=True)
+class ProofNeed:
+    description: str
+    embedding: Embedding
+
+    def __post_init__(self) -> None:
+        _nonblank(self.description, "proof_need.description")
+        if not isinstance(self.embedding, Embedding):
+            raise ExperimentError("proof need requires an Embedding")
+
+
+@dataclass(frozen=True, slots=True)
+class RankingDecision:
+    candidates: tuple[str, ...]
+    indices: tuple[int, ...]
+    hits: tuple[RetrievalHit, ...] = ()
+    proof_need: ProofNeed | None = None
+
+    def __post_init__(self) -> None:
+        candidates = tuple(self.candidates)
+        indices = tuple(self.indices)
+        hits = tuple(self.hits)
+        if not candidates or len(indices) != len(candidates) or set(indices) != set(range(len(candidates))):
+            raise ExperimentError("ranking decision must be a permutation of candidates")
+        if not all(isinstance(item, RetrievalHit) for item in hits):
+            raise ExperimentError("ranking hits must contain RetrievalHit values")
+        object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "indices", indices)
+        object.__setattr__(self, "hits", hits)
+
+    @property
+    def ordered_candidates(self) -> tuple[str, ...]:
+        return tuple(self.candidates[index] for index in self.indices)
+
+
+def derived_seed(seed: int, *parts: str) -> int:
+    material = "\x1f".join((str(seed), *parts))
+    return int.from_bytes(hashlib.sha256(material.encode("utf-8")).digest()[:8], "big")
+
+
+def transformation_cache_key(
+    transition: Transition,
+    model_revision: str,
+    layer: int,
+    prompt_version: str,
+) -> str:
+    payload = {
+        "transition": {
+            "id": transition.id,
+            "domain": transition.domain,
+            "before": transition.before,
+            "after": transition.after,
+            "provenance": dict(transition.provenance),
+        },
+        "model_revision": model_revision,
+        "layer": layer,
+        "prompt_version": prompt_version,
+        "pooling": "final-nonpadding-l2-float32-v1",
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256_text(encoded)
+
+
+def _cached_index_item(path: Path, transition: Transition, expected_key: str) -> IndexedTransition:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ExperimentError(f"invalid transition cache {path}: {error}") from error
+    if not isinstance(raw, dict) or raw.get("cache_key") != expected_key or raw.get("transition_id") != transition.id:
+        raise ExperimentError(f"transition cache identity mismatch: {path}")
+    embedding_raw = raw.get("embedding")
+    if not isinstance(embedding_raw, dict):
+        raise ExperimentError(f"transition cache embedding is invalid: {path}")
+    try:
+        embedding = Embedding(
+            tuple(embedding_raw["values"]),
+            embedding_raw["layer"],
+            embedding_raw["token_index"],
+            embedding_raw["model_revision"],
+            embedding_raw["text_hash"],
+        )
+        transformation = _nonblank(raw["transformation"], "cached transformation")
+    except (KeyError, TypeError, ValueError) as error:
+        raise ExperimentError(f"transition cache content is invalid: {path}") from error
+    norm = math.sqrt(sum(value * value for value in embedding.values))
+    if not math.isclose(norm, 1.0, rel_tol=1e-5, abs_tol=1e-6):
+        raise ExperimentError(f"transition cache vector is not normalized: {path}")
+    return IndexedTransition(transition, transformation, embedding, expected_key)
+
+
+def build_index(
+    transitions: Iterable[Transition],
+    model: TextModel,
+    cache_dir: Path | None,
+    layer: int,
+) -> tuple[IndexedTransition, ...]:
+    if cache_dir is not None:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    indexed: list[IndexedTransition] = []
+    for transition in transitions:
+        key = transformation_cache_key(
+            transition,
+            model.model_revision,
+            layer,
+            TRANSFORMATION_PROMPT_VERSION,
+        )
+        cache_path = None if cache_dir is None else Path(cache_dir) / f"{key}.json"
+        if cache_path is not None and cache_path.exists():
+            indexed.append(_cached_index_item(cache_path, transition, key))
+            continue
+        generated = model.generate(
+            transformation_prompt(transition),
+            seed=derived_seed(0, transition.id, TRANSFORMATION_PROMPT_VERSION),
+        )
+        transformation = parse_transformation(generated)
+        embedding = model.embed(transformation, layer)
+        item = IndexedTransition(transition, transformation, embedding, key)
+        if cache_path is not None:
+            payload = {
+                "cache_key": key,
+                "transition_id": transition.id,
+                "transformation": transformation,
+                "embedding": {
+                    "values": list(embedding.values),
+                    "layer": embedding.layer,
+                    "token_index": embedding.token_index,
+                    "model_revision": embedding.model_revision,
+                    "text_hash": embedding.text_hash,
+                },
+            }
+            temporary = cache_path.with_name(f".{cache_path.name}.{uuid.uuid4().hex}.tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(cache_path)
+        indexed.append(item)
+    return tuple(indexed)
+
+
+def _validated_retrieval(index: tuple[IndexedTransition, ...], count: int) -> None:
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ExperimentError("retrieval count must be a positive integer")
+    if not index:
+        raise ExperimentError("retrieval index is empty")
+    if count > len(index):
+        raise ExperimentError("retrieval count exceeds the eligible index")
+
+
+def cosine_retrieve(
+    query: Embedding | tuple[float, ...],
+    index: tuple[IndexedTransition, ...],
+    count: int,
+) -> tuple[RetrievalHit, ...]:
+    _validated_retrieval(index, count)
+    values = query.values if isinstance(query, Embedding) else tuple(float(item) for item in query)
+    if not values or not all(math.isfinite(item) for item in values):
+        raise ExperimentError("query vector must be nonempty and finite")
+    norm = math.sqrt(sum(item * item for item in values))
+    if norm == 0.0:
+        raise ExperimentError("query vector must not be zero")
+    scored: list[RetrievalHit] = []
+    for item in index:
+        other = item.embedding.values
+        if len(other) != len(values):
+            raise ExperimentError("retrieval embedding dimensions do not match")
+        other_norm = math.sqrt(sum(value * value for value in other))
+        similarity = sum(left * right for left, right in zip(values, other)) / (norm * other_norm)
+        scored.append(RetrievalHit(item, similarity))
+    scored.sort(key=lambda hit: (-float(hit.similarity), hit.item.transition.id))
+    return tuple(scored[:count])
+
+
+def random_retrieve(
+    index: tuple[IndexedTransition, ...],
+    count: int,
+    seed: int,
+) -> tuple[RetrievalHit, ...]:
+    _validated_retrieval(index, count)
+    selected = random.Random(seed).sample(list(index), count)
+    return tuple(RetrievalHit(item, None) for item in selected)
+
+
+def rank_for_condition(
+    condition: Condition,
+    problem: Problem,
+    state: str,
+    candidates: tuple[str, ...],
+    proof_need: ProofNeed | None,
+    index: tuple[IndexedTransition, ...],
+    model: TextModel,
+    retrieval_count: int,
+    seed: int,
+    *,
+    layer: int = -1,
+) -> RankingDecision:
+    if not isinstance(condition, Condition):
+        raise ExperimentError("condition must be a Condition")
+    candidates = tuple(candidates)
+    if not candidates:
+        raise ExperimentError("candidate pool must not be empty")
+    hits: tuple[RetrievalHit, ...] = ()
+    current_need = proof_need
+    if condition is not Condition.NONE:
+        if current_need is None:
+            description = model.generate(
+                proof_need_prompt(problem, state, (), ()),
+                seed=derived_seed(seed, problem.id, sha256_text(state), "proof-need"),
+            ).strip()
+            if not description:
+                raise ModelOutputError("proof need description must not be blank")
+            current_need = ProofNeed(description, model.embed(description, layer))
+        if condition is Condition.ANALOGY:
+            hits = cosine_retrieve(current_need.embedding, index, retrieval_count)
+        else:
+            hits = random_retrieve(
+                index,
+                retrieval_count,
+                derived_seed(seed, problem.id, sha256_text(state), "random-retrieval"),
+            )
+    transformations = tuple(hit.item.transformation for hit in hits)
+    generated = model.generate(
+        ranking_prompt(problem, state, candidates, transformations),
+        seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "ranking"),
+    )
+    indices = parse_ranking(generated, len(candidates))
+    return RankingDecision(candidates, indices, hits, current_need)
+
+
+class CandidatePoolStore:
+    """Generate each conventional tactic pool once per normalized proof state."""
+
+    def __init__(self, model: TextModel) -> None:
+        self._model = model
+        self._pools: dict[tuple[str, str, int, str, int], tuple[str, ...]] = {}
+
+    def get(
+        self,
+        problem: Problem,
+        state: str,
+        accepted: tuple[str, ...],
+        failed: tuple[str, ...],
+        *,
+        seed: int,
+        top_k: int,
+    ) -> tuple[str, ...]:
+        state_hash = sha256_text(state)
+        key = (problem.id, state_hash, seed, CANDIDATE_PROMPT_VERSION, top_k)
+        if key not in self._pools:
+            generated = self._model.generate(
+                candidate_prompt(problem, state, accepted, failed, top_k),
+                seed=derived_seed(seed, problem.id, state_hash, "candidates"),
+            )
+            self._pools[key] = parse_candidates(generated, top_k)
+        return self._pools[key]
 
 
 def masked_problem_payload(problem: Problem) -> dict[str, str]:

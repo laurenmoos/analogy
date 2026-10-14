@@ -196,3 +196,134 @@ def test_embedding_rejects_zero_vector() -> None:
     module = load_script()
     with pytest.raises(module.ModelOutputError, match="zero|finite"):
         make_qwen(module, final_vector=(0.0, 0.0)).embed("need", layer=-1)
+
+
+def indexed_fixture(module):
+    items = []
+    for identifier, vector in (("x", (1.0, 0.0)), ("y", (0.8, 0.6)), ("z", (0.0, 1.0))):
+        transition = module.Transition(identifier, "poetry", "before", f"after {identifier}", {})
+        embedding = module.Embedding(vector, 0, 0, "rev", module.sha256_text(identifier))
+        items.append(module.IndexedTransition(transition, f"change {identifier}", embedding, f"key-{identifier}"))
+    return tuple(items)
+
+
+def test_cosine_and_random_retrieval_use_same_eligible_index() -> None:
+    module = load_script()
+    index = indexed_fixture(module)
+
+    nearest = module.cosine_retrieve((1.0, 0.0), index, count=2)
+    random_hits = module.random_retrieve(index, count=2, seed=11)
+
+    assert [hit.item.transition.id for hit in nearest] == ["x", "y"]
+    assert len(random_hits) == len(nearest) == 2
+    assert {hit.item.transition.id for hit in random_hits} <= {
+        item.transition.id for item in index
+    }
+    assert all(hit.similarity is None for hit in random_hits)
+
+
+def test_cache_key_changes_with_prompt_model_layer_or_source() -> None:
+    module = load_script()
+    transition = module.Transition("x", "poetry", "before", "after", {})
+    changed = module.Transition("y", "poetry", "before", "different", {})
+    base = module.transformation_cache_key(transition, "rev-a", -1, "transformation-v1")
+
+    assert base != module.transformation_cache_key(transition, "rev-b", -1, "transformation-v1")
+    assert base != module.transformation_cache_key(transition, "rev-a", -2, "transformation-v1")
+    assert base != module.transformation_cache_key(transition, "rev-a", -1, "transformation-v2")
+    assert base != module.transformation_cache_key(changed, "rev-a", -1, "transformation-v1")
+
+
+def test_build_index_rejects_non_normalized_cached_vector(tmp_path: Path) -> None:
+    module = load_script()
+    model = SpyModel()
+    transition = module.Transition("x", "poetry", "before", "after", {})
+    key = module.transformation_cache_key(
+        transition,
+        model.model_revision,
+        -1,
+        module.TRANSFORMATION_PROMPT_VERSION,
+    )
+    cache = tmp_path / f"{key}.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "cache_key": key,
+                "transition_id": "x",
+                "transformation": "one element becomes available",
+                "embedding": {
+                    "values": [3.0, 4.0],
+                    "layer": -1,
+                    "token_index": 0,
+                    "model_revision": model.model_revision,
+                    "text_hash": module.sha256_text("one element becomes available"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.ExperimentError, match="normalized"):
+        module.build_index((transition,), model, tmp_path, -1)
+
+
+class SpyModel:
+    model_revision = "spy-revision"
+
+    def __init__(self) -> None:
+        self.generation_calls = []
+        self.embedding_calls = []
+
+    def generate(self, messages, *, seed: int):
+        self.generation_calls.append((messages, seed))
+        system = messages[0].content
+        if "candidate-v1" in system:
+            return '["intro h", "exact h"]'
+        if "proof-need-v1" in system:
+            return "make a hidden element available"
+        if "transformation-v1" in system:
+            return '{"transformation":"one element becomes available"}'
+        return "[0]"
+
+    def embed(self, text: str, layer: int):
+        self.embedding_calls.append((text, layer))
+        module = load_script()
+        return module.Embedding((1.0, 0.0), layer, 0, self.model_revision, module.sha256_text(text))
+
+
+def test_no_retrieval_never_calls_embedding_or_retriever() -> None:
+    module = load_script()
+    model = SpyModel()
+    problem = module.Problem("identity", "(P : Prop)", "P → P")
+
+    decision = module.rank_for_condition(
+        module.Condition.NONE,
+        problem,
+        "goal",
+        ("exact h",),
+        None,
+        (),
+        model,
+        2,
+        0,
+    )
+
+    assert decision.indices == (0,)
+    assert decision.hits == ()
+    assert model.embedding_calls == []
+
+
+def test_candidate_pool_store_shares_pool_by_state_fingerprint() -> None:
+    module = load_script()
+    model = SpyModel()
+    store = module.CandidatePoolStore(model)
+    problem = module.Problem("identity", "(P : Prop)", "P → P")
+
+    first = store.get(problem, "⊢ P → P", (), (), seed=3, top_k=4)
+    second = store.get(problem, "⊢ P → P", (), (), seed=3, top_k=4)
+    other = store.get(problem, "h : P\n⊢ P", ("intro h",), (), seed=3, top_k=4)
+
+    assert first == second == ("intro h", "exact h")
+    assert other == ("intro h", "exact h")
+    candidate_calls = [call for call in model.generation_calls if "candidate-v1" in call[0][0].content]
+    assert len(candidate_calls) == 2

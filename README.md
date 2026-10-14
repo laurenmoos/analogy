@@ -92,4 +92,7 @@ Validate the inputs and Lean setup without loading Qwen:
 ```
 
 Additional options are passed to the standalone Python program. For example,
-`./run_experiment.sh --problem imp_elim_01` selects another benchmark problem.
+`./run_experiment.sh --problem imp_intro_05` selects another benchmark problem.
+Difficulty 3–5 problems use a bounded thinking phase followed by a separate
+non-thinking JSON answer phase; `generations.jsonl` records the actual token,
+time, phase, and stopping budgets used by every model call.

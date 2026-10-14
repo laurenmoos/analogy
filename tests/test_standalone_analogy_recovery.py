@@ -94,6 +94,22 @@ def test_candidate_parser_rejects_malformed_or_duplicate_tactics(text: str) -> N
         module.parse_candidates(text, top_k=4)
 
 
+def test_candidate_parser_normalizes_qwen_bare_tactic_array() -> None:
+    module = load_script()
+
+    assert module.parse_candidates(
+        "[split, cases h, exact h.right, assumption]", top_k=4
+    ) == ("split", "cases h", "exact h.right", "assumption")
+
+
+def test_candidate_parser_preserves_commas_nested_inside_tactic_syntax() -> None:
+    module = load_script()
+
+    assert module.parse_candidates(
+        "[simp [h₁, h₂], exact ⟨left, right⟩]", top_k=4
+    ) == ("simp [h₁, h₂]", "exact ⟨left, right⟩")
+
+
 def test_ranking_parser_appends_omitted_indices_in_original_order() -> None:
     module = load_script()
     assert module.parse_ranking("[2, 0]", candidate_count=4) == (2, 0, 1, 3)
@@ -120,14 +136,21 @@ class FakeBatch(dict):
 class FakeTokenizer:
     def __init__(self, torch_module) -> None:
         self.torch = torch_module
+        self.template_kwargs = None
+        self.template_history = []
 
     def apply_chat_template(self, messages, **kwargs):
+        self.template_kwargs = kwargs
+        self.template_history.append(kwargs)
         return "rendered chat"
 
     def __call__(self, texts, **kwargs):
         return FakeBatch(self.torch)
 
     def decode(self, tokens, **kwargs):
+        values = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
+        if values and values[-1] == 50:
+            return "<think>consider the available evidence"
         return '["intro h"]'
 
 
@@ -139,6 +162,8 @@ class FakeModel:
         self.parameter = torch_module.nn.Parameter(torch_module.tensor([1.0]))
         self.final_vector = final_vector
         self.eval_called = False
+        self.generate_kwargs = None
+        self.generate_history = []
 
     def parameters(self):
         return (self.parameter,)
@@ -162,7 +187,10 @@ class FakeModel:
         )
 
     def generate(self, **kwargs):
-        return self.torch.tensor([[10, 11, 0, 99]])
+        self.generate_kwargs = kwargs
+        self.generate_history.append(kwargs)
+        final_token = 50 if len(self.generate_history) == 1 and kwargs.get("max_new_tokens") == 16 else 99
+        return self.torch.tensor([[10, 11, 0, final_token]])
 
 
 def make_qwen(module, final_vector=(3.0, 4.0)):
@@ -192,6 +220,57 @@ def test_embedding_uses_final_nonpadding_token_and_normalizes_float32() -> None:
     assert embedding.text_hash == module.sha256_text("structural need")
     assert model._model.parameter.requires_grad is False
     assert model._model.eval_called is True
+
+
+def test_adaptive_generation_policy_scales_reasoning_for_difficulty() -> None:
+    module = load_script()
+
+    easy = module.generation_policy(1, base_max_new_tokens=256, base_timeout_seconds=60)
+    medium = module.generation_policy(3, base_max_new_tokens=256, base_timeout_seconds=60)
+    hard = module.generation_policy(5, base_max_new_tokens=256, base_timeout_seconds=60)
+
+    assert (easy.thinking, easy.reasoning_max_tokens, easy.answer_max_tokens) == (False, 0, 256)
+    assert (medium.thinking, medium.reasoning_max_tokens, medium.reasoning_timeout_seconds) == (True, 128, 120)
+    assert (hard.thinking, hard.reasoning_max_tokens, hard.reasoning_timeout_seconds) == (True, 256, 180)
+    assert hard.answer_max_tokens == 256
+    assert hard.answer_timeout_seconds == 120
+
+
+def test_complete_json_is_extracted_only_after_thinking() -> None:
+    module = load_script()
+    text = '<think>compare [3, 2]</think>\n```json\n[1, 0, 2, 3]\n```'
+
+    assert module.extract_complete_json(text, "array", thinking=True) == "[1, 0, 2, 3]"
+    assert module.extract_complete_json("<think>still reasoning [0]", "array", thinking=True) is None
+
+
+def test_qwen_hard_generation_separates_reasoning_and_structured_answer() -> None:
+    module = load_script()
+    model = make_qwen(module)
+    events = []
+    model.set_generation_sink(events.append)
+
+    output = model.generate(
+        (module.Message("user", "rank"),),
+        seed=7,
+        operation="ranking",
+        difficulty=5,
+        expected_json="array",
+    )
+
+    assert output == '["intro h"]'
+    assert [item["enable_thinking"] for item in model._tokenizer.template_history] == [True, False]
+    assert len(model._model.generate_history) == 2
+    assert model._model.generate_history[0]["max_new_tokens"] == 16
+    assert model._model.generate_history[0]["max_time"] == 15.0
+    assert model._model.generate_history[1]["max_new_tokens"] == 16
+    assert model._model.generate_history[1]["max_time"] == 10.0
+    assert [event["phase"] for event in events] == ["reasoning", "answer"]
+    assert events[0]["reasoning_tokens"] == 1
+    assert events[1]["stop_reason"] == "complete_json"
+    assert events[1]["answer_tokens"] == 1
+    assert events[1]["output_text"] == '["intro h"]'
+    assert "output_text" not in events[0]
 
 
 @pytest.mark.parametrize("layer", [-4, 3])
@@ -300,6 +379,23 @@ class SpyModel:
         return module.Embedding((1.0, 0.0), layer, 0, self.model_revision, module.sha256_text(text))
 
 
+class PolicySpyModel(SpyModel):
+    def __init__(self, module) -> None:
+        super().__init__()
+        self.module = module
+        self.generation_options = []
+
+    def generate(self, messages, *, seed: int, **kwargs):
+        self.generation_options.append(kwargs)
+        return super().generate(messages, seed=seed)
+
+    def embed(self, text: str, layer: int):
+        self.embedding_calls.append((text, layer))
+        return self.module.Embedding(
+            (1.0, 0.0), layer, 0, self.model_revision, self.module.sha256_text(text)
+        )
+
+
 def test_no_retrieval_never_calls_embedding_or_retriever() -> None:
     module = load_script()
     model = SpyModel()
@@ -336,6 +432,39 @@ def test_candidate_pool_store_shares_pool_by_state_fingerprint() -> None:
     assert other == ("intro h", "exact h")
     candidate_calls = [call for call in model.generation_calls if "candidate-v1" in call[0][0].content]
     assert len(candidate_calls) == 2
+
+
+def test_generation_operations_receive_difficulty_and_json_contract(tmp_path: Path) -> None:
+    module = load_script()
+    model = PolicySpyModel(module)
+    problem = module.Problem("hard", "(P : Prop)", "P → P", difficulty=5)
+    store = module.CandidatePoolStore(model)
+
+    store.get(problem, "⊢ P → P", (), (), seed=0, top_k=2)
+    index = module.build_index(
+        (module.Transition("p", "poetry", "closed", "open", {}),),
+        model,
+        tmp_path / "cache",
+        -1,
+    )
+    module.rank_for_condition(
+        module.Condition.ANALOGY,
+        problem,
+        "⊢ P → P",
+        ("intro h", "exact h"),
+        None,
+        index,
+        model,
+        1,
+        0,
+    )
+
+    assert model.generation_options == [
+        {"operation": "candidate", "difficulty": 5, "expected_json": "array"},
+        {"operation": "transformation", "difficulty": 1, "expected_json": "object"},
+        {"operation": "proof_need", "difficulty": 5, "expected_json": None},
+        {"operation": "ranking", "difficulty": 5, "expected_json": "array"},
+    ]
 
 
 def open_result(module, state: str):
@@ -512,9 +641,23 @@ class ExperimentModel(SpyModel):
     def __init__(self, module):
         super().__init__()
         self.module = module
+        self.generation_sink = None
+
+    def set_generation_sink(self, sink):
+        self.generation_sink = sink
 
     def generate(self, messages, *, seed: int):
         self.generation_calls.append((messages, seed))
+        if self.generation_sink is not None:
+            self.generation_sink(
+                {
+                    "operation": "test",
+                    "generated_tokens": 1,
+                    "reasoning_tokens": 0,
+                    "answer_tokens": 1,
+                    "stop_reason": "eos",
+                }
+            )
         system = messages[0].content
         if "candidate-v1" in system:
             return '["exact h"]'
@@ -572,7 +715,7 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
     )
 
     assert result_path == output
-    for name in ("transitions.jsonl", "attempts.jsonl", "trials.jsonl"):
+    for name in ("transitions.jsonl", "attempts.jsonl", "trials.jsonl", "generations.jsonl"):
         rows = [json.loads(line) for line in (output / name).read_text(encoding="utf-8").splitlines()]
         assert rows
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))

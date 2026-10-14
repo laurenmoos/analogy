@@ -30,5 +30,5 @@ exec "$PYTHON" "$SCRIPT_DIR/scripts/standalone_analogy_recovery.py" \
     --candidate-count 4 \
     --max-expansions 8 \
     --max-verifier-calls 32 \
-    --theorem-timeout 180 \
+    --theorem-timeout 600 \
     "$@"

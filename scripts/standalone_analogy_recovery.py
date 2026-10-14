@@ -273,13 +273,61 @@ def ranking_prompt(
     )
 
 
+def _parse_bare_candidate_array(text: str) -> list[str] | None:
+    """Recover Qwen's unquoted ``[tactic, tactic]`` serialization safely.
+
+    This is deliberately not a general Python/Lean parser: it only separates
+    commas at the outer list level and never evaluates model output.
+    """
+    if not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if len(stripped) < 3 or stripped[0] != "[" or stripped[-1] != "]":
+        return None
+    body = stripped[1:-1]
+    pairs = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
+    closers = set(pairs.values())
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    start = 0
+    items: list[str] = []
+    for index, character in enumerate(body):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {'"', "'"}:
+            quote = character
+        elif character in pairs:
+            stack.append(pairs[character])
+        elif character in closers:
+            if not stack or stack.pop() != character:
+                return None
+        elif character == "," and not stack:
+            items.append(body[start:index].strip())
+            start = index + 1
+    if quote is not None or stack:
+        return None
+    items.append(body[start:].strip())
+    if not items or any(not item for item in items):
+        return None
+    return items
+
+
 def parse_candidates(text: str, top_k: int) -> tuple[str, ...]:
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
         raise ExperimentError("top_k must be a positive integer")
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError) as error:
-        raise ModelOutputError("candidate output must be valid JSON") from error
+        value = _parse_bare_candidate_array(text)
+        if value is None:
+            raise ModelOutputError("candidate output must be a JSON or bare tactic array") from error
     if not isinstance(value, list) or not value:
         raise ModelOutputError("candidate output must be a nonempty array")
     result: list[str] = []
@@ -346,6 +394,107 @@ def parse_ranking(text: str, candidate_count: int) -> tuple[int, ...]:
     return tuple(result)
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationPolicy:
+    thinking: bool
+    reasoning_max_tokens: int
+    reasoning_timeout_seconds: float
+    answer_max_tokens: int
+    answer_timeout_seconds: float
+
+
+def generation_policy(
+    difficulty: int,
+    *,
+    base_max_new_tokens: int,
+    base_timeout_seconds: float,
+) -> GenerationPolicy:
+    if isinstance(difficulty, bool) or not isinstance(difficulty, int) or difficulty <= 0:
+        raise ExperimentError("generation difficulty must be a positive integer")
+    if base_max_new_tokens <= 0 or base_timeout_seconds <= 0:
+        raise ExperimentError("generation base budgets must be positive")
+    if difficulty <= 2:
+        return GenerationPolicy(
+            False, 0, 0.0, base_max_new_tokens, float(base_timeout_seconds)
+        )
+    if difficulty <= 4:
+        return GenerationPolicy(
+            True,
+            max(1, base_max_new_tokens // 2),
+            float(base_timeout_seconds) * 2,
+            base_max_new_tokens,
+            float(base_timeout_seconds) * 2,
+        )
+    return GenerationPolicy(
+        True,
+        base_max_new_tokens,
+        float(base_timeout_seconds) * 3,
+        base_max_new_tokens,
+        float(base_timeout_seconds) * 2,
+    )
+
+
+def extract_complete_json(
+    text: str,
+    expected: str,
+    *,
+    thinking: bool,
+) -> str | None:
+    if expected not in {"array", "object"}:
+        raise ExperimentError("expected JSON container must be array or object")
+    if not isinstance(text, str):
+        return None
+    if thinking:
+        marker = text.find("</think>")
+        if marker < 0 and "<think>" in text:
+            return None
+        if marker >= 0:
+            text = text[marker + len("</think>") :]
+    opener = "[" if expected == "array" else "{"
+    expected_type = list if expected == "array" else dict
+    decoder = json.JSONDecoder()
+    for offset, character in enumerate(text):
+        if character != opener:
+            continue
+        try:
+            value, end = decoder.raw_decode(text[offset:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, expected_type):
+            return text[offset : offset + end]
+    return None
+
+
+class _CompleteJsonStoppingCriteria:
+    def __init__(
+        self,
+        tokenizer: Any,
+        input_length: int,
+        expected: str,
+        thinking: bool,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.input_length = input_length
+        self.expected = expected
+        self.thinking = thinking
+
+    def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+        generated = input_ids[0][self.input_length :]
+        text = self.tokenizer.decode(generated, skip_special_tokens=True)
+        return extract_complete_json(text, self.expected, thinking=self.thinking) is not None
+
+
+class _ThinkingCompleteStoppingCriteria:
+    def __init__(self, tokenizer: Any, input_length: int) -> None:
+        self.tokenizer = tokenizer
+        self.input_length = input_length
+
+    def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+        generated = input_ids[0][self.input_length :]
+        text = self.tokenizer.decode(generated, skip_special_tokens=True)
+        return "</think>" in text
+
+
 class QwenModel:
     """Frozen local Qwen boundary for deterministic generation and embeddings."""
 
@@ -365,6 +514,7 @@ class QwenModel:
         self._device = device
         self._max_new_tokens = max_new_tokens
         self._timeout_seconds = timeout_seconds
+        self._generation_sink: Callable[[Mapping[str, Any]], Any] | None = None
         self.model_revision = str(
             getattr(getattr(model, "config", None), "_commit_hash", None)
             or getattr(getattr(model, "config", None), "name_or_path", None)
@@ -413,12 +563,17 @@ class QwenModel:
             timeout_seconds=timeout_seconds,
         )
 
-    def _render(self, messages: tuple[Message, ...]) -> str:
+    def set_generation_sink(
+        self, sink: Callable[[Mapping[str, Any]], Any] | None
+    ) -> None:
+        self._generation_sink = sink
+
+    def _render(self, messages: tuple[Message, ...], *, thinking: bool) -> str:
         return self._tokenizer.apply_chat_template(
             [{"role": item.role, "content": item.content} for item in messages],
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=thinking,
         )
 
     def generate(
@@ -427,25 +582,168 @@ class QwenModel:
         *,
         seed: int,
         timeout_seconds: float | None = None,
+        operation: str = "unspecified",
+        difficulty: int = 1,
+        expected_json: str | None = None,
     ) -> str:
-        prompt = self._render(messages)
-        inputs = self._tokenizer([prompt], return_tensors="pt").to(self._device)
-        self._torch.manual_seed(seed)
-        effective_timeout = self._timeout_seconds
-        if timeout_seconds is not None:
-            effective_timeout = min(effective_timeout, max(float(timeout_seconds), 0.001))
-        started = time.monotonic()
-        with self._torch.inference_mode():
-            generated = self._model.generate(
-                **inputs,
-                do_sample=False,
-                max_new_tokens=self._max_new_tokens,
-                max_time=effective_timeout,
+        policy = generation_policy(
+            difficulty,
+            base_max_new_tokens=self._max_new_tokens,
+            base_timeout_seconds=self._timeout_seconds,
+        )
+        overall_deadline = (
+            None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        )
+
+        def remaining_timeout(configured: float) -> float:
+            if overall_deadline is None:
+                return configured
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("theorem timeout")
+            return min(configured, max(remaining, 0.001))
+
+        def run_phase(
+            phase_messages: tuple[Message, ...],
+            *,
+            phase: str,
+            thinking: bool,
+            phase_seed: int,
+            max_new_tokens: int,
+            configured_timeout: float,
+            json_contract: str | None = None,
+            stop_after_thinking: bool = False,
+        ) -> tuple[str, Any, float, float, str]:
+            prompt = self._render(phase_messages, thinking=thinking)
+            inputs = self._tokenizer([prompt], return_tensors="pt").to(self._device)
+            input_length = int(inputs["input_ids"].shape[-1])
+            criteria: list[Any] = []
+            if json_contract is not None:
+                criteria.append(
+                    _CompleteJsonStoppingCriteria(
+                        self._tokenizer, input_length, json_contract, False
+                    )
+                )
+            if stop_after_thinking:
+                criteria.append(
+                    _ThinkingCompleteStoppingCriteria(self._tokenizer, input_length)
+                )
+            if criteria:
+                try:
+                    from transformers import StoppingCriteriaList
+                except ImportError as error:
+                    raise ModelConfigurationError("transformers is required") from error
+                stopping_criteria: Any = StoppingCriteriaList(criteria)
+            else:
+                stopping_criteria = []
+            effective_timeout = remaining_timeout(configured_timeout)
+            self._torch.manual_seed(phase_seed)
+            started = time.monotonic()
+            with self._torch.inference_mode():
+                generated = self._model.generate(
+                    **inputs,
+                    do_sample=False,
+                    max_new_tokens=max_new_tokens,
+                    max_time=effective_timeout,
+                    stopping_criteria=stopping_criteria,
+                )
+            elapsed = time.monotonic() - started
+            output_ids = generated[0][input_length:]
+            raw = self._tokenizer.decode(output_ids, skip_special_tokens=True)
+            generated_tokens = int(output_ids.shape[-1])
+            if phase == "reasoning":
+                if "</think>" in raw:
+                    stop_reason = "thinking_complete"
+                elif elapsed >= effective_timeout:
+                    stop_reason = "timeout"
+                elif generated_tokens >= max_new_tokens:
+                    stop_reason = "reasoning_ceiling"
+                else:
+                    stop_reason = "eos"
+                reasoning_tokens = generated_tokens
+                answer_tokens = 0
+            else:
+                structured = (
+                    None
+                    if json_contract is None
+                    else extract_complete_json(raw, json_contract, thinking=False)
+                )
+                if structured is not None:
+                    stop_reason = "complete_json"
+                elif elapsed >= effective_timeout:
+                    stop_reason = "timeout"
+                elif generated_tokens >= max_new_tokens:
+                    stop_reason = "answer_ceiling"
+                else:
+                    stop_reason = "eos"
+                reasoning_tokens = 0
+                answer_tokens = generated_tokens
+            event = {
+                "operation": operation,
+                "phase": phase,
+                "difficulty": difficulty,
+                "thinking": thinking,
+                "max_new_tokens": max_new_tokens,
+                "timeout_seconds": effective_timeout,
+                "generated_tokens": generated_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "answer_tokens": answer_tokens,
+                "elapsed_seconds": elapsed,
+                "stop_reason": stop_reason,
+                "seed": phase_seed,
+                "prompt_hash": sha256_text(prompt),
+                "output_hash": sha256_text(raw),
+            }
+            if phase == "answer":
+                event["output_text"] = raw
+            if self._generation_sink is not None:
+                self._generation_sink(event)
+            return raw, output_ids, elapsed, effective_timeout, stop_reason
+
+        answer_messages = messages
+        if policy.thinking:
+            reasoning_raw, _, _, _, _ = run_phase(
+                messages,
+                phase="reasoning",
+                thinking=True,
+                phase_seed=seed,
+                max_new_tokens=policy.reasoning_max_tokens,
+                configured_timeout=policy.reasoning_timeout_seconds,
+                stop_after_thinking=True,
             )
-        if time.monotonic() - started >= effective_timeout:
-            raise TimeoutError(f"generation exceeded {effective_timeout:g} seconds")
-        input_length = int(inputs["input_ids"].shape[-1])
-        return self._tokenizer.decode(generated[0][input_length:], skip_special_tokens=True)
+            reasoning_notes = reasoning_raw
+            if "<think>" in reasoning_notes:
+                reasoning_notes = reasoning_notes.split("<think>", 1)[1]
+            if "</think>" in reasoning_notes:
+                reasoning_notes = reasoning_notes.split("</think>", 1)[0]
+            reasoning_notes = reasoning_notes.strip()
+            answer_messages = messages + (
+                Message("assistant", f"Reasoning notes:\n{reasoning_notes or '(none)'}"),
+                Message(
+                    "user",
+                    "Using those notes, return only the exact final response requested "
+                    "by the system message. Do not continue reasoning or add explanation.",
+                ),
+            )
+
+        answer_seed = derived_seed(seed, operation, "answer") if policy.thinking else seed
+        raw, _, elapsed, effective_timeout, _ = run_phase(
+            answer_messages,
+            phase="answer",
+            thinking=False,
+            phase_seed=answer_seed,
+            max_new_tokens=policy.answer_max_tokens,
+            configured_timeout=policy.answer_timeout_seconds,
+            json_contract=expected_json,
+        )
+        structured = (
+            None
+            if expected_json is None
+            else extract_complete_json(raw, expected_json, thinking=False)
+        )
+        if elapsed >= effective_timeout and structured is None:
+            raise TimeoutError(f"answer generation exceeded {effective_timeout:g} seconds")
+        return structured if structured is not None else raw.strip()
 
     def embed(self, text: str, layer: int) -> Embedding:
         _nonblank(text, "embedding text")
@@ -595,6 +893,36 @@ def _cached_index_item(path: Path, transition: Transition, expected_key: str) ->
     return IndexedTransition(transition, transformation, embedding, expected_key)
 
 
+def _model_generate(
+    model: TextModel,
+    messages: tuple[Message, ...],
+    *,
+    seed: int,
+    timeout_seconds: float | None = None,
+    operation: str,
+    difficulty: int,
+    expected_json: str | None,
+) -> str:
+    parameters = inspect.signature(model.generate).parameters
+    accepts_keywords = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    optional = {
+        "operation": operation,
+        "difficulty": difficulty,
+        "expected_json": expected_json,
+    }
+    if timeout_seconds is not None:
+        optional["timeout_seconds"] = timeout_seconds
+    kwargs = {
+        key: value
+        for key, value in optional.items()
+        if accepts_keywords or key in parameters
+    }
+    return model.generate(messages, seed=seed, **kwargs)
+
+
 def build_index(
     transitions: Iterable[Transition],
     model: TextModel,
@@ -615,9 +943,13 @@ def build_index(
         if cache_path is not None and cache_path.exists():
             indexed.append(_cached_index_item(cache_path, transition, key))
             continue
-        generated = model.generate(
+        generated = _model_generate(
+            model,
             transformation_prompt(transition),
             seed=derived_seed(0, transition.id, TRANSFORMATION_PROMPT_VERSION),
+            operation="transformation",
+            difficulty=1,
+            expected_json="object",
         )
         transformation = parse_transformation(generated)
         embedding = model.embed(transformation, layer)
@@ -694,15 +1026,22 @@ def _generate_before_deadline(
     *,
     seed: int,
     deadline: float | None,
+    operation: str,
+    difficulty: int,
+    expected_json: str | None,
 ) -> str:
     remaining = None if deadline is None else deadline - time.monotonic()
     if remaining is not None and remaining <= 0:
         raise TimeoutError("theorem timeout")
-    parameters = inspect.signature(model.generate).parameters
-    if "timeout_seconds" in parameters:
-        result = model.generate(messages, seed=seed, timeout_seconds=remaining)
-    else:
-        result = model.generate(messages, seed=seed)
+    result = _model_generate(
+        model,
+        messages,
+        seed=seed,
+        timeout_seconds=remaining,
+        operation=operation,
+        difficulty=difficulty,
+        expected_json=expected_json,
+    )
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("theorem timeout")
     return result
@@ -738,6 +1077,9 @@ def rank_for_condition(
                 proof_need_prompt(problem, state, accepted, failed),
                 seed=derived_seed(seed, problem.id, sha256_text(state), "proof-need"),
                 deadline=deadline,
+                operation="proof_need",
+                difficulty=problem.difficulty,
+                expected_json=None,
             ).strip()
             if not description:
                 raise ModelOutputError("proof need description must not be blank")
@@ -764,6 +1106,9 @@ def rank_for_condition(
         ),
         seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "ranking"),
         deadline=deadline,
+        operation="ranking",
+        difficulty=problem.difficulty,
+        expected_json="array",
     )
     indices = parse_ranking(generated, len(candidates))
     return RankingDecision(candidates, indices, hits, current_need)
@@ -789,9 +1134,13 @@ class CandidatePoolStore:
         state_hash = sha256_text(state)
         key = (problem.id, state_hash, seed, CANDIDATE_PROMPT_VERSION, top_k)
         if key not in self._pools:
-            generated = self._model.generate(
+            generated = _model_generate(
+                self._model,
                 candidate_prompt(problem, state, accepted, failed, top_k),
                 seed=derived_seed(seed, problem.id, state_hash, "candidates"),
+                operation="candidate",
+                difficulty=problem.difficulty,
+                expected_json="array",
             )
             self._pools[key] = parse_candidates(generated, top_k)
         return self._pools[key]
@@ -1711,6 +2060,24 @@ def _run_config_payload(
             "hidden_layer": config.hidden_layer,
             "max_new_tokens": config.max_new_tokens,
             "timeout_seconds": config.model_timeout_seconds,
+            "adaptive_policy": {
+                "difficulty_1_2": {"thinking": False},
+                "difficulty_3_4": {
+                    "thinking": True,
+                    "reasoning_token_fraction": 0.5,
+                    "reasoning_timeout_multiplier": 2,
+                    "answer_timeout_multiplier": 2,
+                },
+                "difficulty_5_plus": {
+                    "thinking": True,
+                    "reasoning_token_fraction": 1.0,
+                    "reasoning_timeout_multiplier": 3,
+                    "answer_timeout_multiplier": 2,
+                },
+                "answer_token_multiplier": 1,
+                "separate_reasoning_and_answer_phases": True,
+                "structured_early_stop": True,
+            },
         },
         "retrieval_count": config.retrieval_count,
         "search_limits": _jsonable(config.search_limits),
@@ -1732,14 +2099,6 @@ def run_experiment(
     _atomic_json(output / "config.json", _run_config_payload(config, complete=False))
     model = model_factory(config)
     verifier = verifier_factory(config)
-    needs_index = any(condition is not Condition.NONE for condition in config.conditions)
-    index = (
-        build_index(config.transitions, model, config.cache_dir, config.hidden_layer)
-        if needs_index
-        else ()
-    )
-    pool_store = CandidatePoolStore(model)
-    ranker = ConditionRanker(model, index, config.retrieval_count, config.hidden_layer)
     trials: list[TrialResult] = []
     condition_order = [Condition.NONE] + [
         condition for condition in config.conditions if condition is not Condition.NONE
@@ -1749,7 +2108,19 @@ def run_experiment(
         JsonlSink(output / "transitions.jsonl") as transition_sink,
         JsonlSink(output / "attempts.jsonl") as attempt_sink,
         JsonlSink(output / "trials.jsonl") as trial_sink,
+        JsonlSink(output / "generations.jsonl") as generation_sink,
     ):
+        set_generation_sink = getattr(model, "set_generation_sink", None)
+        if callable(set_generation_sink):
+            set_generation_sink(generation_sink.write)
+        needs_index = any(condition is not Condition.NONE for condition in config.conditions)
+        index = (
+            build_index(config.transitions, model, config.cache_dir, config.hidden_layer)
+            if needs_index
+            else ()
+        )
+        pool_store = CandidatePoolStore(model)
+        ranker = ConditionRanker(model, index, config.retrieval_count, config.hidden_layer)
         for item in index:
             transition_sink.write(
                 {

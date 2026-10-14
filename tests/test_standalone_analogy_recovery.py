@@ -327,3 +327,125 @@ def test_candidate_pool_store_shares_pool_by_state_fingerprint() -> None:
     assert other == ("intro h", "exact h")
     candidate_calls = [call for call in model.generation_calls if "candidate-v1" in call[0][0].content]
     assert len(candidate_calls) == 2
+
+
+def open_result(module, state: str):
+    return module.LeanResult(module.LeanStatus.OPEN, True, state, (), 0, 1)
+
+
+def complete_result(module):
+    return module.LeanResult(module.LeanStatus.COMPLETE, True, None, (), 0, 1)
+
+
+class ScriptedVerifier:
+    def __init__(self, module, attempts):
+        self.module = module
+        self.attempts = attempts
+
+    def initial_state(self, problem):
+        return open_result(self.module, f"⊢ {problem.target}")
+
+    def try_tactic(self, problem, prefix, candidate):
+        return self.attempts.get(
+            (prefix, candidate),
+            self.module.LeanResult(
+                self.module.LeanStatus.REJECTED,
+                False,
+                None,
+                ("rejected",),
+                1,
+                1,
+            ),
+        )
+
+
+class FixedPoolStore:
+    def __init__(self, candidates):
+        self.candidates = candidates
+
+    def get(self, problem, state, accepted, failed, *, seed, top_k):
+        return tuple(self.candidates[:top_k])
+
+
+class IdentityRanker:
+    def rank(self, condition, problem, state, candidates, seed):
+        module = load_script()
+        return module.RankingDecision(candidates, tuple(range(len(candidates))))
+
+
+def test_search_counts_only_completion_as_solved() -> None:
+    module = load_script()
+    problem = module.Problem("identity", "(P : Prop)", "P → P")
+    verifier = ScriptedVerifier(
+        module,
+        {
+            ((), "idle"): open_result(module, "⊢ P → P"),
+            ((), "intro h"): open_result(module, "h : P\n⊢ P"),
+            (("intro h",), "exact h"): complete_result(module),
+        },
+    )
+    attempts = []
+
+    result = module.search_problem(
+        problem,
+        module.Condition.NONE,
+        0,
+        FixedPoolStore(("idle", "intro h", "exact h")),
+        IdentityRanker(),
+        verifier,
+        module.SearchLimits(8, 16, 5.0, top_k=3),
+        attempts.append,
+    )
+
+    assert result.solved is True
+    assert result.tactics == ("intro h", "exact h")
+    assert result.repeated_state_count == 1
+    assert any(item.disposition == "repeated" for item in attempts)
+
+
+def test_open_novel_state_at_budget_is_not_solved() -> None:
+    module = load_script()
+    problem = module.Problem("identity", "(P : Prop)", "P → P")
+    verifier = ScriptedVerifier(
+        module,
+        {((), "intro h"): open_result(module, "h : P\n⊢ P")},
+    )
+
+    result = module.search_problem(
+        problem,
+        module.Condition.NONE,
+        0,
+        FixedPoolStore(("intro h",)),
+        IdentityRanker(),
+        verifier,
+        module.SearchLimits(
+            max_expansions=1,
+            max_verifier_calls=1,
+            theorem_timeout_seconds=5.0,
+            top_k=1,
+        ),
+        list().append,
+    )
+
+    assert result.solved is False
+    assert result.status == "budget_exhausted"
+
+
+def test_standalone_real_lean_reports_rejected_open_and_complete() -> None:
+    module = load_script()
+    project = Path(__file__).resolve().parents[1] / "src" / "analogy" / "lean_gym" / "lean_project"
+    verifier = module.LeanVerifier(project, timeout_seconds=10.0)
+    problem = module.Problem("identity", "(P : Prop)", "P → P")
+
+    initial = verifier.initial_state(problem)
+    rejected = verifier.try_tactic(problem, (), "exact missing")
+    opened = verifier.try_tactic(problem, (), "intro h")
+    complete = verifier.try_tactic(problem, ("intro h",), "exact h")
+
+    assert initial.status is module.LeanStatus.OPEN
+    assert rejected.status is module.LeanStatus.REJECTED
+    assert opened.status is module.LeanStatus.OPEN
+    assert opened.state is not None and "h : P" in opened.state
+    assert complete.status is module.LeanStatus.COMPLETE
+    assert complete.accepted is True
+    assert all("lean-gym-" not in diagnostic for diagnostic in rejected.diagnostics)

@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import heapq
 import json
 import math
+import os
 import random
 import re
+import subprocess
+import tempfile
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -726,6 +730,499 @@ class CandidatePoolStore:
             )
             self._pools[key] = parse_candidates(generated, top_k)
         return self._pools[key]
+
+
+class LeanStatus(str, Enum):
+    OPEN = "open"
+    COMPLETE = "complete"
+    REJECTED = "rejected"
+    TIMEOUT = "timeout"
+    INTERNAL_ERROR = "internal_error"
+
+
+@dataclass(frozen=True, slots=True)
+class LeanResult:
+    status: LeanStatus
+    accepted: bool
+    state: str | None
+    diagnostics: tuple[str, ...]
+    exit_code: int | None
+    duration_ms: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, LeanStatus) or not isinstance(self.accepted, bool):
+            raise ExperimentError("Lean result status or acceptance is invalid")
+        diagnostics = tuple(str(item) for item in self.diagnostics)
+        object.__setattr__(self, "diagnostics", diagnostics)
+        if self.status is LeanStatus.OPEN and (not self.accepted or not self.state):
+            raise ExperimentError("open Lean results require an accepted state")
+        if self.status is LeanStatus.COMPLETE and (not self.accepted or self.state is not None):
+            raise ExperimentError("complete Lean results require acceptance and no state")
+        if self.status not in {LeanStatus.OPEN, LeanStatus.COMPLETE} and self.accepted:
+            raise ExperimentError("failed Lean results cannot be accepted")
+
+
+@dataclass(frozen=True, slots=True)
+class _LeanDiagnostic:
+    severity: str
+    kind: str | None
+    message: str
+    line: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LeanRun:
+    exit_code: int | None
+    diagnostics: tuple[_LeanDiagnostic, ...]
+    duration_ms: int
+    timed_out: bool = False
+    internal_error: bool = False
+
+
+_TEMP_LEAN_PATH = re.compile(r"(?:/[A-Za-z0-9_.-]+)+/(?:Current|current_problem)\.lean(?::\d+:\d+)?")
+
+
+def normalize_lean_text(value: str) -> str:
+    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    normalized = "\n".join(line.rstrip() for line in lines).strip("\n")
+    return _TEMP_LEAN_PATH.sub("<temp>", normalized)
+
+
+class LeanVerifier:
+    """Independent subprocess verifier for the pinned Lean project."""
+
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        timeout_seconds: float = 10.0,
+        max_output_bytes: int = 1_048_576,
+        lake_executable: str = "lake",
+    ) -> None:
+        self.project_root = Path(project_root)
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_output_bytes = max_output_bytes
+        self.lake_executable = lake_executable
+
+    def initial_state(self, problem: Problem) -> LeanResult:
+        return self._state_after(problem, ())
+
+    def try_tactic(
+        self,
+        problem: Problem,
+        prefix: tuple[str, ...],
+        candidate: str,
+    ) -> LeanResult:
+        invalid = self._validate_tactics(prefix + (candidate,))
+        if invalid is not None:
+            return invalid
+        return self._state_after(problem, prefix + (candidate,))
+
+    def _state_after(self, problem: Problem, tactics: tuple[str, ...]) -> LeanResult:
+        invalid = self._validate_tactics(tactics)
+        if invalid is not None:
+            return invalid
+        source, trace_line = self._render_probe(problem, tactics)
+        run = self._run_lean(source)
+        if run.timed_out:
+            return self._result(LeanStatus.TIMEOUT, False, None, run)
+        if run.internal_error:
+            return self._result(LeanStatus.INTERNAL_ERROR, False, None, run)
+        errors = [item for item in run.diagnostics if item.severity == "error"]
+        traces = [
+            item
+            for item in run.diagnostics
+            if item.kind == "trace" and item.line == trace_line
+        ]
+        if not errors and run.exit_code == 0 and len(traces) == 1 and not traces[0].message.strip():
+            return self._verify_complete(problem, tactics)
+        if errors or run.exit_code != 0 or len(traces) != 1 or not traces[0].message.strip():
+            return self._result(LeanStatus.REJECTED, False, None, run)
+        if not any(item.kind == "hasSorry" for item in run.diagnostics):
+            altered = _LeanRun(
+                run.exit_code,
+                run.diagnostics
+                + (_LeanDiagnostic("error", "protocol", "probe did not report generated sorry", None),),
+                run.duration_ms,
+                internal_error=True,
+            )
+            return self._result(LeanStatus.INTERNAL_ERROR, False, None, altered)
+        return self._result(
+            LeanStatus.OPEN,
+            True,
+            normalize_lean_text(traces[0].message),
+            run,
+        )
+
+    def _verify_complete(self, problem: Problem, tactics: tuple[str, ...]) -> LeanResult:
+        run = self._run_lean(self._render_final(problem, tactics))
+        if run.timed_out:
+            return self._result(LeanStatus.TIMEOUT, False, None, run)
+        if run.internal_error:
+            return self._result(LeanStatus.INTERNAL_ERROR, False, None, run)
+        has_error = any(item.severity == "error" for item in run.diagnostics)
+        has_sorry = any(item.kind == "hasSorry" for item in run.diagnostics)
+        if run.exit_code == 0 and not has_error and not has_sorry:
+            return self._result(LeanStatus.COMPLETE, True, None, run)
+        return self._result(LeanStatus.REJECTED, False, None, run)
+
+    @staticmethod
+    def _validate_tactics(tactics: tuple[str, ...]) -> LeanResult | None:
+        for tactic in tactics:
+            if (
+                not isinstance(tactic, str)
+                or not tactic.strip()
+                or any(character in tactic for character in "\r\n\x00")
+                or len(tactic) > 4096
+            ):
+                return LeanResult(
+                    LeanStatus.REJECTED,
+                    False,
+                    None,
+                    ("tactic must be one nonblank line of at most 4096 characters",),
+                    None,
+                    0,
+                )
+        return None
+
+    @staticmethod
+    def _render_probe(problem: Problem, tactics: tuple[str, ...]) -> tuple[str, int]:
+        lines = [problem.theorem_header()]
+        lines.extend(f"  {tactic}" for tactic in tactics)
+        trace_line = len(lines) + 1
+        lines.append("  trace_state")
+        lines.append("  all_goals sorry")
+        return "\n".join(lines) + "\n", trace_line
+
+    @staticmethod
+    def _render_final(problem: Problem, tactics: tuple[str, ...]) -> str:
+        lines = [problem.theorem_header()]
+        lines.extend(f"  {tactic}" for tactic in tactics)
+        return "\n".join(lines) + "\n"
+
+    def _run_lean(self, source: str) -> _LeanRun:
+        started = time.monotonic_ns()
+        source_path: Path | None = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="standalone-lean-") as directory:
+                source_path = Path(directory) / "Current.lean"
+                source_path.write_text(source, encoding="utf-8")
+                environment = {
+                    **os.environ,
+                    "ELAN_TOOLCHAIN": "leanprover/lean4:v4.29.1",
+                }
+                completed = subprocess.run(
+                    [self.lake_executable, "env", "lean", "--json", str(source_path)],
+                    cwd=self.project_root,
+                    capture_output=True,
+                    text=False,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    env=environment,
+                )
+        except subprocess.TimeoutExpired:
+            duration = (time.monotonic_ns() - started) // 1_000_000
+            return _LeanRun(
+                None,
+                (_LeanDiagnostic("error", "timeout", f"Lean exceeded {self.timeout_seconds:g} seconds", None),),
+                duration,
+                timed_out=True,
+            )
+        except (OSError, ValueError) as error:
+            duration = (time.monotonic_ns() - started) // 1_000_000
+            return _LeanRun(
+                None,
+                (_LeanDiagnostic("error", "internal", normalize_lean_text(str(error)), None),),
+                duration,
+                internal_error=True,
+            )
+        duration = (time.monotonic_ns() - started) // 1_000_000
+        raw = completed.stdout + completed.stderr
+        if len(raw) > self.max_output_bytes:
+            return _LeanRun(
+                completed.returncode,
+                (_LeanDiagnostic("error", "output_limit", "Lean output exceeded configured bytes", None),),
+                duration,
+                internal_error=True,
+            )
+        diagnostics = self._parse_diagnostics(raw, source_path)
+        return _LeanRun(completed.returncode, diagnostics, duration)
+
+    @staticmethod
+    def _parse_diagnostics(raw: bytes, source_path: Path | None) -> tuple[_LeanDiagnostic, ...]:
+        diagnostics: list[_LeanDiagnostic] = []
+        source_text = str(source_path) if source_path is not None else None
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+                if not isinstance(item, dict):
+                    raise TypeError("diagnostic is not an object")
+                position = item.get("pos") if isinstance(item.get("pos"), dict) else {}
+                data = item.get("data", "")
+                message = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, sort_keys=True)
+                if source_text:
+                    message = message.replace(source_text, "<temp>")
+                diagnostics.append(
+                    _LeanDiagnostic(
+                        str(item.get("severity", "error")),
+                        str(item["kind"]) if item.get("kind") is not None else None,
+                        normalize_lean_text(message),
+                        position.get("line") if isinstance(position.get("line"), int) else None,
+                    )
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                message = line.replace(source_text, "<temp>") if source_text else line
+                diagnostics.append(_LeanDiagnostic("error", "protocol", normalize_lean_text(message), None))
+        return tuple(diagnostics)
+
+    @staticmethod
+    def _result(
+        status: LeanStatus,
+        accepted: bool,
+        state: str | None,
+        run: _LeanRun,
+    ) -> LeanResult:
+        messages = tuple(item.message for item in run.diagnostics if item.message.strip())
+        return LeanResult(status, accepted, state, messages, run.exit_code, run.duration_ms)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchLimits:
+    max_expansions: int
+    max_verifier_calls: int
+    theorem_timeout_seconds: float
+    top_k: int = 8
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.max_expansions, "max_expansions"),
+            (self.max_verifier_calls, "max_verifier_calls"),
+            (self.top_k, "top_k"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ExperimentError(f"{field} must be a positive integer")
+        if self.theorem_timeout_seconds <= 0:
+            raise ExperimentError("theorem_timeout_seconds must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptRecord:
+    problem_id: str
+    condition: str
+    seed: int
+    state_fingerprint: str
+    prefix: tuple[str, ...]
+    candidates: tuple[str, ...]
+    ordered_indices: tuple[int, ...]
+    candidate: str
+    disposition: str
+    successor_fingerprint: str | None
+    diagnostics: tuple[str, ...]
+    retrieval_hits: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TrialResult:
+    problem_id: str
+    condition: str
+    seed: int
+    status: str
+    solved: bool
+    tactics: tuple[str, ...]
+    expansion_count: int
+    verifier_call_count: int
+    rejected_count: int
+    repeated_state_count: int
+    novel_state_count: int
+    failure: str | None
+    elapsed_seconds: float
+    reference_coverage: bool = False
+    exact_reference_overlap: int = 0
+
+
+def state_fingerprint(problem: Problem, state: str) -> str:
+    return sha256_text(f"{problem.id}\x1f{normalize_lean_text(state)}")[:24]
+
+
+class SearchRanker(Protocol):
+    def rank(
+        self,
+        condition: Condition,
+        problem: Problem,
+        state: str,
+        candidates: tuple[str, ...],
+        seed: int,
+    ) -> RankingDecision: ...
+
+
+def search_problem(
+    problem: Problem,
+    condition: Condition,
+    seed: int,
+    pool_store: Any,
+    ranker: SearchRanker,
+    verifier: Any,
+    limits: SearchLimits,
+    attempt_sink: Callable[[AttemptRecord], Any],
+) -> TrialResult:
+    started = time.monotonic()
+    deadline = started + limits.theorem_timeout_seconds
+    initial = verifier.initial_state(problem)
+    if initial.status is not LeanStatus.OPEN or not initial.state:
+        return TrialResult(
+            problem.id,
+            condition.value,
+            seed,
+            "initialization_failed",
+            False,
+            (),
+            0,
+            0,
+            0,
+            0,
+            0,
+            "; ".join(initial.diagnostics),
+            time.monotonic() - started,
+        )
+
+    insertion_order = 0
+    initial_state = normalize_lean_text(initial.state)
+    initial_fingerprint = state_fingerprint(problem, initial_state)
+    frontier: list[tuple[int, int, str, tuple[str, ...]]] = [
+        (0, insertion_order, initial_state, ())
+    ]
+    seen = {initial_fingerprint}
+    failed_by_state: dict[str, list[str]] = {}
+    expansions = 0
+    verifier_calls = 0
+    rejected = 0
+    repeated = 0
+    novel = 0
+
+    while frontier:
+        if time.monotonic() >= deadline:
+            status = "timeout"
+            failure = "theorem timeout"
+            break
+        if expansions >= limits.max_expansions or verifier_calls >= limits.max_verifier_calls:
+            status = "budget_exhausted"
+            failure = "search budget exhausted"
+            break
+        _, _, state, prefix = heapq.heappop(frontier)
+        fingerprint = state_fingerprint(problem, state)
+        expansions += 1
+        failed = tuple(failed_by_state.get(fingerprint, ()))
+        try:
+            candidates = pool_store.get(
+                problem,
+                state,
+                prefix,
+                failed,
+                seed=seed,
+                top_k=limits.top_k,
+            )
+            decision = ranker.rank(condition, problem, state, candidates, seed)
+        except Exception as error:
+            status = "model_failure"
+            failure = f"{type(error).__name__}: {error}"
+            break
+        for candidate in decision.ordered_candidates:
+            if verifier_calls >= limits.max_verifier_calls or time.monotonic() >= deadline:
+                break
+            verifier_calls += 1
+            result = verifier.try_tactic(problem, prefix, candidate)
+            successor_fingerprint: str | None = None
+            if result.status is LeanStatus.COMPLETE and result.accepted:
+                disposition = "complete"
+                attempt_sink(
+                    AttemptRecord(
+                        problem.id,
+                        condition.value,
+                        seed,
+                        fingerprint,
+                        prefix,
+                        tuple(candidates),
+                        tuple(decision.indices),
+                        candidate,
+                        disposition,
+                        None,
+                        result.diagnostics,
+                        tuple(hit.item.transition.id for hit in decision.hits),
+                    )
+                )
+                tactics = prefix + (candidate,)
+                return TrialResult(
+                    problem.id,
+                    condition.value,
+                    seed,
+                    "complete",
+                    True,
+                    tactics,
+                    expansions,
+                    verifier_calls,
+                    rejected,
+                    repeated,
+                    novel,
+                    None,
+                    time.monotonic() - started,
+                )
+            if result.status is LeanStatus.OPEN and result.accepted and result.state:
+                successor = normalize_lean_text(result.state)
+                successor_fingerprint = state_fingerprint(problem, successor)
+                if successor_fingerprint in seen:
+                    disposition = "repeated"
+                    repeated += 1
+                else:
+                    disposition = "novel"
+                    novel += 1
+                    seen.add(successor_fingerprint)
+                    insertion_order += 1
+                    successor_prefix = prefix + (candidate,)
+                    heapq.heappush(
+                        frontier,
+                        (-len(successor_prefix), insertion_order, successor, successor_prefix),
+                    )
+            else:
+                disposition = result.status.value
+                rejected += 1
+                failed_by_state.setdefault(fingerprint, []).append(candidate)
+            attempt_sink(
+                AttemptRecord(
+                    problem.id,
+                    condition.value,
+                    seed,
+                    fingerprint,
+                    prefix,
+                    tuple(candidates),
+                    tuple(decision.indices),
+                    candidate,
+                    disposition,
+                    successor_fingerprint,
+                    result.diagnostics,
+                    tuple(hit.item.transition.id for hit in decision.hits),
+                )
+            )
+    else:
+        status = "exhausted"
+        failure = "search frontier exhausted"
+
+    return TrialResult(
+        problem.id,
+        condition.value,
+        seed,
+        status,
+        False,
+        (),
+        expansions,
+        verifier_calls,
+        rejected,
+        repeated,
+        novel,
+        failure,
+        time.monotonic() - started,
+    )
 
 
 def masked_problem_payload(problem: Problem) -> dict[str, str]:

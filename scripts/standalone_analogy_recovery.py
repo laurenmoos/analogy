@@ -11,17 +11,28 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import random
+import re
+import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 
 
 class ExperimentError(RuntimeError):
     """Raised when experiment inputs or runtime behavior are invalid."""
+
+
+class ModelOutputError(ExperimentError):
+    """Raised when generated or embedded model output violates its schema."""
+
+
+class ModelConfigurationError(ExperimentError):
+    """Raised when the configured model cannot satisfy the experiment."""
 
 
 def _nonblank(value: Any, field: str, *, allow_empty: bool = False) -> str:
@@ -87,6 +98,348 @@ class Condition(str, Enum):
     NONE = "none"
     RANDOM = "random"
     ANALOGY = "analogy"
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    role: str
+    content: str
+
+    def __post_init__(self) -> None:
+        if self.role not in {"system", "user", "assistant"}:
+            raise ExperimentError("message.role is invalid")
+        _nonblank(self.content, "message.content")
+
+
+@dataclass(frozen=True, slots=True)
+class Embedding:
+    values: tuple[float, ...]
+    layer: int
+    token_index: int
+    model_revision: str
+    text_hash: str
+
+    def __post_init__(self) -> None:
+        values = tuple(float(item) for item in self.values)
+        if not values or not all(math.isfinite(item) for item in values):
+            raise ModelOutputError("embedding values must be nonempty and finite")
+        norm = math.sqrt(sum(item * item for item in values))
+        if norm == 0.0:
+            raise ModelOutputError("embedding vector must not be zero")
+        object.__setattr__(self, "values", values)
+        if self.token_index < 0:
+            raise ModelOutputError("embedding token index must be nonnegative")
+        _nonblank(self.model_revision, "embedding.model_revision")
+        _nonblank(self.text_hash, "embedding.text_hash")
+
+    @property
+    def dimension(self) -> int:
+        return len(self.values)
+
+
+class TextModel(Protocol):
+    model_revision: str
+
+    def generate(self, messages: tuple[Message, ...], *, seed: int) -> str: ...
+
+    def embed(self, text: str, layer: int) -> Embedding: ...
+
+
+CANDIDATE_PROMPT_VERSION = "candidate-v1"
+PROOF_NEED_PROMPT_VERSION = "proof-need-v1"
+TRANSFORMATION_PROMPT_VERSION = "transformation-v1"
+RANKING_PROMPT_VERSION = "ranking-v1"
+PROMPT_VERSIONS = MappingProxyType(
+    {
+        "candidate": CANDIDATE_PROMPT_VERSION,
+        "proof_need": PROOF_NEED_PROMPT_VERSION,
+        "transformation": TRANSFORMATION_PROMPT_VERSION,
+        "ranking": RANKING_PROMPT_VERSION,
+    }
+)
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _context_block(values: tuple[str, ...]) -> str:
+    return "\n".join(values) if values else "(none)"
+
+
+def candidate_prompt(
+    problem: Problem,
+    state: str,
+    accepted: tuple[str, ...],
+    failed: tuple[str, ...],
+    top_k: int,
+) -> tuple[Message, ...]:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+        raise ExperimentError("top_k must be a positive integer")
+    payload = masked_problem_payload(problem)
+    return (
+        Message(
+            "system",
+            f"Prompt {CANDIDATE_PROMPT_VERSION}. Propose ranked next Lean 4 tactics. "
+            "Return only a nonempty JSON array of unique, complete, single-line "
+            "tactic strings. Use only visible identifiers and do not repeat failures.",
+        ),
+        Message(
+            "user",
+            f"Binders: {payload['binders'] or '(none)'}\n"
+            f"Overall target: {payload['target']}\n"
+            f"Current goals:\n{state}\n"
+            f"Accepted prefix:\n{_context_block(accepted)}\n"
+            f"Failed tactics:\n{_context_block(failed)}\n"
+            f"Return at most {top_k} tactics.",
+        ),
+    )
+
+
+def proof_need_prompt(
+    problem: Problem,
+    state: str,
+    accepted: tuple[str, ...],
+    failed: tuple[str, ...],
+) -> tuple[Message, ...]:
+    payload = masked_problem_payload(problem)
+    return (
+        Message(
+            "system",
+            f"Prompt {PROOF_NEED_PROMPT_VERSION}. Describe the abstract structural "
+            "change needed next. Do not name Lean tactics or copy identifiers. "
+            "Return one concise sentence only.",
+        ),
+        Message(
+            "user",
+            f"Overall target: {payload['target']}\nCurrent goals:\n{state}\n"
+            f"Accepted progress:\n{_context_block(accepted)}\n"
+            f"Failed attempts:\n{_context_block(failed)}",
+        ),
+    )
+
+
+def transformation_prompt(transition: Transition) -> tuple[Message, ...]:
+    return (
+        Message(
+            "system",
+            f"Prompt {TRANSFORMATION_PROMPT_VERSION}. State only the domain-neutral "
+            "structural change from before to after. Do not use Lean syntax or tactic "
+            "names. Return exactly one JSON object with key transformation.",
+        ),
+        Message(
+            "user",
+            f"Domain: {transition.domain}\nBefore: {transition.before}\nAfter: {transition.after}",
+        ),
+    )
+
+
+def ranking_prompt(
+    problem: Problem,
+    state: str,
+    candidates: tuple[str, ...],
+    transformations: tuple[str, ...],
+) -> tuple[Message, ...]:
+    payload = masked_problem_payload(problem)
+    numbered = "\n".join(f"{index}: {item}" for index, item in enumerate(candidates))
+    analogies = _context_block(transformations)
+    return (
+        Message(
+            "system",
+            f"Prompt {RANKING_PROMPT_VERSION}. Rank only the supplied Lean tactic "
+            "indices. Return a JSON array of unique integer indices. Do not write tactics.",
+        ),
+        Message(
+            "user",
+            f"Overall target: {payload['target']}\nCurrent goals:\n{state}\n"
+            f"Structural transformations:\n{analogies}\nCandidates:\n{numbered}",
+        ),
+    )
+
+
+def parse_candidates(text: str, top_k: int) -> tuple[str, ...]:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+        raise ExperimentError("top_k must be a positive integer")
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ModelOutputError("candidate output must be valid JSON") from error
+    if not isinstance(value, list) or not value:
+        raise ModelOutputError("candidate output must be a nonempty array")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or any(character in item for character in "\r\n\x00"):
+            raise ModelOutputError("candidate tactics must be nonblank single lines")
+        canonical = " ".join(item.split())
+        if canonical in seen:
+            raise ModelOutputError("candidate tactics must be unique")
+        seen.add(canonical)
+        result.append(canonical)
+    return tuple(result[:top_k])
+
+
+_TACTIC_WORDS = re.compile(r"\b(?:intro|exact|apply|cases|constructor|simp|aesop|assumption|rfl)\b", re.IGNORECASE)
+
+
+def parse_transformation(text: str) -> str:
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ModelOutputError("transformation output must be valid JSON") from error
+    if not isinstance(value, dict) or set(value) != {"transformation"}:
+        raise ModelOutputError("transformation output must contain exactly transformation")
+    transformation = value["transformation"]
+    if not isinstance(transformation, str) or not transformation.strip():
+        raise ModelOutputError("transformation must be a nonblank string")
+    normalized = " ".join(transformation.split())
+    if _TACTIC_WORDS.search(normalized):
+        raise ModelOutputError("transformation must not contain Lean tactic names")
+    return normalized
+
+
+def parse_ranking(text: str, candidate_count: int) -> tuple[int, ...]:
+    if isinstance(candidate_count, bool) or not isinstance(candidate_count, int) or candidate_count <= 0:
+        raise ExperimentError("candidate_count must be a positive integer")
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ModelOutputError("ranking output must be valid JSON") from error
+    if not isinstance(value, list):
+        raise ModelOutputError("ranking output must be an array")
+    result: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or not 0 <= item < candidate_count:
+            raise ModelOutputError("ranking indices are out of range")
+        if item in seen:
+            raise ModelOutputError("ranking indices must be unique")
+        seen.add(item)
+        result.append(item)
+    result.extend(index for index in range(candidate_count) if index not in seen)
+    return tuple(result)
+
+
+class QwenModel:
+    """Frozen local Qwen boundary for deterministic generation and embeddings."""
+
+    def __init__(
+        self,
+        *,
+        tokenizer: Any,
+        model: Any,
+        torch_module: Any,
+        device: str,
+        max_new_tokens: int,
+        timeout_seconds: float,
+    ) -> None:
+        self._tokenizer = tokenizer
+        self._model = model
+        self._torch = torch_module
+        self._device = device
+        self._max_new_tokens = max_new_tokens
+        self._timeout_seconds = timeout_seconds
+        self.model_revision = str(
+            getattr(getattr(model, "config", None), "_commit_hash", None)
+            or getattr(getattr(model, "config", None), "name_or_path", None)
+            or "unknown"
+        )
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        model.eval()
+
+    @classmethod
+    def load(
+        cls,
+        name: str,
+        device: str,
+        max_new_tokens: int,
+        timeout_seconds: float,
+    ) -> QwenModel:
+        try:
+            import torch
+            import transformers
+        except ImportError as error:
+            raise ModelConfigurationError("torch and transformers are required") from error
+        normalized = device.casefold()
+        if normalized == "auto":
+            if torch.cuda.is_available():
+                normalized = "cuda"
+            elif torch.backends.mps.is_available():
+                normalized = "mps"
+            else:
+                normalized = "cpu"
+        if normalized not in {"cpu", "cuda", "mps"}:
+            raise ModelConfigurationError(f"unknown model device {device!r}")
+        if normalized == "cuda" and not torch.cuda.is_available():
+            raise ModelConfigurationError("configured cuda device is unavailable")
+        if normalized == "mps" and not torch.backends.mps.is_available():
+            raise ModelConfigurationError("configured mps device is unavailable")
+        tokenizer = transformers.AutoTokenizer.from_pretrained(name)
+        model = transformers.AutoModelForCausalLM.from_pretrained(name, torch_dtype="auto")
+        model.to(normalized)
+        return cls(
+            tokenizer=tokenizer,
+            model=model,
+            torch_module=torch,
+            device=normalized,
+            max_new_tokens=max_new_tokens,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _render(self, messages: tuple[Message, ...]) -> str:
+        return self._tokenizer.apply_chat_template(
+            [{"role": item.role, "content": item.content} for item in messages],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    def generate(self, messages: tuple[Message, ...], *, seed: int) -> str:
+        prompt = self._render(messages)
+        inputs = self._tokenizer([prompt], return_tensors="pt").to(self._device)
+        self._torch.manual_seed(seed)
+        started = time.monotonic()
+        with self._torch.inference_mode():
+            generated = self._model.generate(
+                **inputs,
+                do_sample=False,
+                max_new_tokens=self._max_new_tokens,
+                max_time=self._timeout_seconds,
+            )
+        if time.monotonic() - started >= self._timeout_seconds:
+            raise TimeoutError(f"generation exceeded {self._timeout_seconds:g} seconds")
+        input_length = int(inputs["input_ids"].shape[-1])
+        return self._tokenizer.decode(generated[0][input_length:], skip_special_tokens=True)
+
+    def embed(self, text: str, layer: int) -> Embedding:
+        _nonblank(text, "embedding text")
+        inputs = self._tokenizer([text], return_tensors="pt").to(self._device)
+        with self._torch.inference_mode():
+            output = self._model(**inputs, output_hidden_states=True, use_cache=False)
+        hidden_states = tuple(output.hidden_states)
+        resolved = layer if layer >= 0 else len(hidden_states) + layer
+        if not 0 <= resolved < len(hidden_states):
+            raise ModelConfigurationError(
+                f"embedding layer {layer} is outside [-{len(hidden_states)}, {len(hidden_states) - 1}]"
+            )
+        attention = inputs["attention_mask"]
+        token_index = int(attention[0].sum().item()) - 1
+        vector = hidden_states[resolved][0, token_index].to(dtype=self._torch.float32)
+        if not bool(self._torch.isfinite(vector).all().item()):
+            raise ModelOutputError("embedding vector must be finite")
+        norm = self._torch.linalg.vector_norm(vector)
+        if not math.isfinite(float(norm.item())) or float(norm.item()) == 0.0:
+            raise ModelOutputError("embedding vector must be finite and nonzero")
+        normalized = vector / norm
+        values = tuple(float(item) for item in normalized.detach().cpu().tolist())
+        return Embedding(
+            values=values,
+            layer=resolved,
+            token_index=token_index,
+            model_revision=self.model_revision,
+            text_hash=sha256_text(text),
+        )
 
 
 def masked_problem_payload(problem: Problem) -> dict[str, str]:

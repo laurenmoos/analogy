@@ -20,7 +20,11 @@ for ARG in "$@"; do
 done
 
 if [ "$HAS_PROBLEM" -eq 0 ]; then
-    set -- --problem imp_intro_01 "$@"
+    set -- \
+        --problem imp_intro_01 \
+        --problem imp_intro_03 \
+        --problem and_intro_05 \
+        "$@"
 fi
 
 exec "$PYTHON" "$SCRIPT_DIR/scripts/standalone_analogy_recovery.py" \

@@ -79,7 +79,7 @@ PYTHONPATH=src .venv/bin/python -m pytest -q
 
 ## Standalone retrieval experiment
 
-The retrieval comparison is independent of the numbered implementation plans and does not import the `analogy` package. Run the one-problem, three-condition smoke experiment with:
+The retrieval comparison is independent of the numbered implementation plans and does not import the `analogy` package. Run the default three-problem, three-condition experiment with:
 
 ```bash
 ./run_experiment.sh
@@ -92,7 +92,8 @@ Validate the inputs and Lean setup without loading Qwen:
 ```
 
 Additional options are passed to the standalone Python program. For example,
-`./run_experiment.sh --problem imp_intro_05` selects another benchmark problem.
+`./run_experiment.sh --problem imp_intro_05` replaces the mixed default set
+(`imp_intro_01`, `imp_intro_03`, and `and_intro_05`) with one selected problem.
 Difficulty 3–5 problems use a bounded thinking phase followed by a separate
 non-thinking JSON answer phase; `generations.jsonl` records the actual token,
 time, phase, and stopping budgets used by every model call.

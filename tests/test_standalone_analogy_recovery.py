@@ -943,7 +943,7 @@ def test_root_launcher_runs_dry_run_from_any_directory(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
-    assert payload["problem_count"] == 1
+    assert payload["problem_count"] == 3
     assert payload["condition_count"] == 1
 
 
@@ -1123,6 +1123,28 @@ def test_none_only_cli_accepts_missing_and_short_retrieval_corpora(tmp_path: Pat
 
     assert config.transitions == ()
     assert counts == {"poetry": 0, "physics": 0}
+
+
+def test_launcher_defaults_to_three_mixed_problems_across_all_conditions() -> None:
+    completed = subprocess.run(
+        [str(LAUNCHER_PATH), "--dry-run"],
+        cwd=LAUNCHER_PATH.parent,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload == {
+        "condition_count": 3,
+        "lean_available": True,
+        "model_loaded": False,
+        "problem_count": 3,
+        "seed_count": 1,
+        "transition_counts": {"physics": 8, "poetry": 8},
+    }
 
 
 def test_dry_run_probes_lean_instead_of_trusting_executable_path(tmp_path: Path, capsys) -> None:

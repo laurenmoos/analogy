@@ -20,8 +20,8 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -1021,6 +1021,8 @@ class AttemptRecord:
     successor_fingerprint: str | None
     diagnostics: tuple[str, ...]
     retrieval_hits: tuple[str, ...] = ()
+    retrieval_domains: tuple[str, ...] = ()
+    retrieval_similarities: tuple[float | None, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1150,6 +1152,8 @@ def search_problem(
                         None,
                         result.diagnostics,
                         tuple(hit.item.transition.id for hit in decision.hits),
+                        tuple(hit.item.transition.domain for hit in decision.hits),
+                        tuple(hit.similarity for hit in decision.hits),
                     )
                 )
                 tactics = prefix + (candidate,)
@@ -1202,6 +1206,8 @@ def search_problem(
                     successor_fingerprint,
                     result.diagnostics,
                     tuple(hit.item.transition.id for hit in decision.hits),
+                    tuple(hit.item.transition.domain for hit in decision.hits),
+                    tuple(hit.similarity for hit in decision.hits),
                 )
             )
     else:
@@ -1223,6 +1229,344 @@ def search_problem(
         failure,
         time.monotonic() - started,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentConfig:
+    problems: tuple[Problem, ...]
+    reference_proofs: Mapping[str, ReferenceProof]
+    transitions: tuple[Transition, ...]
+    conditions: tuple[Condition, ...]
+    seeds: tuple[int, ...]
+    output_dir: Path
+    cache_dir: Path | None
+    hidden_layer: int
+    retrieval_count: int
+    search_limits: SearchLimits
+    model_name: str
+    device: str = "auto"
+    max_new_tokens: int = 256
+    model_timeout_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        problems = tuple(self.problems)
+        references = dict(self.reference_proofs)
+        transitions = tuple(self.transitions)
+        conditions = tuple(self.conditions)
+        seeds = tuple(self.seeds)
+        if not problems or len({item.id for item in problems}) != len(problems):
+            raise ExperimentError("experiment problems must be nonempty and unique")
+        if set(references) != {item.id for item in problems}:
+            raise ExperimentError("experiment reference coverage must match problems")
+        if not conditions or Condition.NONE not in conditions or len(set(conditions)) != len(conditions):
+            raise ExperimentError("experiment conditions must be unique and include none")
+        if not seeds or any(isinstance(item, bool) or not isinstance(item, int) for item in seeds):
+            raise ExperimentError("experiment seeds must be nonempty integers")
+        if any(condition is not Condition.NONE for condition in conditions) and not transitions:
+            raise ExperimentError("retrieval conditions require transitions")
+        if self.retrieval_count <= 0:
+            raise ExperimentError("retrieval_count must be positive")
+        if any(condition is not Condition.NONE for condition in conditions) and self.retrieval_count > len(transitions):
+            raise ExperimentError("retrieval_count exceeds transition count")
+        _nonblank(self.model_name, "model_name")
+        object.__setattr__(self, "problems", problems)
+        object.__setattr__(self, "reference_proofs", MappingProxyType(references))
+        object.__setattr__(self, "transitions", transitions)
+        object.__setattr__(self, "conditions", conditions)
+        object.__setattr__(self, "seeds", seeds)
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        object.__setattr__(self, "cache_dir", None if self.cache_dir is None else Path(self.cache_dir))
+
+
+def _jsonable(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+class JsonlSink:
+    """Append-only JSONL writer that flushes every complete row."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._handle = self.path.open("x", encoding="utf-8", newline="\n")
+
+    def write(self, value: Any) -> None:
+        self._handle.write(json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True))
+        self._handle.write("\n")
+        self._handle.flush()
+
+    def close(self) -> None:
+        if not self._handle.closed:
+            self._handle.close()
+
+    def __enter__(self) -> JsonlSink:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+def _atomic_json(path: Path, value: Any) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(_jsonable(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def summarize_trials(trials: Sequence[TrialResult]) -> dict[str, object]:
+    normalized = tuple(trials)
+    by_key: dict[tuple[str, int, str], TrialResult] = {}
+    for item in normalized:
+        key = (item.problem_id, item.seed, item.condition)
+        if key in by_key:
+            raise ExperimentError(f"duplicate trial result {key}")
+        by_key[key] = item
+    baseline = {
+        (item.problem_id, item.seed): item
+        for item in normalized
+        if item.condition == Condition.NONE.value
+    }
+    if not baseline:
+        raise ExperimentError("trial summary requires no-retrieval baselines")
+    seeds = {seed for _, seed in baseline}
+
+    def label(key: tuple[str, int]) -> str:
+        problem_id, seed = key
+        return problem_id if len(seeds) == 1 else f"{problem_id}@{seed}"
+
+    baseline_solved = sorted(label(key) for key, item in baseline.items() if item.solved)
+    baseline_unsolved = sorted(label(key) for key, item in baseline.items() if not item.solved)
+    conditions = sorted({item.condition for item in normalized})
+    aggregates: dict[str, object] = {}
+    for condition in conditions:
+        selected = [item for item in normalized if item.condition == condition]
+        solved_count = sum(item.solved for item in selected)
+        aggregates[condition] = {
+            "trial_count": len(selected),
+            "solved_count": solved_count,
+            "completion_rate": solved_count / len(selected),
+            "verifier_call_count": sum(item.verifier_call_count for item in selected),
+            "expansion_count": sum(item.expansion_count for item in selected),
+        }
+
+    comparisons: dict[str, object] = {}
+    for condition in (Condition.RANDOM.value, Condition.ANALOGY.value):
+        target = {
+            (item.problem_id, item.seed): item
+            for item in normalized
+            if item.condition == condition
+        }
+        if not target:
+            continue
+        if set(target) != set(baseline):
+            raise ExperimentError(f"condition {condition} is not paired with every baseline")
+        newly_solved = sorted(
+            label(key)
+            for key in baseline
+            if not baseline[key].solved and target[key].solved
+        )
+        regressed = sorted(
+            label(key)
+            for key in baseline
+            if baseline[key].solved and not target[key].solved
+        )
+        target_solved = sum(item.solved for item in target.values())
+        baseline_count = sum(item.solved for item in baseline.values())
+        comparisons[f"{condition}_vs_none"] = {
+            "completion_delta": target_solved - baseline_count,
+            "completion_rate_delta": (target_solved - baseline_count) / len(baseline),
+            "newly_solved": newly_solved,
+            "regressed": regressed,
+            "verifier_call_delta": sum(item.verifier_call_count for item in target.values())
+            - sum(item.verifier_call_count for item in baseline.values()),
+            "expansion_delta": sum(item.expansion_count for item in target.values())
+            - sum(item.expansion_count for item in baseline.values()),
+            "baseline_solved_completion_delta": sum(
+                target[key].solved - baseline[key].solved
+                for key in baseline
+                if baseline[key].solved
+            ),
+            "baseline_unsolved_completion_delta": sum(
+                target[key].solved - baseline[key].solved
+                for key in baseline
+                if not baseline[key].solved
+            ),
+        }
+    return {
+        "run_complete": True,
+        "trial_count": len(normalized),
+        "subgroups": {
+            "baseline_solved": baseline_solved,
+            "baseline_unsolved": baseline_unsolved,
+        },
+        "conditions": aggregates,
+        "comparisons": comparisons,
+    }
+
+
+class ConditionRanker:
+    def __init__(
+        self,
+        model: TextModel,
+        index: tuple[IndexedTransition, ...],
+        retrieval_count: int,
+        layer: int,
+    ) -> None:
+        self.model = model
+        self.index = index
+        self.retrieval_count = retrieval_count
+        self.layer = layer
+
+    def rank(
+        self,
+        condition: Condition,
+        problem: Problem,
+        state: str,
+        candidates: tuple[str, ...],
+        seed: int,
+    ) -> RankingDecision:
+        return rank_for_condition(
+            condition,
+            problem,
+            state,
+            candidates,
+            None,
+            self.index,
+            self.model,
+            self.retrieval_count,
+            seed,
+            layer=self.layer,
+        )
+
+
+def _run_config_payload(config: ExperimentConfig, *, complete: bool) -> dict[str, Any]:
+    return {
+        "run_complete": complete,
+        "problem_ids": [item.id for item in config.problems],
+        "conditions": [item.value for item in config.conditions],
+        "seeds": list(config.seeds),
+        "transition_count": len(config.transitions),
+        "model": {
+            "name": config.model_name,
+            "device": config.device,
+            "hidden_layer": config.hidden_layer,
+            "max_new_tokens": config.max_new_tokens,
+            "timeout_seconds": config.model_timeout_seconds,
+        },
+        "retrieval_count": config.retrieval_count,
+        "search_limits": _jsonable(config.search_limits),
+        "prompt_versions": dict(PROMPT_VERSIONS),
+    }
+
+
+def run_experiment(
+    config: ExperimentConfig,
+    model_factory: Callable[[ExperimentConfig], TextModel],
+    verifier_factory: Callable[[ExperimentConfig], Any],
+) -> Path:
+    output = config.output_dir
+    if output.exists():
+        raise ExperimentError(f"output directory already exists: {output}")
+    output.mkdir(parents=True, exist_ok=False)
+    _atomic_json(output / "config.json", _run_config_payload(config, complete=False))
+    model = model_factory(config)
+    verifier = verifier_factory(config)
+    needs_index = any(condition is not Condition.NONE for condition in config.conditions)
+    index = (
+        build_index(config.transitions, model, config.cache_dir, config.hidden_layer)
+        if needs_index
+        else ()
+    )
+    pool_store = CandidatePoolStore(model)
+    ranker = ConditionRanker(model, index, config.retrieval_count, config.hidden_layer)
+    trials: list[TrialResult] = []
+    condition_order = [Condition.NONE] + [
+        condition for condition in config.conditions if condition is not Condition.NONE
+    ]
+
+    with (
+        JsonlSink(output / "transitions.jsonl") as transition_sink,
+        JsonlSink(output / "attempts.jsonl") as attempt_sink,
+        JsonlSink(output / "trials.jsonl") as trial_sink,
+    ):
+        for item in index:
+            transition_sink.write(
+                {
+                    "id": item.transition.id,
+                    "domain": item.transition.domain,
+                    "before": item.transition.before,
+                    "after": item.transition.after,
+                    "provenance": dict(item.transition.provenance),
+                    "transformation": item.transformation,
+                    "cache_key": item.cache_key,
+                    "embedding": {
+                        "model_revision": item.embedding.model_revision,
+                        "layer": item.embedding.layer,
+                        "token_index": item.embedding.token_index,
+                        "dimension": item.embedding.dimension,
+                        "text_hash": item.embedding.text_hash,
+                    },
+                }
+            )
+        for seed in config.seeds:
+            for condition in condition_order:
+                for problem in config.problems:
+                    trial_attempts: list[AttemptRecord] = []
+
+                    def record_attempt(record: AttemptRecord) -> None:
+                        trial_attempts.append(record)
+                        attempt_sink.write(record)
+
+                    result = search_problem(
+                        problem,
+                        condition,
+                        seed,
+                        pool_store,
+                        ranker,
+                        verifier,
+                        config.search_limits,
+                        record_attempt,
+                    )
+                    reference = config.reference_proofs[problem.id]
+                    candidate_coverage = any(
+                        any(tactic in attempt.candidates for tactic in reference.tactics)
+                        for attempt in trial_attempts
+                    )
+                    exact_overlap = sum(
+                        index < len(reference.tactics) and tactic == reference.tactics[index]
+                        for index, tactic in enumerate(result.tactics)
+                    )
+                    finalized = replace(
+                        result,
+                        reference_coverage=candidate_coverage,
+                        exact_reference_overlap=exact_overlap,
+                    )
+                    trial_sink.write(finalized)
+                    trials.append(finalized)
+    expected = {
+        (problem.id, seed, condition.value)
+        for problem in config.problems
+        for seed in config.seeds
+        for condition in config.conditions
+    }
+    actual = {(item.problem_id, item.seed, item.condition) for item in trials}
+    if actual != expected or len(trials) != len(expected):
+        raise ExperimentError("run did not produce exactly one result per requested trial")
+    summary = summarize_trials(trials)
+    _atomic_json(output / "summary.json", summary)
+    _atomic_json(output / "config.json", _run_config_payload(config, complete=True))
+    return output
 
 
 def masked_problem_payload(problem: Problem) -> dict[str, str]:

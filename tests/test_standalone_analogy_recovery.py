@@ -449,3 +449,142 @@ def test_standalone_real_lean_reports_rejected_open_and_complete() -> None:
     assert complete.status is module.LeanStatus.COMPLETE
     assert complete.accepted is True
     assert all("lean-gym-" not in diagnostic for diagnostic in rejected.diagnostics)
+
+
+def trial(module, problem_id: str, condition: str, solved: bool):
+    return module.TrialResult(
+        problem_id=problem_id,
+        condition=condition,
+        seed=0,
+        status="complete" if solved else "exhausted",
+        solved=solved,
+        tactics=("exact h",) if solved else (),
+        expansion_count=1,
+        verifier_call_count=1,
+        rejected_count=0,
+        repeated_state_count=0,
+        novel_state_count=0,
+        failure=None if solved else "exhausted",
+        elapsed_seconds=0.1,
+    )
+
+
+def test_summary_uses_no_retrieval_to_define_solved_subgroups() -> None:
+    module = load_script()
+    trials = (
+        trial(module, "a", "none", True),
+        trial(module, "a", "random", False),
+        trial(module, "a", "analogy", True),
+        trial(module, "b", "none", False),
+        trial(module, "b", "random", False),
+        trial(module, "b", "analogy", True),
+    )
+
+    summary = module.summarize_trials(trials)
+
+    assert summary["subgroups"]["baseline_solved"] == ["a"]
+    assert summary["subgroups"]["baseline_unsolved"] == ["b"]
+    assert summary["comparisons"]["analogy_vs_none"]["newly_solved"] == ["b"]
+    assert summary["comparisons"]["random_vs_none"]["regressed"] == ["a"]
+
+
+class CompletingVerifier:
+    def __init__(self, module):
+        self.module = module
+
+    def initial_state(self, problem):
+        return open_result(self.module, f"⊢ {problem.target}")
+
+    def try_tactic(self, problem, prefix, candidate):
+        return complete_result(self.module)
+
+
+class ExperimentModel(SpyModel):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def generate(self, messages, *, seed: int):
+        self.generation_calls.append((messages, seed))
+        system = messages[0].content
+        if "candidate-v1" in system:
+            return '["exact h"]'
+        if "proof-need-v1" in system:
+            return "make the available element satisfy the goal"
+        if "transformation-v1" in system:
+            return '{"transformation":"one element becomes available"}'
+        return "[0]"
+
+    def embed(self, text: str, layer: int):
+        self.embedding_calls.append((text, layer))
+        return self.module.Embedding(
+            (1.0, 0.0),
+            layer,
+            0,
+            self.model_revision,
+            self.module.sha256_text(text),
+        )
+
+
+def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_path: Path) -> None:
+    module = load_script()
+    model = ExperimentModel(module)
+    problems = (
+        module.Problem("sentinel", "(P : Prop) (h : P)", "P"),
+        module.Problem("ordinary", "(P : Prop) (h : P)", "P"),
+    )
+    references = {
+        "sentinel": module.ReferenceProof("sentinel", ("exact DO_NOT_LEAK",)),
+        "ordinary": module.ReferenceProof("ordinary", ("exact h",)),
+    }
+    transitions = (
+        module.Transition("p", "poetry", "closed", "open", {}),
+        module.Transition("f", "physics", "off", "on", {}),
+    )
+    output = tmp_path / "run"
+    config = module.ExperimentConfig(
+        problems=problems,
+        reference_proofs=references,
+        transitions=transitions,
+        conditions=(module.Condition.NONE, module.Condition.RANDOM, module.Condition.ANALOGY),
+        seeds=(0,),
+        output_dir=output,
+        cache_dir=tmp_path / "cache",
+        hidden_layer=-1,
+        retrieval_count=1,
+        search_limits=module.SearchLimits(2, 4, 5.0, top_k=1),
+        model_name="fake",
+    )
+
+    result_path = module.run_experiment(
+        config,
+        model_factory=lambda _: model,
+        verifier_factory=lambda _: CompletingVerifier(module),
+    )
+
+    assert result_path == output
+    for name in ("transitions.jsonl", "attempts.jsonl", "trials.jsonl"):
+        rows = [json.loads(line) for line in (output / name).read_text(encoding="utf-8").splitlines()]
+        assert rows
+    summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    assert summary["run_complete"] is True
+    trial_rows = [json.loads(line) for line in (output / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
+    sentinel = next(row for row in trial_rows if row["problem_id"] == "sentinel" and row["condition"] == "none")
+    ordinary = next(row for row in trial_rows if row["problem_id"] == "ordinary" and row["condition"] == "none")
+    assert sentinel["exact_reference_overlap"] == 0
+    assert ordinary["exact_reference_overlap"] == 1
+    captured_prompts = "\n".join(
+        message.content
+        for messages, _ in model.generation_calls
+        for message in messages
+    )
+    assert "DO_NOT_LEAK" not in captured_prompts
+    assert "DO_NOT_LEAK" not in (output / "attempts.jsonl").read_text(encoding="utf-8")
+    assert "DO_NOT_LEAK" not in (output / "transitions.jsonl").read_text(encoding="utf-8")
+
+    with pytest.raises(module.ExperimentError, match="output"):
+        module.run_experiment(
+            config,
+            model_factory=lambda _: model,
+            verifier_factory=lambda _: CompletingVerifier(module),
+        )

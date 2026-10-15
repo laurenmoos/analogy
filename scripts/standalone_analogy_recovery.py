@@ -1824,7 +1824,9 @@ def generate_rescue_candidates(
         seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "rescue"),
         timeout_seconds=rescue_timeout_seconds,
         operation="rescue",
-        difficulty=problem.difficulty,
+        # Rescue is already the last bounded fallback. Ask directly for tactics
+        # instead of spending its tiny budget on an autoregressive think phase.
+        difficulty=1,
         expected_json="array",
         max_new_tokens=rescue_max_new_tokens,
     )
@@ -1860,6 +1862,16 @@ def build_transformation_index(
         cache_path = None if cache_dir is None else Path(cache_dir) / f"{key}.json"
         if cache_path is not None and cache_path.exists():
             try:
+                cached_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                if (
+                    isinstance(cached_payload, dict)
+                    and cached_payload.get("cache_key") == key
+                    and cached_payload.get("transition_id") == transition.id
+                    and cached_payload.get("schema_version") == TRANSFORMATION_SCHEMA_VERSION
+                    and cached_payload.get("exclusion") == "invalid_schema"
+                ):
+                    exclude("invalid_schema")
+                    continue
                 item = _cached_index_item(cache_path, transition, key)
                 if capture_diagnostic_embeddings and item.diagnostic_embedding is None:
                     embedding = model.embed(item.record.domain_neutral_summary, hidden_layer)
@@ -1888,6 +1900,21 @@ def build_transformation_index(
                 record = parse_transformation_record(generated)
             except ModelOutputError:
                 exclude("invalid_schema")
+                if cache_path is not None:
+                    payload = {
+                        "cache_key": key,
+                        "transition_id": transition.id,
+                        "schema_version": TRANSFORMATION_SCHEMA_VERSION,
+                        "exclusion": "invalid_schema",
+                    }
+                    temporary = cache_path.with_name(
+                        f".{cache_path.name}.{uuid.uuid4().hex}.tmp"
+                    )
+                    temporary.write_text(
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    temporary.replace(cache_path)
                 continue
             embedding = None
             if capture_diagnostic_embeddings:
@@ -2357,6 +2384,7 @@ class CandidatePoolStore:
         *,
         seed: int,
         top_k: int,
+        generation_difficulty: int | None = None,
     ) -> tuple[str, ...]:
         state_hash = sha256_text(state)
         key = (problem.id, state_hash, seed, CANDIDATE_PROMPT_VERSION, top_k)
@@ -2366,11 +2394,44 @@ class CandidatePoolStore:
                 candidate_prompt(problem, state, accepted, failed, top_k),
                 seed=derived_seed(seed, problem.id, state_hash, "candidates"),
                 operation="candidate",
-                difficulty=problem.difficulty,
+                difficulty=(
+                    problem.difficulty
+                    if generation_difficulty is None
+                    else generation_difficulty
+                ),
                 expected_json="array",
             )
             self._pools[key] = parse_candidates(generated, top_k)
         return self._pools[key]
+
+
+def proof_state_generation_difficulty(signature: ProofSignature) -> int:
+    """Assign generation budget from current proof structure, not curriculum level."""
+
+    def connective_count(shape: ExpressionShape) -> int:
+        own = 0 if shape.root in {"atom", "target", "application"} else 1
+        return own + sum(connective_count(child) for child in shape.children)
+
+    structural = signature.goal_count + connective_count(signature.target_shape)
+    return max(1, min(5, structural))
+
+
+def _candidate_pool_get(
+    pool_store: Any,
+    problem: Problem,
+    state: str,
+    accepted: tuple[str, ...],
+    failed: tuple[str, ...],
+    *,
+    seed: int,
+    top_k: int,
+    generation_difficulty: int,
+) -> tuple[str, ...]:
+    parameters = inspect.signature(pool_store.get).parameters
+    kwargs: dict[str, Any] = {"seed": seed, "top_k": top_k}
+    if "generation_difficulty" in parameters:
+        kwargs["generation_difficulty"] = generation_difficulty
+    return pool_store.get(problem, state, accepted, failed, **kwargs)
 
 
 class LeanStatus(str, Enum):
@@ -2970,13 +3031,15 @@ def search_problem(
         failed = tuple(failed_by_state.get(fingerprint, ()))
         try:
             pool_started = time.monotonic()
-            candidates = pool_store.get(
+            candidates = _candidate_pool_get(
+                pool_store,
                 problem,
                 state,
                 prefix,
                 failed,
                 seed=seed,
                 top_k=limits.top_k,
+                generation_difficulty=proof_state_generation_difficulty(signature),
             )
             deadline += time.monotonic() - pool_started
             decision = ranker.rank(
@@ -3886,7 +3949,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-expansions", type=int, default=32)
     parser.add_argument("--max-verifier-calls", type=int, default=256)
     parser.add_argument("--theorem-timeout", type=float, default=300.0)
-    parser.add_argument("--lean-timeout", type=float, default=10.0)
+    parser.add_argument("--lean-timeout", type=float, default=30.0)
     parser.add_argument("--lake-executable", default="lake")
     parser.add_argument("--model-name", default="Qwen/Qwen3-8B")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
@@ -4090,7 +4153,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "condition_count": len(config.conditions),
                         "seed_count": len(config.seeds),
                         "transition_counts": transition_counts,
+                        "device": config.device,
+                        "retrieval_count": config.retrieval_count,
+                        "structural_shortlist_size": config.structural_shortlist_size,
                         "lean_available": True,
+                        "lean_per_call_timeout_seconds": args.lean_timeout,
                         "model_loaded": False,
                     },
                     sort_keys=True,

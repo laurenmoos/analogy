@@ -938,20 +938,30 @@ def test_invalid_transformation_is_excluded_not_indexed(tmp_path: Path) -> None:
     module = load_script()
 
     class InvalidTransformationModel(SpyModel):
+        def __init__(self):
+            super().__init__()
+            self.invalid_calls = 0
+
         def generate(self, messages, *, seed: int):
             if "transformation-v1" in messages[0].content:
+                self.invalid_calls += 1
                 return '{"operation":"bad"}'
             return super().generate(messages, seed=seed)
 
+    model = InvalidTransformationModel()
+    transition = module.Transition("t", "poetry", "a", "b", {"source_id": "s"})
     index, exclusions = module.build_transformation_index(
-        (module.Transition("t", "poetry", "a", "b", {"source_id": "s"}),),
-        InvalidTransformationModel(),
+        (transition,), model, tmp_path, hidden_layer=-1,
+    )
+    cached_index, cached_exclusions = module.build_transformation_index(
+        (transition,), model,
         tmp_path,
         hidden_layer=-1,
     )
 
-    assert index == ()
-    assert exclusions == {"invalid_schema": 1}
+    assert index == cached_index == ()
+    assert exclusions == cached_exclusions == {"invalid_schema": 1}
+    assert model.invalid_calls == 1
 
 
 def test_duplicate_transformation_records_are_excluded(tmp_path: Path) -> None:
@@ -1116,7 +1126,15 @@ def test_generation_operations_receive_difficulty_and_json_contract(tmp_path: Pa
     problem = module.Problem("hard", "(P : Prop)", "P → P", difficulty=5)
     store = module.CandidatePoolStore(model)
 
-    store.get(problem, "⊢ P → P", (), (), seed=0, top_k=2)
+    store.get(
+        problem,
+        "⊢ P → P",
+        (),
+        (),
+        seed=0,
+        top_k=2,
+        generation_difficulty=2,
+    )
     index = module.build_index(
         (module.Transition("p", "poetry", "closed", "open", {}),),
         model,
@@ -1137,9 +1155,62 @@ def test_generation_operations_receive_difficulty_and_json_contract(tmp_path: Pa
     )
 
     assert model.generation_options == [
-        {"operation": "candidate", "difficulty": 5, "expected_json": "array"},
+        {"operation": "candidate", "difficulty": 2, "expected_json": "array"},
         {"operation": "transformation", "difficulty": 1, "expected_json": "object"},
     ]
+
+
+def test_generation_difficulty_tracks_proof_structure_not_benchmark_level() -> None:
+    module = load_script()
+    easy_elimination = module.parse_proof_signature({
+        "goal_count": 1,
+        "target": {"root": "atom", "children": []},
+        "hypotheses": [{
+            "root": "and",
+            "children": [
+                {"root": "atom", "children": []},
+                {"root": "target", "children": []},
+            ],
+        }],
+    })
+    nested_reordering = module.parse_proof_signature({
+        "goal_count": 1,
+        "target": {
+            "root": "implication",
+            "children": [
+                {"root": "and", "children": [
+                    {"root": "atom", "children": []},
+                    {"root": "atom", "children": []},
+                ]},
+                {"root": "and", "children": [
+                    {"root": "atom", "children": []},
+                    {"root": "atom", "children": []},
+                ]},
+            ],
+        },
+        "hypotheses": [],
+    })
+    one_step_reordering = module.parse_proof_signature({
+        "goal_count": 1,
+        "target": {
+            "root": "and",
+            "children": [
+                {"root": "atom", "children": []},
+                {"root": "atom", "children": []},
+            ],
+        },
+        "hypotheses": [{
+            "root": "and",
+            "children": [
+                {"root": "atom", "children": []},
+                {"root": "atom", "children": []},
+            ],
+        }],
+    })
+
+    assert module.proof_state_generation_difficulty(easy_elimination) <= 2
+    assert module.proof_state_generation_difficulty(nested_reordering) >= 3
+    assert module.proof_state_generation_difficulty(one_step_reordering) <= 2
 
 
 def open_result(module, state: str):
@@ -1324,6 +1395,7 @@ def test_generate_rescue_candidates_is_bounded_and_removes_shared_duplicates() -
         def generate(self, messages, *, seed, **kwargs):
             assert kwargs["max_new_tokens"] == 32
             assert kwargs["timeout_seconds"] == 20.0
+            assert kwargs["difficulty"] == 1
             return '["bad", "exact h", "exact h", "assumption"]'
 
     decision = module.generate_rescue_candidates(
@@ -1601,6 +1673,8 @@ def test_dry_run_validates_real_inputs_without_loading_model(
     assert output["problem_count"] == 1
     assert output["transition_counts"] == {"physics": 2, "poetry": 2}
     assert output["condition_count"] == 3
+    assert output["structural_shortlist_size"] == 16
+    assert output["device"] == "auto"
     assert output["lean_available"] is True
 
 
@@ -1726,6 +1800,7 @@ def test_three_condition_smoke_uses_real_lean_and_shared_pool(tmp_path: Path) ->
         module.Transition("f", "physics", "off", "on", {}),
     )
     project = Path(__file__).resolve().parents[1] / "src" / "analogy" / "lean_gym" / "lean_project"
+    lake = shutil.which("lake") or "lake"
     config = module.ExperimentConfig(
         problems=(problem,),
         reference_proofs={"identity": module.ReferenceProof("identity", ("exact h",))},
@@ -1738,6 +1813,7 @@ def test_three_condition_smoke_uses_real_lean_and_shared_pool(tmp_path: Path) ->
         retrieval_count=1,
         search_limits=module.SearchLimits(2, 4, 10.0, top_k=1),
         model_name="fake",
+        lean_configuration=module._probe_lean(project, lake, 10.0),
     )
 
     output = module.run_experiment(
@@ -1750,10 +1826,52 @@ def test_three_condition_smoke_uses_real_lean_and_shared_pool(tmp_path: Path) ->
     attempts = [json.loads(line) for line in (output / "attempts.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(trials) == 3
     assert {row["condition"] for row in trials} == {"none", "random", "analogy"}
-    assert all(row["solved"] for row in trials)
+    assert all(row["status"] == "complete" for row in trials)
     assert {tuple(row["candidates"]) for row in attempts} == {("exact h",)}
     candidate_calls = [call for call in model.generation_calls if "candidate-v1" in call[0][0].content]
     assert len(candidate_calls) == 1
+    saved_config = json.loads((output / "config.json").read_text(encoding="utf-8"))
+    assert saved_config["lean"]["version"].startswith("Lean (version 4.29.1")
+    by_condition = {
+        condition: [row for row in attempts if row["condition"] == condition]
+        for condition in ("random", "analogy")
+    }
+    assert by_condition["random"][0]["structural_shortlist_ids"] == by_condition["analogy"][0]["structural_shortlist_ids"]
+
+
+def test_hybrid_three_condition_experiment_is_paired_and_parseable(tmp_path: Path) -> None:
+    module = load_script()
+    model = ExperimentModel(module)
+    problem = module.Problem("identity", "(P : Prop) (h : P)", "P")
+    output = module.run_experiment(
+        module.ExperimentConfig(
+            problems=(problem,),
+            reference_proofs={"identity": module.ReferenceProof("identity", ("exact h",))},
+            transitions=(
+                module.Transition("p", "poetry", "closed", "open", {}),
+                module.Transition("f", "physics", "off", "on", {}),
+            ),
+            conditions=(module.Condition.NONE, module.Condition.RANDOM, module.Condition.ANALOGY),
+            seeds=(0,),
+            output_dir=tmp_path / "hybrid-run",
+            cache_dir=tmp_path / "cache",
+            hidden_layer=-1,
+            retrieval_count=1,
+            search_limits=module.SearchLimits(1, 2, 5.0, top_k=1),
+            model_name="fake",
+        ),
+        lambda config: model,
+        lambda config: CompletingVerifier(module),
+    )
+
+    trials = [json.loads(line) for line in (output / "trials.jsonl").read_text().splitlines()]
+    attempts = [json.loads(line) for line in (output / "attempts.jsonl").read_text().splitlines()]
+    assert {trial["condition"] for trial in trials} == {"none", "random", "analogy"}
+    initial = [item for item in attempts if item["prefix"] == []]
+    assert len({tuple(item["candidates"]) for item in initial}) == 1
+    summary = json.loads((output / "summary.json").read_text())
+    assert "fixed_pool_solved" in summary["conditions"]["analogy"]
+    assert "rescue_solved" in summary["conditions"]["analogy"]
 
 
 def test_direct_script_execution_defines_all_helpers_before_main(tmp_path: Path) -> None:
@@ -2045,10 +2163,14 @@ def test_launcher_defaults_to_three_mixed_problems_across_all_conditions() -> No
     payload = json.loads(completed.stdout)
     assert payload == {
         "condition_count": 3,
+        "device": "mps",
         "lean_available": True,
+        "lean_per_call_timeout_seconds": 30.0,
         "model_loaded": False,
         "problem_count": 3,
+        "retrieval_count": 4,
         "seed_count": 1,
+        "structural_shortlist_size": 16,
         "transition_counts": {"physics": 8, "poetry": 8},
     }
 

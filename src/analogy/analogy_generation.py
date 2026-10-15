@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 from .analogy_stream import (
     AnalogyHop,
@@ -189,7 +192,7 @@ class AnalogyGenerator:
                 Message("system", "Generate one explicit analogy reasoning card, not a tactic."),
                 Message("user", render_hop_prompt(context)),
             ),
-            action=action,
+            delta=action.delta,
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10,
             max_repair_calls=self.max_repair_calls,
@@ -237,7 +240,7 @@ class AnalogyTacticGenerator:
                     ),
                 ),
             ),
-            action=action,
+            delta=action.delta,
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10 + 5,
             max_repair_calls=self.max_repair_calls,
@@ -276,7 +279,7 @@ class AnalogyTacticGenerator:
                     ),
                 ),
             ),
-            action=action,
+            delta=action.delta,
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10 + 6,
             max_repair_calls=self.max_repair_calls,
@@ -291,8 +294,9 @@ class AnalogyTacticGenerator:
 
 
 def _generate_strict(
-    *, generator, messages, action, hidden_layer, seed, max_repair_calls, max_attempts,
-    parser, result_type, initial_repair=False, cancellation=None,
+    *, generator, messages, delta: Tensor | None, hidden_layer, seed,
+    max_repair_calls, max_attempts, parser, result_type, initial_repair=False,
+    cancellation=None, schema_errors=(AnalogyOutputError,), preserve_repair_context=False,
 ):
     if max_attempts is not None and (
         isinstance(max_attempts, bool)
@@ -313,12 +317,15 @@ def _generate_strict(
             )
         active_seed = seed + repair_index
         try:
-            raw = generator.generate_with_delta(
-                active_messages,
-                delta=action.delta.detach(),
-                layer=hidden_layer,
-                seed=active_seed,
-            )
+            if delta is None:
+                raw = generator.generate(active_messages, seed=active_seed)
+            else:
+                raw = generator.generate_with_delta(
+                    active_messages,
+                    delta=delta.detach(),
+                    layer=hidden_layer,
+                    seed=active_seed,
+                )
         except Exception as error:
             attempts.append(
                 GenerationAttempt(
@@ -335,7 +342,7 @@ def _generate_strict(
             ) from error
         try:
             parsed = parser(raw)
-        except AnalogyOutputError as error:
+        except schema_errors as error:
             attempts.append(
                 GenerationAttempt(
                     active_seed,
@@ -350,7 +357,8 @@ def _generate_strict(
                 messages[0],
                 Message(
                     "user",
-                    f"The prior output was invalid: {error}\nPrior output:\n{raw}\n"
+                    (f"{messages[1].content}\n\n" if preserve_repair_context else "")
+                    + f"The prior output was invalid: {error}\nPrior output:\n{raw}\n"
                     "Return only a corrected JSON object matching the requested schema.",
                 ),
             )

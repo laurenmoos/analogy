@@ -11,6 +11,7 @@ from .config import ConfigError, load_config
 from .lean_gym.resources import LEAN_PROJECT_ROOT
 from .lean_gym.verifier import LeanSubprocessVerifier
 from .model import ModelConfigurationError, QwenGenerator, run_baseline, run_capability
+from .model_backend import load_model_backend
 from .training import evaluate_direct_rescue, train_direct_rescue
 
 
@@ -59,7 +60,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     try:
-        generator = QwenGenerator.from_config(config.model)
+        generator = load_model_backend(config.model)
     except ModelConfigurationError as error:
         print(f"Model configuration error: {error}", file=sys.stderr)
         return 2

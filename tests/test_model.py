@@ -358,7 +358,7 @@ def test_qwen_generator_raises_timeout_when_generation_exceeds_limit() -> None:
 
 @pytest.mark.parametrize("device", ["cuda", "mps"])
 def test_qwen_generator_rejects_an_explicit_unavailable_device(device: str) -> None:
-    config = ModelConfig("Qwen/Qwen3-8B", device, -1, 64, 30.0, True, 0.3, 0.9)
+    config = ModelConfig("transformers", "Qwen/Qwen3-8B", device, -1, 64, 30.0, True, 0.3, 0.9)
 
     with pytest.raises(ModelConfigurationError, match=device):
         QwenGenerator.from_config(
@@ -390,7 +390,7 @@ def test_qwen_generator_keeps_auto_selected_mps_model_off_disk() -> None:
         (),
         {"AutoTokenizer": TokenizerLoader, "AutoModelForCausalLM": ModelLoader},
     )()
-    config = ModelConfig("Qwen/Qwen3-8B", "auto", -1, 64, 30.0, True, 0.3, 0.9)
+    config = ModelConfig("transformers", "Qwen/Qwen3-8B", "auto", -1, 64, 30.0, True, 0.3, 0.9)
 
     QwenGenerator.from_config(
         config,

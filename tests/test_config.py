@@ -16,6 +16,7 @@ experiment:
   stage: capability
   minimum_solved: 1
 model:
+  backend: transformers
   name: Qwen/Qwen3-8B
   device: auto
   hidden_layer: -1
@@ -89,6 +90,7 @@ def test_load_config_resolves_paths_from_config_file(tmp_path: Path) -> None:
     assert config.run.output_dir == (tmp_path / "runs").resolve()
     assert config.data.root == Path("/tmp/analogy-data").resolve()
     assert config.model.name == "Qwen/Qwen3-8B"
+    assert config.model.backend == "transformers"
     assert config.experiment.minimum_solved == 1
     assert config.model.max_new_tokens == 128
     assert config.model.timeout_seconds == 120.0
@@ -105,6 +107,18 @@ def test_load_config_resolves_paths_from_config_file(tmp_path: Path) -> None:
     assert config.analogy.min_iterations == 1
     assert config.analogy.max_iterations == 6
     assert config.analogy.surprise_threshold == 0.2
+
+
+def test_model_backend_rejects_unknown_value(tmp_path: Path) -> None:
+    module = _config_module()
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        _valid_yaml().replace("backend: transformers", "backend: metal"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.ConfigError, match=r"config\.model\.backend"):
+        module.load_config(path)
 
 
 def test_load_config_rejects_unknown_root_key(tmp_path: Path) -> None:

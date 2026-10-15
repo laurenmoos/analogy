@@ -22,6 +22,7 @@ class ExperimentConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    backend: str
     name: str
     device: str
     hidden_layer: int
@@ -117,6 +118,7 @@ _SCHEMA: dict[str, frozenset[str]] = {
     "experiment": frozenset({"stage", "minimum_solved"}),
     "model": frozenset(
         {
+            "backend",
             "name",
             "device",
             "hidden_layer",
@@ -188,6 +190,15 @@ def _string(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{path} must be a non-empty string")
     return value
+
+
+def _model_backend(value: Any) -> str:
+    backend = _string(value, "config.model.backend")
+    if backend not in {"transformers", "mlx"}:
+        raise ConfigError(
+            "config.model.backend must be 'transformers' or 'mlx'"
+        )
+    return backend
 
 
 def _integer(value: Any, path: str) -> int:
@@ -368,6 +379,7 @@ def load_config(path: Path) -> AppConfig:
             ),
         ),
         model=ModelConfig(
+            backend=_model_backend(model["backend"]),
             name=_string(model["name"], "config.model.name"),
             device=_string(model["device"], "config.model.device"),
             hidden_layer=_integer(model["hidden_layer"], "config.model.hidden_layer"),

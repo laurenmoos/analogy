@@ -3,6 +3,7 @@ experiment:
   minimum_solved: 1
 
 model:
+  backend: transformers
   name: Qwen/Qwen3-8B
   device: auto
   hidden_layer: -1

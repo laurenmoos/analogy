@@ -10,7 +10,7 @@ import time
 import uuid
 import warnings
 from collections import Counter
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -92,6 +92,7 @@ class ProblemEpisode:
     verifier_calls: int
     failure: str | None = None
     proof_trace: dict[str, Any] | None = None
+    proof_path_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +234,7 @@ def rollout_is_trainable(termination: RescueTermination) -> bool:
 class RescueRunWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._analogy_iteration_keys: set[tuple[int, str, str, str, int]] = set()
+        self._analogy_iteration_keys: set[tuple[int, str, str, str | None, str, int]] = set()
 
     @classmethod
     def create(
@@ -271,19 +272,22 @@ class RescueRunWriter:
             warnings.warn(f"Could not finalize readable traces: {error}", RuntimeWarning)
 
     def analogy_iteration_sink(
-        self, *, epoch: int, phase: str, problem_id: str, rollout_id: str
+        self, *, epoch: int, phase: str, problem_id: str, rollout_id: str,
+        proof_path_id: str | None = None,
     ) -> Callable[[str, Any], None]:
         """Return a sink that flushes each completed loop iteration immediately."""
+        path_identity = proof_path_id or uuid.uuid4().hex
         def append(actual_rollout_id: str, iteration: Any) -> None:
-            del actual_rollout_id
             self.append_analogy_iteration(
                 iteration,
                 epoch=epoch,
                 phase=phase,
                 problem_id=problem_id,
-                rollout_id=rollout_id,
+                rollout_id=actual_rollout_id or rollout_id,
+                proof_path_id=path_identity,
             )
 
+        append.proof_path_id = path_identity
         return append
 
     def append_analogy_iteration(
@@ -294,8 +298,9 @@ class RescueRunWriter:
         phase: str,
         problem_id: str,
         rollout_id: str,
+        proof_path_id: str | None = None,
     ) -> None:
-        key = (epoch, phase, problem_id, rollout_id, iteration.iteration_index)
+        key = (epoch, phase, problem_id, proof_path_id, rollout_id, iteration.iteration_index)
         if key in self._analogy_iteration_keys:
             return
         self._analogy_iteration_keys.add(key)
@@ -306,6 +311,7 @@ class RescueRunWriter:
                 "phase": phase,
                 "problem_id": problem_id,
                 "rollout_id": rollout_id,
+                "proof_path_id": proof_path_id,
                 **asdict(iteration),
             },
         )
@@ -906,6 +912,7 @@ def _execute_problem(
     generated_sources: tuple[GeneratedSourceRecord, ...] = (),
 ) -> ProblemEpisode:
     collector = RolloutCollector()
+    proof_path_id = getattr(iteration_sink, "proof_path_id", None) or uuid.uuid4().hex
     cancellation = _DeadlineCancellation(
         config.model.timeout_seconds * config.analogy.max_model_calls
     )
@@ -1046,6 +1053,7 @@ def _execute_problem(
                 "ordinary_expansions": [asdict(item) for item in result.ordinary_expansions],
                 "termination": result.status.value,
             },
+            proof_path_id=proof_path_id,
         )
     except Exception as error:
         preserved = collector.rollouts
@@ -1057,6 +1065,7 @@ def _execute_problem(
             0,
             sum(len(rollout.attempts) for rollout in preserved),
             f"{type(error).__name__}: {error}",
+            proof_path_id=proof_path_id,
         )
 
 
@@ -1347,7 +1356,7 @@ def _new_policy(config: AppConfig, generator: Any) -> DirectRescuePolicy:
 def _persist_episode(
     writer: RescueRunWriter, episode: ProblemEpisode, epoch: int, phase: str
 ) -> None:
-    proof_path_id = uuid.uuid4().hex
+    proof_path_id = episode.proof_path_id
     for rollout in episode.rollouts:
         writer.append_jsonl(
             "rollouts.jsonl", {"epoch": epoch, "phase": phase,
@@ -1362,6 +1371,7 @@ def _persist_episode(
                     "phase": phase,
                     "problem_id": episode.problem_id,
                     "rollout_id": rollout.rollout_id,
+                    "proof_path_id": proof_path_id,
                     "generation_index": generation_index,
                     **asdict(generation),
                 },
@@ -1375,6 +1385,7 @@ def _persist_episode(
                     phase=phase,
                     problem_id=episode.problem_id,
                     rollout_id=rollout.rollout_id,
+                    proof_path_id=proof_path_id,
                 )
     writer.append_jsonl(
         "problems.jsonl",
@@ -1382,6 +1393,7 @@ def _persist_episode(
             "epoch": epoch,
             "phase": phase,
             "problem_id": episode.problem_id,
+            "proof_path_id": proof_path_id,
             "completed": episode.completed,
             "ordinary_expansions": episode.ordinary_expansions,
             "verifier_calls": episode.verifier_calls,
@@ -1395,6 +1407,7 @@ def _persist_episode(
 def _live_iteration_sink(
     writer: RescueRunWriter, *, epoch: int, phase: str, problem_id: str
 ) -> Callable[[str, Any], None]:
+    proof_path_id = uuid.uuid4().hex
     def append(rollout_id: str, iteration: Any) -> None:
         writer.append_analogy_iteration(
             iteration,
@@ -1402,8 +1415,10 @@ def _live_iteration_sink(
             phase=phase,
             problem_id=problem_id,
             rollout_id=rollout_id,
+            proof_path_id=proof_path_id,
         )
 
+    append.proof_path_id = proof_path_id
     return append
 
 

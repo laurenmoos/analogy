@@ -547,6 +547,12 @@ def discounted_iteration_samples(
         raise ValueError("discount must be in (0, 1]")
     if float(iteration_cost) < 0.0:
         raise ValueError("iteration_cost must be non-negative")
+    if isinstance(trace, GeneratedAnalogyTrace):
+        action_iterations = (iteration for iteration in trace.iterations if iteration.action is not None)
+        normalized_actions = tuple(
+            action for action, iteration in zip(normalized_actions, action_iterations)
+            if iteration.training_eligible
+        )
     count = len(normalized_actions)
     return tuple(
         TrainingSample(

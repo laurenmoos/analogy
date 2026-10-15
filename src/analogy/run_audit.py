@@ -19,7 +19,10 @@ class AuditRunError(ValueError):
     pass
 
 
-_ANALOGY_PHASES = frozenset({"train", "validation", "analogy_loop"})
+_ANALOGY_PHASES = frozenset({
+    "train", "validation", "analogy_loop", "generated_unsteered",
+    "generated_random", "generated_learned", "generated_shuffled",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +130,7 @@ def audit_analogy_run(
                 "problem_id": item.problem_id,
                 "phase": item.phase,
                 "rollout_id": item.rollout_id,
+                "proof_path_id": item.proof_path_id,
                 "iteration_index": item.iteration_index,
                 "input": asdict(item),
                 "judgment": (
@@ -180,7 +184,7 @@ def load_audit_iterations(
         raise AuditRunError(f"invalid problem corpus: {error}") from error
 
     loaded: list[AuditIteration] = []
-    seen: set[tuple[str, str, str, int]] = set()
+    seen: set[tuple[str, str, str, int, str | None]] = set()
     try:
         lines = required["analogy_iterations.jsonl"].read_text(
             encoding="utf-8"
@@ -209,12 +213,7 @@ def load_audit_iterations(
             raise AuditRunError(
                 f"analogy_iterations.jsonl line {line_number}: {error}"
             ) from error
-        key = (
-            normalized.problem_id,
-            normalized.phase,
-            normalized.rollout_id,
-            normalized.iteration_index,
-        )
+        key = _iteration_key(normalized)
         if key in seen:
             raise AuditRunError(
                 f"analogy_iterations.jsonl line {line_number}: duplicate key {key!r}"
@@ -231,8 +230,18 @@ def _normalize_iteration(
     if problem_id not in problems:
         raise ValueError(f"unknown problem_id {problem_id!r}")
     state_before = _object(row["state_before"], "state_before")
-    hop = _object(row["hop"], "hop")
-    tactic_plan = _object(row["tactic_plan"], "tactic_plan")
+    generated = "source" in row or "generated_source" in row
+    if generated:
+        card = _generated_card(row)
+        tactic_plan = (_object(row["tactic_plan"], "tactic_plan")
+                       if row.get("tactic_plan") is not None else {"tactics": []})
+        predicted = row.get("predicted_transition")
+        if predicted is None:
+            predicted = "(not generated)"
+    else:
+        card = _object(row["hop"], "hop")
+        tactic_plan = _object(row["tactic_plan"], "tactic_plan")
+        predicted = row["predicted_transition"]
     decision = _object(row["decision"], "decision")
     attempts = row["attempts"]
     if not isinstance(attempts, list):
@@ -317,10 +326,8 @@ def _normalize_iteration(
         iteration_index=row["iteration_index"],
         target=problems[problem_id].target,
         state_before=_text(state_before["expression"], "state_before.expression"),
-        analogy_card=json.dumps(hop, sort_keys=True, separators=(",", ":")),
-        predicted_transition=_text(
-            row["predicted_transition"], "predicted_transition"
-        ),
+        analogy_card=json.dumps(card, sort_keys=True, separators=(",", ":")),
+        predicted_transition=_text(predicted, "predicted_transition"),
         tactics=tuple(tactics),
         lean_outcomes=tuple(outcomes),
         lean_diagnostics=tuple(diagnostics),
@@ -329,7 +336,25 @@ def _normalize_iteration(
         surprise=surprise,
         stop_decision=_text(reason, "decision.reason"),
         lean_attempts=tuple(evidence),
+        proof_path_id=row.get("proof_path_id"),
     )
+
+
+def _generated_card(row: dict[str, Any]) -> dict[str, Any]:
+    """Preserve generated stages and failures without inventing a legacy hop."""
+    card: dict[str, Any] = {"kind": "generated_domain"}
+    for name in ("observation", "need", "generated_source", "source", "alignment",
+                 "transfer", "tactic_plan"):
+        value = row.get(name)
+        card[name] = None if value is None else _object(value, name)
+    for name in ("failed_stage", "failure_diagnostic", "transition_before",
+                 "prompt_versions", "training_eligible"):
+        card[name] = row.get(name)
+    card["generation_attempts"] = {
+        stage: row.get(f"{stage}_generation_attempts", [])
+        for stage in ("source", "alignment", "transfer", "tactic")
+    }
+    return card
 
 
 def _read_json_object(path: Path, label: str) -> dict[str, Any]:
@@ -443,19 +468,23 @@ def _append_newline(path: Path) -> None:
         raise AuditRunError(f"could not repair judgments.jsonl boundary: {error}") from error
 
 
-def _iteration_key(item: AuditIteration) -> tuple[str, str, str, int]:
-    return item.problem_id, item.phase, item.rollout_id, item.iteration_index
+def _iteration_key(item: AuditIteration) -> tuple[str, str, str, int, str | None]:
+    return item.problem_id, item.phase, item.rollout_id, item.iteration_index, item.proof_path_id
 
 
-def _row_key(row: dict[str, Any]) -> tuple[str, str, str, int]:
+def _row_key(row: dict[str, Any]) -> tuple[str, str, str, int, str | None]:
     index = row["iteration_index"]
     if isinstance(index, bool) or not isinstance(index, int) or index < 0:
         raise ValueError("iteration_index must be a non-negative integer")
+    proof_path_id = row.get("proof_path_id")
+    if proof_path_id is not None:
+        proof_path_id = _text(proof_path_id, "proof_path_id")
     return (
         _text(row["problem_id"], "problem_id"),
         _text(row["phase"], "phase"),
         _text(row["rollout_id"], "rollout_id"),
         index,
+        proof_path_id,
     )
 
 

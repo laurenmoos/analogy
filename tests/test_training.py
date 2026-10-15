@@ -155,6 +155,90 @@ def test_generated_pre_action_failure_after_progress_keeps_prior_action_trainabl
     assert rollout.analogy_trace.iterations[1].action is None
 
 
+@pytest.mark.parametrize("stage", range(4))
+def test_later_infrastructure_failure_does_not_train_the_failed_action(stage):
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import runner, run, outputs
+    raw = outputs()
+    result, _, _ = runner(raw[:4 + stage] + [RuntimeError("backend unavailable")])
+    rollout = run(result).rollouts[0]
+    assert rollout.termination is RescueTermination.PROGRESS
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=0.1, discount=0.95, iteration_cost=0.01)
+    assert len(samples) == 1
+    assert samples[0].action is result.live_actions[0]
+    assert samples[0].reward == 0.1
+    assert [item.training_eligible for item in rollout.analogy_trace.iterations] == [True, False]
+
+
+@pytest.mark.parametrize("stage", ["verification", "conventional_finisher", "comparison"])
+def test_later_lean_or_embedding_failure_excludes_only_the_affected_action(stage):
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import runner, run, Evaluator
+    result, _, _ = runner()
+    class FailingEvaluator(Evaluator):
+        def evaluate_at(self, current, candidate):
+            if ((stage == "verification" and current.id == "D" and candidate.source != "assumption")
+                    or (stage == "conventional_finisher" and current.id == "E" and candidate.source == "assumption")):
+                raise RuntimeError("Lean unavailable")
+            return super().evaluate_at(current, candidate)
+    compare = result.transition_comparator
+    def failing_compare(before, predicted, actual):
+        if stage == "comparison" and "⊢ D" in before:
+            raise RuntimeError("embedding service unavailable")
+        return compare(before, predicted, actual)
+    result.transition_comparator = failing_compare
+    rollout = run(result, FailingEvaluator()).rollouts[0]
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=0.1, discount=0.95, iteration_cost=0.01)
+    assert rollout.analogy_trace.iterations[1].failed_stage == stage
+    assert [item.training_eligible for item in rollout.analogy_trace.iterations] == [True, False]
+    assert len(samples) == 1
+    assert samples[0].action is result.live_actions[0]
+    assert samples[0].reward == 0.1
+
+
+def test_schema_rejection_remains_an_eligible_policy_action():
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import runner, run
+    result, _, _ = runner(["invalid", "invalid"])
+    rollout = run(result).rollouts[0]
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=-0.05, discount=0.95, iteration_cost=0.01)
+    assert rollout.analogy_trace.iterations[0].training_eligible
+    assert len(samples) == 1
+    assert samples[0].reward == -0.05
+
+
+def test_same_state_invocations_preserve_live_and_final_rows_with_one_path_identity(tmp_path):
+    from analogy.training import _live_iteration_sink, _persist_episode
+    from test_analogy_transfer_loop import runner, run, outputs, Evaluator
+    writer = RescueRunWriter.create(tmp_path, "invocations", {})
+    sink = _live_iteration_sink(writer, epoch=1, phase="train", problem_id="p1")
+    result, _, _ = runner(outputs(1) + outputs(1))
+    result.iteration_sink = sink
+    first = run(result, Evaluator(finish=True)).rollouts[0]
+    second = run(result, Evaluator(finish=True)).rollouts[0]
+    assert first.rollout_id != second.rollout_id
+    rows_path = writer.path / "analogy_iterations.jsonl"
+    live = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    assert len(live) == 2
+    assert {row["proof_path_id"] for row in live} == {sink.proof_path_id}
+    episode = ProblemEpisode("p1", True, (first, second), (), 0, 6,
+                             proof_path_id=sink.proof_path_id)
+    _persist_episode(writer, episode, 1, "train")
+    final = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    assert final == live
+    for filename in ("rollouts.jsonl", "generations.jsonl"):
+        rows = [json.loads(line) for line in (writer.path / filename).read_text().splitlines()]
+        assert {row["proof_path_id"] for row in rows} == {sink.proof_path_id}
+        assert {row["rollout_id"] for row in rows} == {first.rollout_id, second.rollout_id}
+    # A distinct proof path may contain identical causal IDs; it is not a duplicate.
+    writer.append_analogy_iteration(first.analogy_trace.iterations[0], epoch=1, phase="train",
+        problem_id="p1", rollout_id=first.rollout_id, proof_path_id="another-path")
+    assert len(rows_path.read_text().splitlines()) == 3
+
+
 def test_generated_repeated_state_is_not_counted_as_a_successor_in_summary():
     from test_analogy_transfer_loop import runner, run, Evaluator
     result, _, _ = runner()
@@ -169,7 +253,7 @@ def test_generated_repeated_state_is_not_counted_as_a_successor_in_summary():
     ("train", True), ("validation", True), ("generated_learned", True),
     ("generated_unsteered", False), ("generated_random", False), ("generated_shuffled", False),
 ])
-def test_execute_problem_integrates_generated_loop_and_keeps_controls_out_of_training(monkeypatch, phase, trainable):
+def test_execute_problem_integrates_generated_loop_and_keeps_controls_out_of_training(monkeypatch, tmp_path, phase, trainable):
     import analogy.training as training
     from test_analogy_transfer_loop import Encoder, Evaluator, outputs, state, STRUCTURE
     from test_analogy_transfer_generation import RecordingBackend, NEED, records
@@ -198,8 +282,10 @@ def test_execute_problem_integrates_generated_loop_and_keeps_controls_out_of_tra
     learned = training._new_policy(config, backend)
     policy = training._evaluation_policy(phase, config, backend, learned)
     source_record = training.GeneratedSourceRecord("donor", "another state", NEED, records()[0])
+    writer = RescueRunWriter.create(tmp_path, "integration", {})
+    sink = training._live_iteration_sink(writer, epoch=1, phase=phase, problem_id="fixture")
     episode = training._execute_problem(config, backend, object(), problem("fixture", "iff"), phase,
-                                        policy, generated_sources=(source_record,))
+                                        policy, generated_sources=(source_record,), iteration_sink=sink)
     assert episode.failure is None
     assert episode.completed
     assert episode.verifier_calls == 4  # ordinary rejection + structure + transferred tactic + finisher
@@ -209,6 +295,11 @@ def test_execute_problem_integrates_generated_loop_and_keeps_controls_out_of_tra
         assert episode.training_samples[0].action.log_probability.requires_grad
         assert torch.count_nonzero(backend.calls[0][2]) > 0
     assert all(call[2] is None for call in backend.calls[1:])
+    assert episode.proof_path_id == sink.proof_path_id
+    training._persist_episode(writer, episode, 1, phase)
+    rows = [json.loads(line) for line in (writer.path / "analogy_iterations.jsonl").read_text().splitlines()]
+    assert len(rows) == 1  # live and final persistence share the invocation identity
+    assert rows[0]["proof_path_id"] == episode.proof_path_id
 
 
 def problem(identifier, connective, difficulty=1):

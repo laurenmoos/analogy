@@ -72,8 +72,11 @@ class AuditIteration:
     surprise: float | None
     stop_decision: str
     lean_attempts: tuple[LeanAttemptEvidence, ...]
+    proof_path_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.proof_path_id is not None:
+            _nonblank(self.proof_path_id, "proof_path_id")
         for name in (
             "run_id",
             "problem_id",

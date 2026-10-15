@@ -120,6 +120,31 @@ def test_conventional_finisher_closes_before_low_surprise_stop_or_new_analogy():
     assert outcome.rollouts[0].analogy_trace.stop_reason is StopReason.COMPLETE
 
 
+def test_completing_finisher_records_the_terminal_transition_from_its_own_state():
+    result, _, _ = runner()
+    outcome = run(result, Evaluator(finish=True))
+    iteration = outcome.rollouts[0].analogy_trace.iterations[0]
+    assert iteration.actual_transition == "no goals"
+    assert iteration.predicted_transition == "no goals"
+    assert iteration.transition_before == "h : D\n⊢ D"
+    assert iteration.comparison is None  # completion is authoritative; no extra embedding call
+    assert iteration.tactic_plan.predicted_state == "D"
+    assert iteration.attempts[0].result.state.expression == "h : D\n⊢ D"
+    assert iteration.decision.reason is StopReason.COMPLETE
+    assert (iteration.model_calls, iteration.lean_calls) == (4, 3)
+
+
+@pytest.mark.parametrize("stage", range(4))
+def test_failed_stages_preserve_all_generated_prompt_versions(stage):
+    from dataclasses import asdict
+    result, _, _ = runner(outputs()[:stage] + ["invalid", "invalid"])
+    row = asdict(run(result).rollouts[0].analogy_trace.iterations[0])
+    assert dict(row["prompt_versions"]) == {
+        "source": "source-analogy-v2", "alignment": "analogy-alignment-v1",
+        "transfer": "proof-reasoning-transfer-v1", "tactic": "transferred-tactic-v1",
+    }
+
+
 def test_partial_finisher_refreshes_transition_surprise_and_controller_before_next_action():
     raw = outputs()
     raw[6] = json.dumps(dict(json.loads(raw[6]), active_subgoal="E"))

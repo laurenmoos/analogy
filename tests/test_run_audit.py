@@ -194,6 +194,76 @@ def test_load_preserves_each_executed_repair_with_its_result(tmp_path: Path) -> 
     assert loaded.lean_attempts[1].successor == "h1 : Q\n⊢ P"
 
 
+def generated_row(phase, *, failed_stage=None):
+    from test_analogy_transfer_loop import runner, run, outputs, Evaluator
+    raw = outputs(1)
+    if failed_stage is not None:
+        raw = raw[:failed_stage] + ["invalid", "invalid"]
+    result, _, _ = runner(raw)
+    rollout = run(result, Evaluator(finish=True)).rollouts[0]
+    return json.loads(json.dumps(dict(asdict(rollout.analogy_trace.iterations[0]),
+        epoch=1, phase=phase, problem_id="p1", rollout_id=rollout.rollout_id, proof_path_id="path-one")))
+
+
+@pytest.mark.parametrize("phase", ["train", "validation", "generated_unsteered",
+    "generated_random", "generated_learned", "generated_shuffled"])
+@pytest.mark.parametrize("failed_stage", [None, 0, 1, 2, 3])
+def test_generated_rows_normalize_without_legacy_hops_in_every_phase(tmp_path, phase, failed_stage):
+    row = generated_row(phase, failed_stage=failed_stage)
+    source, corpus = write_source(tmp_path / "source", [row])
+    loaded = load_audit_iterations(source, corpus)
+    assert len(loaded) == 1
+    item = loaded[0]
+    card = json.loads(item.analogy_card)
+    assert card["kind"] == "generated_domain"
+    assert card["source"] == row["source"]
+    assert card["alignment"] == row["alignment"]
+    assert card["transfer"] == row["transfer"]
+    assert item.proof_path_id == "path-one"
+    if failed_stage is None:
+        assert item.lean_outcomes == ("accepted", "complete")
+        assert item.actual_transition == "no goals"
+    else:
+        assert item.lean_outcomes == ()
+        assert item.predicted_transition == "(not generated)"
+        assert card["failed_stage"] == ("source", "alignment", "transfer", "tactic")[failed_stage]
+        assert card["failure_diagnostic"]
+
+
+@pytest.mark.parametrize("phase", ["train", "validation", "generated_unsteered",
+    "generated_random", "generated_learned", "generated_shuffled"])
+def test_generated_audit_preserves_distinct_paths_and_resumes_without_rescoring(tmp_path, phase):
+    row = generated_row(phase)
+    second = dict(row, proof_path_id="path-two")
+    source, corpus = write_source(tmp_path / "source", [row, second])
+    before = tree_hashes(source)
+    generator = SequenceGenerator((judgment("working", 1.0),) * 2)
+    output = tmp_path / "audit"
+    summary = audit_analogy_run(source, output, generator, corpus, seed=2, max_calls=2)
+    assert (summary.eligible, summary.judged) == (2, 2)
+    assert {row["proof_path_id"] for row in read_jsonl(output / "judgments.jsonl")} == {"path-one", "path-two"}
+    audit_analogy_run(source, output, SequenceGenerator(()), corpus, seed=2, max_calls=4)
+    assert tree_hashes(source) == before
+    assert len(read_jsonl(output / "judgments.jsonl")) == 2
+
+
+@pytest.mark.parametrize("failed_stage", [0, 1, 2, 3])
+def test_generated_partial_failure_reaches_auditor_with_stage_evidence(tmp_path, failed_stage):
+    row = generated_row("train", failed_stage=failed_stage)
+    source, corpus = write_source(tmp_path / "source", [row])
+    before = tree_hashes(source)
+    output = tmp_path / "audit"
+    summary = audit_analogy_run(source, output, SequenceGenerator((judgment("analogy", 0.0),)),
+                               corpus, seed=2, max_calls=1)
+    assert (summary.eligible, summary.judged) == (1, 1)
+    recorded = read_jsonl(output / "judgments.jsonl")[0]["input"]
+    card = json.loads(recorded["analogy_card"])
+    assert card["failed_stage"] == row["failed_stage"]
+    assert card["generation_attempts"][row["failed_stage"]]
+    assert recorded["lean_attempts"] == []
+    assert tree_hashes(source) == before
+
+
 @pytest.mark.parametrize("missing", ("config.json", "summary.json", "analogy_iterations.jsonl"))
 def test_load_requires_each_source_artifact(tmp_path: Path, missing: str) -> None:
     source, corpus = write_source(tmp_path / "source", [iteration_row()])

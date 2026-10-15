@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -12,7 +13,10 @@ from .analogy_transfer import (
     AnalogyAlignment, AnalogyObservation, ProofNeed, ProofReasoningTransfer,
     SourceAnalogy, derive_proof_need,
 )
-from .analogy_transfer_generation import TransferredTacticPlan
+from .analogy_transfer_generation import (
+    TransferredTacticPlan, SOURCE_PROMPT_VERSION, ALIGNMENT_PROMPT_VERSION,
+    TRANSFER_PROMPT_VERSION, TACTIC_PROMPT_VERSION,
+)
 from .proof_views import ProofStructure, TransitionComparison
 from .records import (
     CandidateOrigin, DiscardedSuccessor, DiscardReason, SymbolicState,
@@ -61,6 +65,12 @@ class GeneratedAnalogyIteration:
     model_calls: int
     lean_calls: int
     elapsed_seconds: float
+    training_eligible: bool = True
+    transition_before: str | None = None
+    prompt_versions: tuple[tuple[str, str], ...] = (
+        ("source", SOURCE_PROMPT_VERSION), ("alignment", ALIGNMENT_PROMPT_VERSION),
+        ("transfer", TRANSFER_PROMPT_VERSION), ("tactic", TACTIC_PROMPT_VERSION),
+    )
 
     @property
     def surprise(self) -> float | None:
@@ -151,7 +161,7 @@ class GeneratedDomainAnalogyLoopRunner:
         stop_reason = StopReason.NO_SUCCESSOR
         generation_failure = None
         runtime_failure = None
-        rollout_id = f"{state.id}:generated-domain"
+        rollout_id = f"{state.id}:generated-domain:{uuid.uuid4().hex}"
 
         for index in range(self.controller.config.max_iterations):
             if cancellation.is_cancelled():
@@ -179,6 +189,8 @@ class GeneratedDomainAnalogyLoopRunner:
             finisher_state = comparison = failed_stage = None
             failure_diagnostic = None
             active_stage = "structure"
+            infrastructure_failure = False
+            transition_before = before.expression
             successor = None
             predicted = actual = None
             repeated = False
@@ -263,6 +275,9 @@ class GeneratedDomainAnalogyLoopRunner:
                                          for item in finished.attempts if item.result.status is TacticStatus.ERROR)
                         if finished.completed_proof is not None:
                             completed = finished.completed_proof
+                            transition_before = current.expression
+                            predicted = finished.attempts[-1].proposal.predicted_state
+                            actual = "no goals"
                         elif finished.successor is not None:
                             previous, current, last_tactic = current.expression, finished.successor.state, "assumption"
                             accepted += (last_tactic,)
@@ -273,6 +288,7 @@ class GeneratedDomainAnalogyLoopRunner:
                             # finisher that closes only part of the obligation.
                             predicted = finished.attempts[-1].proposal.predicted_state
                             actual = current.expression
+                            transition_before = previous
                     if not cancellation.is_cancelled() and completed is None:
                         active_stage = "comparison"
                         comparison = self.transition_comparator(previous, predicted, actual)
@@ -284,6 +300,9 @@ class GeneratedDomainAnalogyLoopRunner:
                 ))
             except AnalogyGenerationFailure as failure:
                 generation_failure = failure
+                infrastructure_failure = any(
+                    attempt.status is GenerationStatus.RUNTIME_ERROR for attempt in failure.attempts
+                )
                 failure_diagnostic = str(failure)
                 reason = (StopReason.CANCELLED if cancellation.is_cancelled() else
                           StopReason.MODEL_BUDGET if resources.remaining_model_calls <= 0 else StopReason.NO_SUCCESSOR)
@@ -291,6 +310,7 @@ class GeneratedDomainAnalogyLoopRunner:
             except _BoundaryStop as boundary:
                 decision = SurpriseDecision(False, boundary.reason, controller_state)
             except Exception as failure:
+                infrastructure_failure = True
                 failed_stage = active_stage
                 failure_diagnostic = str(failure) if isinstance(failure, _VerificationFailure) else f"{type(failure).__name__}: {failure}"
                 runtime_failure = failure_diagnostic
@@ -336,6 +356,9 @@ class GeneratedDomainAnalogyLoopRunner:
                 model_calls=resources.model_calls,
                 lean_calls=resources.lean_calls,
                 elapsed_seconds=time.monotonic() - started,
+                training_eligible=(action is not None and not infrastructure_failure
+                                   and decision.reason is not StopReason.CANCELLED),
+                transition_before=transition_before,
             )
             iterations.append(iteration)
             proposals.extend(local_proposals)

@@ -48,6 +48,19 @@ class SearchConfig:
 class AnalogyConfig:
     enabled: bool
     samples: int
+    min_iterations: int
+    max_iterations: int
+    surprise_threshold: float
+    surprise_patience: int
+    min_surprise_improvement: float
+    improvement_patience: int
+    tactics_per_iteration: int
+    max_model_calls: int
+    max_lean_calls: int
+    transition_embedding_layer: int
+    discount: float
+    iteration_cost: float
+    rerank_tactics: bool
 
 
 @dataclass(frozen=True)
@@ -116,7 +129,16 @@ _SCHEMA: dict[str, frozenset[str]] = {
     ),
     "benchmark": frozenset({"corpus"}),
     "search": frozenset({"top_k", "max_steps", "stuck_after"}),
-    "analogy": frozenset({"enabled", "samples"}),
+    "analogy": frozenset(
+        {
+            "enabled", "samples", "min_iterations", "max_iterations",
+            "surprise_threshold", "surprise_patience",
+            "min_surprise_improvement", "improvement_patience",
+            "tactics_per_iteration", "max_model_calls", "max_lean_calls",
+            "transition_embedding_layer", "discount", "iteration_cost",
+            "rerank_tactics",
+        }
+    ),
     "rl": frozenset(
         {
             "enabled",
@@ -271,6 +293,28 @@ def load_config(path: Path) -> AppConfig:
     data = sections["data"]
     base = config_path.parent
 
+    min_iterations = _positive_integer(
+        analogy["min_iterations"], "config.analogy.min_iterations"
+    )
+    max_iterations = _positive_integer(
+        analogy["max_iterations"], "config.analogy.max_iterations"
+    )
+    surprise_threshold = _nonnegative_number(
+        analogy["surprise_threshold"], "config.analogy.surprise_threshold"
+    )
+    min_surprise_improvement = _nonnegative_number(
+        analogy["min_surprise_improvement"],
+        "config.analogy.min_surprise_improvement",
+    )
+    discount = _probability(analogy["discount"], "config.analogy.discount")
+    iteration_cost = _nonnegative_number(
+        analogy["iteration_cost"], "config.analogy.iteration_cost"
+    )
+    if min_iterations > max_iterations:
+        raise ConfigError("config.analogy.min_iterations must not exceed max_iterations")
+    if surprise_threshold > 2.0:
+        raise ConfigError("config.analogy.surprise_threshold must be at most 2")
+
     completion_reward = _finite_number(
         rl["completion_reward"], "config.rl.completion_reward"
     )
@@ -350,6 +394,36 @@ def load_config(path: Path) -> AppConfig:
         analogy=AnalogyConfig(
             enabled=_boolean(analogy["enabled"], "config.analogy.enabled"),
             samples=_positive_integer(analogy["samples"], "config.analogy.samples"),
+            min_iterations=min_iterations,
+            max_iterations=max_iterations,
+            surprise_threshold=surprise_threshold,
+            surprise_patience=_positive_integer(
+                analogy["surprise_patience"], "config.analogy.surprise_patience"
+            ),
+            min_surprise_improvement=min_surprise_improvement,
+            improvement_patience=_positive_integer(
+                analogy["improvement_patience"],
+                "config.analogy.improvement_patience",
+            ),
+            tactics_per_iteration=_positive_integer(
+                analogy["tactics_per_iteration"],
+                "config.analogy.tactics_per_iteration",
+            ),
+            max_model_calls=_positive_integer(
+                analogy["max_model_calls"], "config.analogy.max_model_calls"
+            ),
+            max_lean_calls=_positive_integer(
+                analogy["max_lean_calls"], "config.analogy.max_lean_calls"
+            ),
+            transition_embedding_layer=_integer(
+                analogy["transition_embedding_layer"],
+                "config.analogy.transition_embedding_layer",
+            ),
+            discount=discount,
+            iteration_cost=iteration_cost,
+            rerank_tactics=_boolean(
+                analogy["rerank_tactics"], "config.analogy.rerank_tactics"
+            ),
         ),
         rl=RLConfig(
             enabled=_boolean(rl["enabled"], "config.rl.enabled"),

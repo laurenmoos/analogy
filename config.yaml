@@ -23,6 +23,19 @@ search:
 analogy:
   enabled: false
   samples: 4
+  min_iterations: 1
+  max_iterations: 6
+  surprise_threshold: 0.2
+  surprise_patience: 2
+  min_surprise_improvement: 0.05
+  improvement_patience: 2
+  tactics_per_iteration: 2
+  max_model_calls: 18
+  max_lean_calls: 12
+  transition_embedding_layer: -1
+  discount: 0.95
+  iteration_cost: 0.01
+  rerank_tactics: false
 
 rl:
   enabled: false

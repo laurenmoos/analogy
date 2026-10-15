@@ -33,6 +33,19 @@ search:
 analogy:
   enabled: false
   samples: 4
+  min_iterations: 1
+  max_iterations: 6
+  surprise_threshold: 0.2
+  surprise_patience: 2
+  min_surprise_improvement: 0.05
+  improvement_patience: 2
+  tactics_per_iteration: 2
+  max_model_calls: 18
+  max_lean_calls: 12
+  transition_embedding_layer: -1
+  discount: 0.95
+  iteration_cost: 0.01
+  rerank_tactics: false
 rl:
   enabled: false
   algorithm: reinforce
@@ -89,6 +102,9 @@ def test_load_config_resolves_paths_from_config_file(tmp_path: Path) -> None:
     assert config.rl.hop_cost == 0.01
     assert config.rl.checkpoint is None
     assert config.rl.train_connectives == ("implication", "and", "or")
+    assert config.analogy.min_iterations == 1
+    assert config.analogy.max_iterations == 6
+    assert config.analogy.surprise_threshold == 0.2
 
 
 def test_load_config_rejects_unknown_root_key(tmp_path: Path) -> None:
@@ -137,6 +153,26 @@ def test_load_config_rejects_invalid_types_and_ranges(
     path.write_text(_valid_yaml().replace(old, new, 1), encoding="utf-8")
 
     with pytest.raises(module.ConfigError, match=error_path):
+        module.load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("  min_iterations: 1", "  min_iterations: 7"),
+        ("  surprise_threshold: 0.2", "  surprise_threshold: 2.1"),
+        ("  discount: 0.95", "  discount: 0"),
+        ("  iteration_cost: 0.01", "  iteration_cost: -0.01"),
+    ],
+)
+def test_analogy_loop_config_rejects_invalid_ranges(
+    tmp_path: Path, old: str, new: str
+) -> None:
+    module = _config_module()
+    path = tmp_path / "config.yaml"
+    path.write_text(_valid_yaml().replace(old, new), encoding="utf-8")
+
+    with pytest.raises(module.ConfigError):
         module.load_config(path)
 
 

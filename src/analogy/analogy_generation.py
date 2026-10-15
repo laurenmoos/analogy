@@ -94,7 +94,15 @@ def render_hop_prompt(context: AnalogyGenerationContext) -> str:
     )
 
 
-def render_tactic_prompt(context: TacticGenerationContext) -> str:
+def render_tactic_prompt(
+    context: TacticGenerationContext, *, candidate_count: int = 4
+) -> str:
+    if (
+        isinstance(candidate_count, bool)
+        or not isinstance(candidate_count, int)
+        or candidate_count <= 0
+    ):
+        raise ValueError("candidate_count must be a positive integer")
     stream = json.dumps(
         [asdict(item) for item in context.analogy.stream.hops],
         sort_keys=True,
@@ -105,8 +113,13 @@ def render_tactic_prompt(context: TacticGenerationContext) -> str:
         f"Lean structural signature: {render_structure_view(context.analogy.structure)}\n"
         f"Complete analogy stream: {stream}\n"
         f"Active motivating hop: {context.active_hop_id}\n"
-        "Generate Lean tactics conditioned on the complete analogy stream. Return "
-        "exactly predicted_state, tactics, and motivating_hop_id as JSON."
+        f"Generate exactly {candidate_count} distinct single-line Lean 4 tactics, "
+        "ordered strongest first and conditioned on the complete analogy stream. "
+        "Use Lean 4 syntax only. Prefer short terms built from `intro`, `exact`, "
+        "`apply`, `fun`, `.mp`, `.mpr`, and `rw` when they fit the state. "
+        "Do not use `assume`, `iff.elim`, `iff.elim_left`, semicolon-packed terms, "
+        "or comma-separated tactic programs. Return exactly predicted_state, "
+        "tactics, and motivating_hop_id as JSON."
     )
 
 

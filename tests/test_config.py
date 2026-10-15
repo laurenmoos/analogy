@@ -136,7 +136,9 @@ def test_mlx_8b_fast_profile() -> None:
     assert config.analogy.max_iterations == 3
     assert config.analogy.max_model_calls == 8
     assert config.analogy.max_lean_calls == 6
+    assert config.analogy.tactics_per_iteration == 4
     assert config.rl.rollouts_per_state == 1
+    assert config.rl.tactics_per_rollout == 4
     assert config.rl.epochs == 1
 
 

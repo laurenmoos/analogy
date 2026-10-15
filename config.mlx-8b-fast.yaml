@@ -30,7 +30,7 @@ analogy:
   surprise_patience: 1
   min_surprise_improvement: 0.05
   improvement_patience: 1
-  tactics_per_iteration: 2
+  tactics_per_iteration: 4
   max_model_calls: 8
   max_lean_calls: 6
   transition_embedding_layer: -1
@@ -42,7 +42,7 @@ rl:
   enabled: true
   algorithm: reinforce
   rollouts_per_state: 1
-  tactics_per_rollout: 2
+  tactics_per_rollout: 4
   hidden_width: 128
   max_delta_norm: 2.0
   initial_log_scale: -2.0

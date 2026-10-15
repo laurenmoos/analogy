@@ -108,6 +108,23 @@ def test_tactic_prompt_contains_complete_stream_and_requires_valid_citation():
         )
 
 
+def test_tactic_prompt_requests_distinct_lean4_candidates_and_blocks_observed_dialects():
+    hop = parse_analogy_hop(HOP, hop_id="hop-0")
+    context = TacticGenerationContext(
+        analogy_context((hop,)), active_hop_id="hop-0"
+    )
+
+    prompt = render_tactic_prompt(context, candidate_count=4)
+
+    assert "exactly 4 distinct" in prompt
+    assert "Lean 4" in prompt
+    assert "intro" in prompt
+    assert ".mp" in prompt
+    assert ".mpr" in prompt
+    assert "Do not use `assume`" in prompt
+    assert "comma-separated tactic programs" in prompt
+
+
 class SequenceGenerator:
     def __init__(self, outputs):
         self.outputs = iter(outputs)

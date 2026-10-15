@@ -81,6 +81,14 @@ def test_later_hop_prompt_contains_views_outcomes_and_surprise_trend():
     assert '"surprise_delta":-0.14' in prompt
 
 
+def test_hop_prompt_bounds_card_verbosity_for_strict_json_generation():
+    prompt = render_hop_prompt(analogy_context())
+
+    assert "at most 120 words total" in prompt
+    assert "relation_chain: 2-4 strings" in prompt
+    assert "mapping: at most 4 entries" in prompt
+
+
 def test_tactic_prompt_contains_complete_stream_and_requires_valid_citation():
     first = parse_analogy_hop(HOP, hop_id="hop-0")
     second = parse_analogy_hop(HOP, hop_id="hop-1", parent_id="hop-0")

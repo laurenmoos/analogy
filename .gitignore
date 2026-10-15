@@ -8,6 +8,7 @@ data/
 results/
 .venv/
 runs/
+runs-fast/
 __pycache__/
 *.py[cod]
 *.egg-info/

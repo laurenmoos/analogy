@@ -40,6 +40,7 @@ class MLXQwenGenerator:
         mx: Any,
         generate_fn: Callable[..., str],
         make_sampler: Callable[..., Any],
+        log_softmax: Callable[..., Any],
         create_attention_mask: Callable[[Any, Any], Any],
         config: ModelConfig,
     ) -> None:
@@ -48,6 +49,7 @@ class MLXQwenGenerator:
         self.mx = mx
         self._generate_fn = generate_fn
         self._make_sampler = make_sampler
+        self._log_softmax = log_softmax
         self._create_attention_mask = create_attention_mask
         self.max_new_tokens = config.max_new_tokens
         self.timeout_seconds = config.timeout_seconds
@@ -65,6 +67,7 @@ class MLXQwenGenerator:
     def from_config(cls, config: ModelConfig) -> "MLXQwenGenerator":
         try:
             import mlx.core as mx
+            import mlx.nn as nn
             from mlx_lm import generate, load
             from mlx_lm.models.base import create_attention_mask
             from mlx_lm.sample_utils import make_sampler
@@ -79,6 +82,7 @@ class MLXQwenGenerator:
             mx=mx,
             generate_fn=generate,
             make_sampler=make_sampler,
+            log_softmax=nn.log_softmax,
             create_attention_mask=create_attention_mask,
             config=config,
         )
@@ -199,7 +203,7 @@ class MLXQwenGenerator:
             if hasattr(logits, "astype")
             else logits.float()
         )
-        log_probabilities = self.mx.log_softmax(logits, axis=-1)
+        log_probabilities = self._log_softmax(logits, axis=-1)
         self.mx.eval(log_probabilities)
         synchronize = getattr(self.mx, "synchronize", None)
         if synchronize is not None:

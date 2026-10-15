@@ -86,7 +86,11 @@ def render_hop_prompt(context: AnalogyGenerationContext) -> str:
         f"Prior verified iterations: {prior}\n"
         "Generate the next analogy refinement. Return exactly one JSON object with "
         "domain, situation, relation_chain, mapping, continuation, "
-        "predicted_consequence, rationale, and boolean stop."
+        "predicted_consequence, rationale, and boolean stop. Keep the JSON at most "
+        "120 words total: domain at most 3 words; situation at most 18 words; "
+        "relation_chain: 2-4 strings of at most 10 words each; mapping: at most "
+        "4 entries with short values; continuation, predicted_consequence, and "
+        "rationale at most 15 words each."
     )
 
 

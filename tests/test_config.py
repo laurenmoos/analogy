@@ -129,8 +129,8 @@ def test_mlx_8b_fast_profile() -> None:
 
     assert config.model.backend == "mlx"
     assert config.model.name == "mlx-community/Qwen3-8B-4bit"
-    assert config.model.max_new_tokens == 96
-    assert config.model.timeout_seconds == 20.0
+    assert config.model.max_new_tokens == 256
+    assert config.model.timeout_seconds == 45.0
     assert config.search.top_k == 3
     assert config.search.max_steps == 8
     assert config.analogy.max_iterations == 3

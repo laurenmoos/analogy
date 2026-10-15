@@ -38,10 +38,6 @@ class FakeMX:
         return values[-1]
 
     @staticmethod
-    def log_softmax(value, axis):
-        return torch.log_softmax(value, dim=axis)
-
-    @staticmethod
     def synchronize():
         return None
 
@@ -171,6 +167,7 @@ class Runtime:
             mx=self.mx,
             generate_fn=self.generate,
             make_sampler=self.make_sampler,
+            log_softmax=lambda value, axis: torch.log_softmax(value, dim=axis),
             config=config,
             create_attention_mask=lambda hidden, cache: "causal-mask",
         )
@@ -320,3 +317,11 @@ def test_score_completions_is_one_forward_and_ignores_prompt_and_padding():
     assert [item.text for item in scores] == ["weak", "strong"]
     assert scores[0].mean_log_likelihood > scores[1].mean_log_likelihood
     assert [item.token_count for item in scores] == [1, 3]
+
+
+def test_score_completions_does_not_require_log_softmax_on_mlx_core():
+    generator = Runtime(ScoringModel()).generator()
+
+    scores = generator.score_completions(messages(), ("weak", "strong"))
+
+    assert len(scores) == 2

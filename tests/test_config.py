@@ -121,6 +121,25 @@ def test_model_backend_rejects_unknown_value(tmp_path: Path) -> None:
         module.load_config(path)
 
 
+def test_mlx_8b_fast_profile() -> None:
+    module = _config_module()
+    config = module.load_config(
+        Path(__file__).parents[1] / "config.mlx-8b-fast.yaml"
+    )
+
+    assert config.model.backend == "mlx"
+    assert config.model.name == "mlx-community/Qwen3-8B-4bit"
+    assert config.model.max_new_tokens == 96
+    assert config.model.timeout_seconds == 20.0
+    assert config.search.top_k == 3
+    assert config.search.max_steps == 8
+    assert config.analogy.max_iterations == 3
+    assert config.analogy.max_model_calls == 8
+    assert config.analogy.max_lean_calls == 6
+    assert config.rl.rollouts_per_state == 1
+    assert config.rl.epochs == 1
+
+
 def test_load_config_rejects_unknown_root_key(tmp_path: Path) -> None:
     module = _config_module()
     path = tmp_path / "config.yaml"

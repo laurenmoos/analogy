@@ -138,6 +138,28 @@ and `shuffled_analogy` under the same search seed and verifier budgets. The
 shuffle helper only permutes compatible records within one split and
 connective, and refuses singleton groups.
 
+### Fast local 8B profile on Apple silicon
+
+The bounded MLX profile keeps the full Qwen3-8B architecture but uses the
+four-bit `mlx-community/Qwen3-8B-4bit` conversion so the model remains resident
+in unified memory instead of falling back to CPU/disk offload. It never falls
+back to a smaller model.
+
+```bash
+pip install -e '.[dev,model,mlx]'
+PYTHONPATH=src python scripts/benchmark_mlx_runtime.py \
+  --config config.mlx-8b-fast.yaml
+PYTHONPATH=src python -m analogy --config config.mlx-8b-fast.yaml
+```
+
+Run the probe first. Its `runtime.json` measures cold loading, ordinary and
+latent-steered generation, embeddings, batched tactic scoring, and Lean, then
+reports transparent six-problem and full-run estimates. Training writes its
+best checkpoint under `runs-fast/rescue/<run-id>/checkpoints/`. To run matched
+evaluation, copy the profile, set `experiment.stage: evaluate_rescue`, and set
+`rl.checkpoint` to that checkpoint; the original training profile remains an
+immutable record of the run.
+
 See the [quality and stream design](docs/superpowers/specs/2026-10-14-rescue-quality-and-analogy-stream-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-rescue-quality-and-analogy-stream.md).
 
 Run the complete preservation suite with:

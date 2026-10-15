@@ -151,11 +151,16 @@ def parse_analogy_tactic_plan(raw: str, stream: AnalogyStream) -> AnalogyTacticP
         isinstance(item, str) and item.strip() and "\n" not in item for item in tactics
     ):
         raise AnalogyOutputError("tactics must be nonblank single-line strings")
+    canonical_tactics = tuple(" ".join(item.split()) for item in tactics)
+    if len(set(canonical_tactics)) != len(canonical_tactics):
+        raise AnalogyOutputError("tactics must be unique after canonicalization")
     citation = _text(payload["motivating_hop_id"], "motivating_hop_id")
     if citation not in {hop.hop_id for hop in stream.hops}:
         raise AnalogyOutputError("motivating_hop_id must cite the supplied stream")
     return AnalogyTacticPlan(
-        _text(payload["predicted_state"], "predicted_state"), tuple(tactics), citation
+        _text(payload["predicted_state"], "predicted_state"),
+        canonical_tactics,
+        citation,
     )
 
 

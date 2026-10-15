@@ -121,6 +121,12 @@ def test_tactic_prompt_contains_complete_stream_and_requires_valid_citation():
             '"motivating_hop_id":"outside"}',
             context.analogy.stream,
         )
+    with pytest.raises(AnalogyOutputError, match="unique"):
+        parse_analogy_tactic_plan(
+            '{"predicted_state":"done","tactics":["exact h"," exact   h "],'
+            '"motivating_hop_id":"hop-1"}',
+            context.analogy.stream,
+        )
 
 
 def test_tactic_prompt_requests_distinct_lean4_candidates_and_blocks_observed_dialects():
@@ -244,6 +250,59 @@ def test_tactic_generator_semantic_repair_is_recorded_as_a_repair_attempt():
 
     assert repaired.plan.tactics == ("intro h; exact h",)
     assert repaired.attempts[0].repair is True
+
+
+def test_semantic_repair_stops_before_schema_retry_after_cancellation():
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self):
+            return self.cancelled
+
+    token = Token()
+
+    class CancellingGenerator:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_with_delta(self, messages, **kwargs):
+            del messages, kwargs
+            self.calls += 1
+            token.cancelled = True
+            return "not json"
+
+    generator = CancellingGenerator()
+    service = AnalogyTacticGenerator(
+        generator,
+        hidden_layer=-1,
+        base_seed=7,
+        max_repair_calls=1,
+    )
+    hop = parse_analogy_hop(HOP, hop_id="hop-0")
+    context = TacticGenerationContext(
+        analogy_context((hop,)), active_hop_id="hop-0"
+    )
+    candidate = TacticCandidate("exact h", 1.0, CandidateOrigin.ANALOGICAL)
+    proposal = RescueProposal(candidate, "done")
+    failed = RescueAttempt(
+        proposal,
+        TacticResult(candidate, TacticStatus.ERROR, diagnostics=("type mismatch",)),
+    )
+    action = PolicyAction(torch.zeros(2), torch.tensor(0.0), torch.tensor(0.0))
+
+    with pytest.raises(AnalogyGenerationFailure) as captured:
+        service.repair(
+            context,
+            action,
+            failed_plan=AnalogyTacticPlan("done", (candidate.source,), "hop-0"),
+            failed_attempts=(failed,),
+            iteration_index=0,
+            max_attempts=2,
+            cancellation=token,
+        )
+
+    assert generator.calls == 1
+    assert len(captured.value.attempts) == 1
 
 
 def test_analogy_generator_repairs_invalid_card_and_preserves_raw_attempts():

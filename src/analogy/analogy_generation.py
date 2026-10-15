@@ -30,6 +30,7 @@ class IterationSummary:
     generated_tactics: tuple[str, ...]
     lean_outcomes: tuple[str, ...]
     lean_diagnostics: tuple[str, ...] = ()
+    discard_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +256,7 @@ class AnalogyTacticGenerator:
         iteration_index: int,
         candidate_count: int | None = None,
         max_attempts: int | None = None,
+        cancellation: Any | None = None,
     ) -> GeneratedTacticPlan:
         count = self.candidate_count if candidate_count is None else candidate_count
         return _generate_strict(
@@ -284,12 +286,13 @@ class AnalogyTacticGenerator:
             ),
             result_type=GeneratedTacticPlan,
             initial_repair=True,
+            cancellation=cancellation,
         )
 
 
 def _generate_strict(
     *, generator, messages, action, hidden_layer, seed, max_repair_calls, max_attempts,
-    parser, result_type, initial_repair=False,
+    parser, result_type, initial_repair=False, cancellation=None,
 ):
     if max_attempts is not None and (
         isinstance(max_attempts, bool)
@@ -303,6 +306,11 @@ def _generate_strict(
     if max_attempts is not None:
         attempt_limit = min(attempt_limit, max_attempts)
     for repair_index in range(attempt_limit):
+        if cancellation is not None and cancellation.is_cancelled():
+            raise AnalogyGenerationFailure(
+                "generation cancelled before the next model attempt",
+                tuple(attempts),
+            )
         active_seed = seed + repair_index
         try:
             raw = generator.generate_with_delta(

@@ -288,6 +288,7 @@ class AnalogyLoopRunner:
                         iteration_index=iteration_index,
                         candidate_count=self.tactics_per_iteration,
                         max_attempts=resources.remaining_model_calls,
+                        cancellation=cancellation,
                     )
                 except AnalogyGenerationFailure as failure:
                     repair_generation_attempts = failure.attempts
@@ -438,12 +439,16 @@ class AnalogyLoopRunner:
         *,
         excluded: set[str] | None = None,
     ):
-        excluded = excluded or set()
-        tactics = tuple(
-            tactic
-            for tactic in plan.tactics
-            if tactic not in excluded
-        )[: self.tactics_per_iteration]
+        excluded_keys = {_canonical_tactic(tactic) for tactic in (excluded or set())}
+        unique_tactics: list[str] = []
+        seen = set(excluded_keys)
+        for tactic in plan.tactics:
+            canonical = _canonical_tactic(tactic)
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            unique_tactics.append(canonical)
+        tactics = tuple(unique_tactics[: self.tactics_per_iteration])
         if not tactics:
             return _VerifiedPlan((), (), None, None), resources
         score = 1.0 / len(tactics)
@@ -503,10 +508,6 @@ class AnalogyLoopRunner:
             and verified.completed_proof is None
             and verified.successor is None
             and bool(verified.attempts)
-            and all(
-                item.result.status is TacticStatus.ERROR
-                for item in verified.attempts
-            )
             and not cancellation.is_cancelled()
             and iteration_index + 1 < self.controller.config.max_iterations
             and resources.remaining_model_calls >= 2
@@ -598,6 +599,11 @@ def _summarize(iteration: AnalogyIteration) -> IterationSummary:
             for item in iteration.attempts
             for diagnostic in item.result.diagnostics
         ),
+        tuple(
+            item.discarded.reason.value
+            for item in iteration.attempts
+            if item.discarded is not None
+        ),
     )
 
 
@@ -608,6 +614,10 @@ def _merge_verified(first: _VerifiedPlan, second: _VerifiedPlan) -> _VerifiedPla
         second.completed_proof or first.completed_proof,
         second.successor or first.successor,
     )
+
+
+def _canonical_tactic(source: str) -> str:
+    return " ".join(source.split())
 
 
 __all__ = [

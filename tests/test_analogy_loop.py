@@ -20,6 +20,8 @@ from analogy.proof_views import (
 )
 from analogy.records import (
     CandidateOrigin,
+    DiscardReason,
+    DiscardedSuccessor,
     Embedding,
     SearchNode,
     SymbolicState,
@@ -116,8 +118,9 @@ class Repairs:
         iteration_index,
         candidate_count,
         max_attempts=None,
+        cancellation=None,
     ):
-        del action
+        del action, cancellation
         self.calls.append(
             (context, failed_plan, failed_attempts, candidate_count, max_attempts)
         )
@@ -442,6 +445,76 @@ def test_rejected_repair_refines_analogy_on_same_state_with_diagnostics():
         "Lean rejected step_1",
         "Lean rejected still_bad",
     )
+
+
+def test_discarded_repair_successor_refines_same_state_and_reports_discard_reason():
+    repairer = Repairs(("repeated",))
+    runner = loop_runner(
+        predicted=("p1", "p2"),
+        max_iterations=2,
+        max_model_calls=8,
+        max_lean_calls=8,
+        tactic_repairer=repairer,
+    )
+    calls = 0
+
+    def evaluator(candidate):
+        nonlocal calls
+        calls += 1
+        if calls % 2:
+            return TacticEvaluation(
+                TacticResult(candidate, TacticStatus.ERROR, diagnostics=("bad",))
+            )
+        repeated = state("repeat", "same state")
+        result = TacticResult(candidate, TacticStatus.ACCEPTED, repeated)
+        return TacticEvaluation(
+            result,
+            discarded=DiscardedSuccessor(result, DiscardReason.REPEATED_STATE),
+        )
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), evaluator, NeverCancelled()
+    )
+
+    trace = outcome.rollouts[0].analogy_trace
+    assert len(trace.iterations) == 2
+    assert trace.iterations[0].refined_same_state is True
+    assert runner.analogy_generator.contexts[1].prior_iterations[0].discard_reasons == (
+        "repeated_state",
+    )
+
+
+def test_duplicate_tactics_consume_only_one_lean_call():
+    class DuplicatePlans(Plans):
+        def generate(self, context, action, *, iteration_index, max_attempts=None):
+            generated = super().generate(
+                context,
+                action,
+                iteration_index=iteration_index,
+                max_attempts=max_attempts,
+            )
+            return GeneratedTacticPlan(
+                replace(
+                    generated.plan,
+                    tactics=("exact h", " exact   h ", "exact h"),
+                ),
+                generated.attempts,
+            )
+
+    runner = loop_runner(predicted=("p1",), max_iterations=1)
+    runner.tactic_generator = DuplicatePlans(("p1",))
+    seen = []
+
+    def reject(candidate):
+        seen.append(candidate.source)
+        return TacticEvaluation(TacticResult(candidate, TacticStatus.ERROR))
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), reject, NeverCancelled()
+    )
+
+    assert seen == ["exact h"]
+    assert outcome.rollouts[0].analogy_trace.lean_calls == 1
 
 
 def test_semantic_repair_is_skipped_when_model_or_lean_budget_is_exhausted():

@@ -640,17 +640,17 @@ def evaluate_direct_rescue(
                 for item in assignments
             }
             sources_by_connective: dict[str, list[str]] = {}
-            for identifier, record in analogy_records_by_problem.items():
+            for problem_id, record in analogy_records_by_problem.items():
                 sources_by_connective.setdefault(
                     record.problem.connective, []
-                ).append(identifier)
+                ).append(problem_id)
             for item in problem_split.test:
                 source_id = assigned.get(item.id)
                 if source_id is None:
                     eligible = sorted(
-                        identifier
-                        for identifier in sources_by_connective.get(item.connective, ())
-                        if identifier != item.id
+                        candidate_id
+                        for candidate_id in sources_by_connective.get(item.connective, ())
+                        if candidate_id != item.id
                     )
                     if not eligible:
                         raise ValueError(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +11,7 @@ import torch
 
 from analogy.config import load_config
 from analogy.analogy_loop import AnalogyLoopTrace
+from analogy.analogy_stream import AnalogyHop
 from analogy.lean_gym.models import Problem
 from analogy.records import (
     CandidateOrigin,
@@ -168,6 +169,75 @@ def test_evaluation_validates_checkpoint_before_creating_run_directory(
         evaluate_direct_rescue(config, generator, object(), checkpoint)
 
     assert not (config.run.output_dir / "rescue" / "evaluate-bad").exists()
+
+
+def test_evaluation_run_id_is_not_overwritten_by_shuffled_problem_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import analogy.training as training
+
+    base = load_config(ROOT / "config.yaml")
+    checkpoint = tmp_path / "epoch-0001.pt"
+    config = replace(
+        base,
+        experiment=replace(base.experiment, stage="evaluate_rescue"),
+        analogy=replace(base.analogy, enabled=True),
+        rl=replace(base.rl, enabled=True, checkpoint=checkpoint),
+        run=replace(base.run, output_dir=tmp_path / "runs"),
+    )
+    problems = (problem("iff-a", "iff"), problem("iff-b", "iff"))
+    split = split_problems(
+        problems,
+        train_connectives=config.rl.train_connectives,
+        validation_connectives=config.rl.validation_connectives,
+        test_connectives=config.rl.test_connectives,
+    )
+    generator = type("Generator", (), {"hidden_size": 2})()
+    policy = training._new_policy(config, generator)
+    torch.save(
+        {
+            "config_hash": training._config_hash(config),
+            "split": asdict(split),
+            "policy_schema_version": policy.schema_version,
+            "policy": policy.state_dict(),
+        },
+        checkpoint,
+    )
+    hop = AnalogyHop(
+        "hop-0", None, "bridge", "cross a gap", ("supports connect",),
+        (("bridge", "implication"),), "cross", "reach target", "same shape", False,
+    )
+
+    def execute(config, generator, verifier, item, phase, policy, **kwargs):
+        del config, generator, verifier, policy, kwargs
+        if phase != "analogy_loop":
+            return ProblemEpisode(item.id, False, (), (), 0, 0)
+        state_before = SymbolicState(item.id, f"⊢ {item.target}", "lean4")
+        iteration = SimpleNamespace(
+            hop=hop,
+            state_before=state_before,
+            attempts=(),
+            actual_transition=None,
+            repair_generation_attempts=(),
+            repair_succeeded=False,
+            surprise=None,
+        )
+        trace = AnalogyLoopTrace((iteration,), StopReason.NO_SUCCESSOR)
+        rollout = RescueRollout(
+            f"r-{item.id}", item.id, PolicyActionRecord(0, 0.0, 0.0, 0.0),
+            (), (), RescueTermination.EXHAUSTED, analogy_trace=trace,
+        )
+        return ProblemEpisode(item.id, False, (rollout,), (), 0, 0)
+
+    monkeypatch.setattr(training, "load_problems", lambda path: problems)
+    monkeypatch.setattr(training, "_execute_problem", execute)
+    monkeypatch.setattr(training, "_persist_episode", lambda *args: None)
+
+    summary = evaluate_direct_rescue(config, generator, object(), checkpoint)
+
+    assert summary.run_id == "evaluate-epoch-0001"
+    persisted = json.loads((summary.run_directory / "summary.json").read_text())
+    assert persisted["run_id"] == "evaluate-epoch-0001"
 
 
 def test_checkpoint_round_trip_restores_rng_optimizer_and_policy(tmp_path: Path) -> None:

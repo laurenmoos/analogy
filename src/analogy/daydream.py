@@ -13,7 +13,6 @@ from .records import (
     TacticCandidate,
     TacticCanonicalizer,
     TacticResult,
-    TacticStatus,
     Embedding,
     SymbolicState,
     _probability,
@@ -21,6 +20,7 @@ from .records import (
     _text_tuple,
     _typed_tuple,
 )
+from .rescue import TacticEvaluation
 
 
 class PopulationOrigin(str, Enum):
@@ -70,42 +70,6 @@ class PertinenceAssessment:
             raise ValueError("is_pertinent must be a bool")
         if self.rationale is not None:
             _require_text(self.rationale, "rationale")
-
-
-@dataclass(frozen=True, slots=True)
-class TacticEvaluation:
-    result: TacticResult
-    completed_proof: str | None = None
-    successor: SearchNode | None = None
-    discarded: DiscardedSuccessor | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.result, TacticResult):
-            raise ValueError("result must be a TacticResult")
-        if self.successor is not None and not isinstance(self.successor, SearchNode):
-            raise ValueError("successor must be a SearchNode or None")
-        if self.discarded is not None and not isinstance(self.discarded, DiscardedSuccessor):
-            raise ValueError("discarded must be a DiscardedSuccessor or None")
-        classifications = sum(
-            value is not None
-            for value in (self.completed_proof, self.successor, self.discarded)
-        )
-        if self.result.status is TacticStatus.ERROR:
-            if classifications:
-                raise ValueError("error evaluations must not include an outcome")
-            return
-        if classifications != 1:
-            raise ValueError("accepted and complete evaluations require one outcome")
-        if self.result.status is TacticStatus.COMPLETE:
-            _require_text(self.completed_proof, "completed_proof")
-            if self.successor is not None or self.discarded is not None:
-                raise ValueError("complete evaluations require only completed_proof")
-        elif self.completed_proof is not None:
-            raise ValueError("accepted evaluations must not include completed_proof")
-        elif self.successor is not None and self.successor.state != self.result.state:
-            raise ValueError("successor state must match the accepted result")
-        elif self.discarded is not None and self.discarded.result != self.result:
-            raise ValueError("discarded result must match the accepted result")
 
 
 @dataclass(frozen=True, slots=True)

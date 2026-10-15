@@ -17,6 +17,13 @@ def state(identifier: str) -> SymbolicState:
     return SymbolicState(identifier, f"goal {identifier}", "lean4")
 
 
+def test_tactic_evaluation_remains_available_from_daydream() -> None:
+    from analogy.daydream import TacticEvaluation as CompatibilityExport
+    from analogy.rescue import TacticEvaluation
+
+    assert CompatibilityExport is TacticEvaluation
+
+
 def tactic(source: str = "simp", score: float = 0.7) -> TacticCandidate:
     return TacticCandidate(source, score, CandidateOrigin.ORDINARY)
 

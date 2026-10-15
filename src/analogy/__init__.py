@@ -14,8 +14,21 @@ from .daydream import (
     RelationProposal,
     RelationRefiner,
     RelationSampler,
-    TacticEvaluation,
     WhitespaceRelationCanonicalizer,
+)
+from .rescue import (
+    GenericRescueOutcome,
+    GenericRescueRunner,
+    PolicyActionRecord,
+    ProofRescueContext,
+    RescueAttempt,
+    RescueOutputError,
+    RescueProposal,
+    RescueRollout,
+    RescueTermination,
+    TacticEvaluation,
+    parse_rescue_proposals,
+    render_direct_rescue_prompt,
 )
 from .loop import (
     AcceptNovelState,
@@ -62,19 +75,24 @@ from .records import (
 __all__ = [
     "AcceptNovelState", "AnalogicalTransfer", "AppConfig", "CancellationToken",
     "CandidateOrigin", "ConfigError", "ConstrainedTacticChooser",
+    "GenericRescueOutcome", "GenericRescueRunner",
     "CuriosityOutcome", "CuriosityRunner", "CuriositySearch", "DaydreamRound",
     "DiscardReason", "DiscardedSuccessor", "Embedding", "ExpansionOutcome",
     "LeanVerifier", "LocalRescueSearch", "NeverCancelled",
     "ObservableStucknessPolicy", "OperatorComposition", "OperatorLibraryEntry",
     "OperatorRelation", "OperatorTransformation", "PertinenceAssessment",
     "PertinenceGate", "PopulationOrigin", "ProgramCandidate", "ProgressPolicy",
+    "PolicyActionRecord", "ProofRescueContext",
     "PseudoOperator", "RelationCanonicalizer", "RelationProposal",
     "RelationRefiner", "RelationSampler", "SearchNode", "SearchResult",
+    "RescueAttempt", "RescueOutputError", "RescueProposal", "RescueRollout",
+    "RescueTermination",
     "SearchStatus", "StateFingerprinter", "StateIdFingerprinter", "StuckReason",
     "StucknessDecision", "StucknessPolicy", "SymbolicState", "TacticCandidate",
     "TacticCanonicalizer", "TacticEvaluation", "TacticRanker", "TacticResult",
     "TacticStatus", "VerificationEvidence", "VerificationStatus",
     "VerifiedProgram", "WhitespaceRelationCanonicalizer",
-    "WhitespaceTacticCanonicalizer", "load_config",
+    "WhitespaceTacticCanonicalizer", "load_config", "parse_rescue_proposals",
+    "render_direct_rescue_prompt",
 ]
 

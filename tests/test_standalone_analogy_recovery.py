@@ -1234,6 +1234,113 @@ def test_search_counts_only_completion_as_solved() -> None:
     assert any(item.disposition == "repeated" for item in attempts)
 
 
+class RescueSpy:
+    def __init__(self, module, candidates):
+        self.module = module
+        self.candidates = tuple(candidates)
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.module.RescueDecision(self.candidates, True, None)
+
+
+def test_rescue_runs_only_after_shared_pool_exhaustion() -> None:
+    module = load_script()
+    rescue = RescueSpy(module, ("exact h",))
+    solved = module.search_problem(
+        module.Problem("p", "(P : Prop) (h : P)", "P"),
+        module.Condition.ANALOGY,
+        0,
+        FixedPoolStore(("exact h",)),
+        IdentityRanker(),
+        CompletingVerifier(module),
+        module.SearchLimits(1, 1, 5.0, top_k=1),
+        lambda record: None,
+        rescue_generator=rescue,
+    )
+
+    assert solved.fixed_pool_solved is True
+    assert solved.rescue_attempted is False
+    assert rescue.calls == []
+
+
+def test_rescue_verifies_candidates_after_exhaustion() -> None:
+    module = load_script()
+    rescue = RescueSpy(module, ("exact h",))
+    verifier = ScriptedVerifier(module, {((), "exact h"): complete_result(module)})
+
+    result = module.search_problem(
+        module.Problem("p", "(P : Prop) (h : P)", "P"),
+        module.Condition.NONE,
+        0,
+        FixedPoolStore(("bad",)),
+        IdentityRanker(),
+        verifier,
+        module.SearchLimits(1, 1, 5.0, top_k=1),
+        lambda record: None,
+        rescue_generator=rescue,
+    )
+
+    assert result.fixed_pool_solved is False
+    assert result.rescue_attempted is True
+    assert result.rescue_candidates == ("exact h",)
+    assert result.rescue_solved is True
+    assert result.solved is True
+
+
+def test_rescue_timeout_preserves_completed_reranking_result() -> None:
+    module = load_script()
+
+    class TimeoutRescue:
+        def __call__(self, **kwargs):
+            raise TimeoutError("rescue generation exceeded 20 seconds")
+
+    result = module.search_problem(
+        module.Problem("p", "(P : Prop) (h : P)", "P"),
+        module.Condition.NONE,
+        0,
+        FixedPoolStore(("bad",)),
+        IdentityRanker(),
+        ScriptedVerifier(module, {}),
+        module.SearchLimits(1, 1, 5.0, top_k=1),
+        lambda record: None,
+        rescue_generator=TimeoutRescue(),
+    )
+
+    assert result.fixed_pool_solved is False
+    assert result.rescue_attempted is True
+    assert result.rescue_solved is False
+    assert result.status == "exhausted"
+    assert result.rescue_failure == "TimeoutError: rescue generation exceeded 20 seconds"
+
+
+def test_generate_rescue_candidates_is_bounded_and_removes_shared_duplicates() -> None:
+    module = load_script()
+
+    class RescueModel:
+        model_revision = "rescue-spy"
+
+        def generate(self, messages, *, seed, **kwargs):
+            assert kwargs["max_new_tokens"] == 32
+            assert kwargs["timeout_seconds"] == 20.0
+            return '["bad", "exact h", "exact h", "assumption"]'
+
+    decision = module.generate_rescue_candidates(
+        RescueModel(),
+        module.Condition.NONE,
+        module.Problem("p", "(P : Prop) (h : P)", "P"),
+        "h : P\n⊢ P",
+        selecting_signature(module),
+        ("bad",),
+        (),
+        seed=0,
+    )
+
+    assert decision.candidates == ("exact h", "assumption")
+    assert decision.attempted is True
+
+
 def test_open_novel_state_at_budget_is_not_solved() -> None:
     module = load_script()
     problem = module.Problem("identity", "(P : Prop)", "P → P")
@@ -1297,6 +1404,7 @@ def trial(module, problem_id: str, condition: str, solved: bool):
         novel_state_count=0,
         failure=None if solved else "exhausted",
         elapsed_seconds=0.1,
+        fixed_pool_solved=solved,
     )
 
 
@@ -1317,6 +1425,8 @@ def test_summary_uses_no_retrieval_to_define_solved_subgroups() -> None:
     assert summary["subgroups"]["baseline_unsolved"] == ["b"]
     assert summary["comparisons"]["analogy_vs_none"]["newly_solved"] == ["b"]
     assert summary["comparisons"]["random_vs_none"]["regressed"] == ["a"]
+    assert summary["conditions"]["none"]["fixed_pool_solved"] == 1
+    assert summary["conditions"]["none"]["rescue_solved"] == 0
 
 
 class CompletingVerifier:

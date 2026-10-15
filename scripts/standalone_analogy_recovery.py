@@ -592,6 +592,7 @@ PROOF_NEED_PROMPT_VERSION = "proof-need-v1"
 TRANSFORMATION_PROMPT_VERSION = "transformation-v1"
 RANKING_PROMPT_VERSION = "ranking-v1"
 PAIR_SCORING_PROMPT_VERSION = "pair-scoring-v1"
+RESCUE_PROMPT_VERSION = "rescue-v1"
 PROMPT_VERSIONS = MappingProxyType(
     {
         "candidate": CANDIDATE_PROMPT_VERSION,
@@ -599,6 +600,7 @@ PROMPT_VERSIONS = MappingProxyType(
         "transformation": TRANSFORMATION_PROMPT_VERSION,
         "ranking": RANKING_PROMPT_VERSION,
         "pair_scoring": PAIR_SCORING_PROMPT_VERSION,
+        "rescue": RESCUE_PROMPT_VERSION,
     }
 )
 
@@ -748,6 +750,35 @@ def tactic_scoring_prompt(
             f"Proof structure: {render_proof_signature(signature)}\n"
             f"Retrieved transformations: {json.dumps(transformations, sort_keys=True, separators=(',', ':'))}\n"
             "Next tactic:",
+        ),
+    )
+
+
+def rescue_prompt(
+    condition: Condition,
+    problem: Problem,
+    state: str,
+    signature: ProofSignature,
+    shared_candidates: tuple[str, ...],
+    hits: tuple["RetrievalHit", ...],
+) -> tuple[Message, ...]:
+    transformations = tuple(
+        hit.item.record.domain_neutral_summary for hit in hits
+    )
+    return (
+        Message(
+            "system",
+            f"Prompt {RESCUE_PROMPT_VERSION}. Propose at most two new Lean 4 tactics "
+            "after the fixed tactic pool was exhausted. Return only one JSON array of "
+            "complete single-line tactic strings with no explanation.",
+        ),
+        Message(
+            "user",
+            f"Overall target: {problem.target}\nCurrent goals:\n{state}\n"
+            f"Proof structure: {render_proof_signature(signature)}\n"
+            f"Condition: {condition.value}\n"
+            f"Retrieved transformations:\n{_context_block(transformations)}\n"
+            f"Already tried fixed-pool tactics:\n{_context_block(shared_candidates)}",
         ),
     )
 
@@ -1237,10 +1268,13 @@ class QwenModel:
         operation: str = "unspecified",
         difficulty: int = 1,
         expected_json: str | None = None,
+        max_new_tokens: int | None = None,
     ) -> str:
         policy = generation_policy(
             difficulty,
-            base_max_new_tokens=self._max_new_tokens,
+            base_max_new_tokens=(
+                self._max_new_tokens if max_new_tokens is None else max_new_tokens
+            ),
             base_timeout_seconds=self._timeout_seconds,
         )
         overall_deadline = (
@@ -1585,6 +1619,30 @@ class RankingDecision:
         return tuple(self.candidates[index] for index in self.indices)
 
 
+@dataclass(frozen=True, slots=True)
+class RescueDecision:
+    candidates: tuple[str, ...]
+    attempted: bool
+    failure: str | None
+
+    def __post_init__(self) -> None:
+        candidates = tuple(self.candidates)
+        if len(candidates) > 2:
+            raise ExperimentError("rescue decision may contain at most two candidates")
+        if any(
+            not isinstance(item, str)
+            or not item.strip()
+            or any(character in item for character in "\r\n\x00")
+            for item in candidates
+        ):
+            raise ExperimentError("rescue candidates must be nonblank single lines")
+        if len(set(candidates)) != len(candidates):
+            raise ExperimentError("rescue candidates must be unique")
+        if not self.attempted and candidates:
+            raise ExperimentError("unattempted rescue cannot contain candidates")
+        object.__setattr__(self, "candidates", candidates)
+
+
 def derived_seed(seed: int, *parts: str) -> int:
     material = "\x1f".join((str(seed), *parts))
     return int.from_bytes(hashlib.sha256(material.encode("utf-8")).digest()[:8], "big")
@@ -1671,6 +1729,7 @@ def _model_generate(
     operation: str,
     difficulty: int,
     expected_json: str | None,
+    max_new_tokens: int | None = None,
 ) -> str:
     parameters = inspect.signature(model.generate).parameters
     accepts_keywords = any(
@@ -1684,12 +1743,76 @@ def _model_generate(
     }
     if timeout_seconds is not None:
         optional["timeout_seconds"] = timeout_seconds
+    if max_new_tokens is not None:
+        optional["max_new_tokens"] = max_new_tokens
     kwargs = {
         key: value
         for key, value in optional.items()
         if accepts_keywords or key in parameters
     }
     return model.generate(messages, seed=seed, **kwargs)
+
+
+def _parse_rescue_candidates(
+    text: str, shared_candidates: tuple[str, ...]
+) -> tuple[str, ...]:
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ModelOutputError("rescue output must be a JSON tactic array") from error
+    if not isinstance(value, list):
+        raise ModelOutputError("rescue output must be a JSON tactic array")
+    shared = {" ".join(item.split()) for item in shared_candidates}
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or any(
+            character in item for character in "\r\n\x00"
+        ):
+            raise ModelOutputError("rescue tactics must be nonblank single lines")
+        canonical = " ".join(item.split())
+        if canonical in shared or canonical in seen:
+            continue
+        seen.add(canonical)
+        filtered.append(canonical)
+    if not filtered:
+        return ()
+    return parse_candidates(json.dumps(filtered), top_k=2)
+
+
+def generate_rescue_candidates(
+    model: TextModel,
+    condition: Condition,
+    problem: Problem,
+    state: str,
+    signature: ProofSignature,
+    shared_candidates: tuple[str, ...],
+    hits: tuple[RetrievalHit, ...],
+    *,
+    seed: int,
+    rescue_max_new_tokens: int = 32,
+    rescue_timeout_seconds: float = 20.0,
+) -> RescueDecision:
+    generated = _model_generate(
+        model,
+        rescue_prompt(
+            condition,
+            problem,
+            state,
+            signature,
+            shared_candidates,
+            hits,
+        ),
+        seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "rescue"),
+        timeout_seconds=rescue_timeout_seconds,
+        operation="rescue",
+        difficulty=problem.difficulty,
+        expected_json="array",
+        max_new_tokens=rescue_max_new_tokens,
+    )
+    return RescueDecision(
+        _parse_rescue_candidates(generated, shared_candidates), True, None
+    )
 
 
 def build_transformation_index(
@@ -2686,6 +2809,11 @@ class TrialResult:
     elapsed_seconds: float
     reference_coverage: bool = False
     exact_reference_overlap: int = 0
+    fixed_pool_solved: bool = False
+    rescue_attempted: bool = False
+    rescue_candidates: tuple[str, ...] = ()
+    rescue_solved: bool = False
+    rescue_failure: str | None = None
 
 
 def state_fingerprint(problem: Problem, state: str) -> str:
@@ -2760,6 +2888,8 @@ def search_problem(
     verifier: Any,
     limits: SearchLimits,
     attempt_sink: Callable[[AttemptRecord], Any],
+    *,
+    rescue_generator: Callable[..., RescueDecision] | None = None,
 ) -> TrialResult:
     started = time.monotonic()
     deadline = started + limits.theorem_timeout_seconds
@@ -2801,6 +2931,11 @@ def search_problem(
     repeated = 0
     novel = 0
     status = ""
+    terminal_state = initial_state
+    terminal_signature = initial.signature
+    terminal_prefix: tuple[str, ...] = ()
+    terminal_candidates: tuple[str, ...] = ()
+    terminal_decision: RankingDecision | None = None
 
     while frontier:
         if time.monotonic() >= deadline:
@@ -2837,6 +2972,11 @@ def search_problem(
                 seed,
                 deadline=deadline,
             )
+            terminal_state = state
+            terminal_signature = signature
+            terminal_prefix = prefix
+            terminal_candidates = tuple(candidates)
+            terminal_decision = decision
         except TimeoutError as error:
             if time.monotonic() >= deadline or str(error) == "theorem timeout":
                 status = "timeout"
@@ -2915,6 +3055,7 @@ def search_problem(
                     novel,
                     None,
                     time.monotonic() - started,
+                    fixed_pool_solved=True,
                 )
             if result.status is LeanStatus.OPEN and result.accepted and result.state:
                 if result.signature is None:
@@ -2983,6 +3124,72 @@ def search_problem(
         status = "exhausted"
         failure = "search frontier exhausted"
 
+    rescue_attempted = False
+    rescue_candidates: tuple[str, ...] = ()
+    rescue_solved = False
+    rescue_failure: str | None = None
+    rescue_tactic: str | None = None
+    if (
+        status == "exhausted"
+        and rescue_generator is not None
+        and terminal_signature is not None
+        and terminal_decision is not None
+    ):
+        rescue_attempted = True
+        try:
+            rescue = rescue_generator(
+                condition=condition,
+                problem=problem,
+                state=terminal_state,
+                signature=terminal_signature,
+                shared_candidates=terminal_candidates,
+                hits=terminal_decision.hits,
+                seed=seed,
+            )
+            if not isinstance(rescue, RescueDecision):
+                raise ExperimentError("rescue generator must return RescueDecision")
+            rescue_candidates = tuple(
+                candidate
+                for candidate in rescue.candidates
+                if candidate not in set(terminal_candidates)
+            )[:2]
+            rescue_failure = rescue.failure
+            for candidate in rescue_candidates:
+                result = verifier.try_tactic(
+                    problem, terminal_prefix, candidate
+                )
+                if (
+                    rescue_tactic is None
+                    and result.status is LeanStatus.COMPLETE
+                    and result.accepted
+                ):
+                    rescue_tactic = candidate
+                    rescue_solved = True
+        except Exception as error:
+            rescue_failure = f"{type(error).__name__}: {error}"
+
+    if rescue_solved and rescue_tactic is not None:
+        return TrialResult(
+            problem.id,
+            condition.value,
+            seed,
+            "complete",
+            True,
+            terminal_prefix + (rescue_tactic,),
+            expansions,
+            verifier_calls,
+            rejected,
+            repeated,
+            novel,
+            None,
+            time.monotonic() - started,
+            fixed_pool_solved=False,
+            rescue_attempted=True,
+            rescue_candidates=rescue_candidates,
+            rescue_solved=True,
+            rescue_failure=rescue_failure,
+        )
+
     return TrialResult(
         problem.id,
         condition.value,
@@ -2997,6 +3204,11 @@ def search_problem(
         novel,
         failure,
         time.monotonic() - started,
+        fixed_pool_solved=False,
+        rescue_attempted=rescue_attempted,
+        rescue_candidates=rescue_candidates,
+        rescue_solved=False,
+        rescue_failure=rescue_failure,
     )
 
 
@@ -3128,6 +3340,9 @@ def summarize_trials(trials: Sequence[TrialResult]) -> dict[str, object]:
         aggregates[condition] = {
             "trial_count": len(selected),
             "solved_count": solved_count,
+            "fixed_pool_solved": sum(item.fixed_pool_solved for item in selected),
+            "rescue_attempted": sum(item.rescue_attempted for item in selected),
+            "rescue_solved": sum(item.rescue_solved for item in selected),
             "completion_rate": solved_count / len(selected),
             "verifier_call_count": sum(item.verifier_call_count for item in selected),
             "expansion_count": sum(item.expansion_count for item in selected),
@@ -3379,6 +3594,16 @@ def run_experiment(
                         verifier,
                         config.search_limits,
                         record_attempt,
+                        rescue_generator=lambda **kwargs: generate_rescue_candidates(
+                            model,
+                            kwargs["condition"],
+                            kwargs["problem"],
+                            kwargs["state"],
+                            kwargs["signature"],
+                            kwargs["shared_candidates"],
+                            kwargs["hits"],
+                            seed=kwargs["seed"],
+                        ),
                     )
                     reference = config.reference_proofs[problem.id]
                     candidate_coverage = any(

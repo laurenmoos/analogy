@@ -304,3 +304,66 @@ def test_domain_neutral_transformation_cannot_hide_proof_identifiers(text):
     payload["transformation"]["focus_before"] = text
     with pytest.raises(TransferOutputError):
         parse_source_analogy(json.dumps(payload), analogy_id="analogy-1", need=proof_need())
+
+
+@pytest.mark.parametrize("tactic", ["sorry", "admit"])
+@pytest.mark.parametrize("field", ["domain", "source_before", "source_after", "rationale",
+                                  "source_roles", "relation_chain"])
+def test_source_fields_reject_proof_admission_tactics(field, tactic):
+    payload = valid_source_payload()
+    payload[field] = [tactic, "second role"] if isinstance(payload[field], list) else tactic
+    with pytest.raises(TransferOutputError, match="source domain"):
+        parse_source_analogy(json.dumps(payload), analogy_id="analogy-1")
+
+
+@pytest.mark.parametrize("tactic", ["sorry", "admit"])
+@pytest.mark.parametrize("field", ["premises", "reasoning_steps", "predicted_next_subgoal"])
+def test_proof_reasoning_rejects_proof_admission_tactics(field, tactic):
+    payload = valid_transfer_payload()
+    payload[field] = [tactic] if isinstance(payload[field], list) else tactic
+    with pytest.raises(TransferOutputError, match="tactic"):
+        parse_proof_reasoning_transfer(json.dumps(payload), need=proof_need(),
+                                      alignment=alignment(), transfer_id="transfer-1")
+
+
+@pytest.mark.parametrize("command", ["by\n  decide", "by\r\n  decide", "by\r  decide", "by decide",
+                                    "A wheel waits.\n  decide"])
+@pytest.mark.parametrize("field", ["domain", "source_before", "source_after", "rationale",
+                                  "source_roles", "relation_chain"])
+def test_source_checks_tactic_command_boundaries_before_whitespace_normalization(field, command):
+    payload = valid_source_payload()
+    payload[field] = [command, "second role"] if isinstance(payload[field], list) else command
+    with pytest.raises(TransferOutputError, match="source domain"):
+        parse_source_analogy(json.dumps(payload), analogy_id="analogy-1")
+
+
+@pytest.mark.parametrize("command", ["by\n  decide", "by\r\n  decide", "by\r  decide", "by decide",
+                                    "A wheel waits.\n  decide"])
+@pytest.mark.parametrize("field", ["premises", "reasoning_steps", "predicted_next_subgoal"])
+def test_reasoning_checks_tactic_command_boundaries_before_whitespace_normalization(field, command):
+    payload = valid_transfer_payload()
+    payload[field] = [command] if isinstance(payload[field], list) else command
+    with pytest.raises(TransferOutputError, match="tactic"):
+        parse_proof_reasoning_transfer(json.dumps(payload), need=proof_need(),
+                                      alignment=alignment(), transfer_id="transfer-1")
+
+
+@pytest.mark.parametrize("command", ["sorry", "admit", "by\n  decide"])
+def test_transformation_checks_raw_tactic_commands(command):
+    payload = transformation_payload()
+    payload["focus_after"] = command
+    with pytest.raises(TransferOutputError, match="tactic"):
+        parse_transformation_record(json.dumps(payload))
+
+
+def test_multiline_ordinary_prose_still_normalizes_without_becoming_a_command():
+    payload = valid_source_payload()
+    payload["source_after"] = "A routing change\nlets the worker have the wheel."
+    assert parse_source_analogy(json.dumps(payload), analogy_id="analogy-1").source_after == (
+        "A routing change lets the worker have the wheel."
+    )
+    transfer_payload = valid_transfer_payload()
+    transfer_payload["reasoning_steps"] = ["The derived condition and its negation\nyield a contradiction."]
+    result = parse_proof_reasoning_transfer(json.dumps(transfer_payload), need=proof_need(),
+                                          alignment=alignment(), transfer_id="transfer-1")
+    assert result.reasoning_steps == ("The derived condition and its negation yield a contradiction.",)

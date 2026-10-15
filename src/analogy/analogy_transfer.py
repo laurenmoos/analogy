@@ -11,6 +11,7 @@ import math
 import re
 from dataclasses import dataclass, fields
 from enum import Enum
+from typing import Callable
 
 from .proof_views import ProofStructure
 
@@ -61,13 +62,13 @@ class InformationFlow(str, Enum):
 _TACTICS = re.compile(
     r"\b(?:intro|intros|rintro|exact|apply|cases|rcases|obtain|constructor|"
     r"simp|simpa|aesop|assumption|rfl|rw|rewrite|refine|specialize|"
-    r"unfold|omega|tauto)\b",
+    r"unfold|omega|tauto|sorry|admit)\b",
     re.IGNORECASE,
 )
 # These words also have ordinary domain meanings; reject their command form
 # while retaining prose such as "a routing change" or "derive a contradiction".
 _TACTIC_COMMANDS = re.compile(
-    r"(?:^|[;\n])\s*(?:have|show|change|contradiction|trivial|decide)\b"
+    r"(?:^|[;\r\n]|\bby\s+)\s*(?:have|show|change|contradiction|trivial|decide)\b"
 )
 _LEAN_IDENTIFIERS = re.compile(
     r"\b(?:h[A-Z0-9_]\w*|(?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*|[A-Za-z_]\w*_\d+)\b"
@@ -79,17 +80,22 @@ _PROOF_WORDS = re.compile(
 _LEAN_SYMBOLS = re.compile(r"[⊢∀∃∧∨¬↔→]|:=|=>")
 
 
-def _text(value: object, name: str) -> str:
+def _text(value: object, name: str, *,
+          guard: Callable[[tuple[str, ...]], None] | None = None) -> str:
     if not isinstance(value, str) or not value.strip():
         raise TransferOutputError(f"{name} must be nonblank text")
+    if guard is not None:
+        # Command boundaries are evidence: validate before collapsing newlines.
+        guard((value,))
     return " ".join(value.split())
 
 
 def _texts(value: object, name: str, *, minimum: int = 0,
-           maximum: int | None = None, unique: bool = False) -> tuple[str, ...]:
+           maximum: int | None = None, unique: bool = False,
+           guard: Callable[[tuple[str, ...]], None] | None = None) -> tuple[str, ...]:
     if not isinstance(value, (tuple, list)):
         raise TransferOutputError(f"{name} must be a text sequence")
-    result = tuple(_text(item, name) for item in value)
+    result = tuple(_text(item, name, guard=guard) for item in value)
     if len(result) < minimum or (maximum is not None and len(result) > maximum):
         raise TransferOutputError(f"{name} has an invalid number of entries")
     if unique and len(set(result)) != len(result):
@@ -97,9 +103,10 @@ def _texts(value: object, name: str, *, minimum: int = 0,
     return result
 
 
-def _set_texts(record: object, *names: str) -> None:
+def _set_texts(record: object, *names: str,
+               guard: Callable[[tuple[str, ...]], None] | None = None) -> None:
     for name in names:
-        object.__setattr__(record, name, _text(getattr(record, name), name))
+        object.__setattr__(record, name, _text(getattr(record, name), name, guard=guard))
 
 
 def _structural_fields(record: object) -> None:
@@ -119,7 +126,7 @@ def _structural_fields(record: object) -> None:
     object.__setattr__(record, "information_flow", flow)
 
 
-def _tactic_free(*texts: str) -> None:
+def _tactic_free(texts: tuple[str, ...]) -> None:
     if any(_TACTICS.search(text) or _TACTIC_COMMANDS.search(text)
            or "⊢" in text or ":=" in text for text in texts):
         raise TransferOutputError("reasoning and transformation text must be tactic-free")
@@ -134,7 +141,7 @@ def _has_proposition(text: str, need: ProofNeed | None) -> bool:
 
 
 def _neutral_guard(texts: tuple[str, ...], need: ProofNeed | None = None) -> None:
-    _tactic_free(*texts)
+    _tactic_free(texts)
     if any(_LEAN_IDENTIFIERS.search(text) or _LEAN_SYMBOLS.search(text)
            or _has_proposition(text, need) for text in texts):
         raise TransferOutputError("domain-neutral transformation must not contain proof identifiers or syntax")
@@ -162,7 +169,7 @@ class TransformationRecord:
 
     def __post_init__(self) -> None:
         _structural_fields(self)
-        _set_texts(self, "focus_before", "focus_after", "domain_neutral_summary")
+        _set_texts(self, "focus_before", "focus_after", "domain_neutral_summary", guard=_neutral_guard)
         _neutral_guard((self.focus_before, self.focus_after, self.domain_neutral_summary))
 
 
@@ -182,12 +189,13 @@ class ProofNeed:
 
     def __post_init__(self) -> None:
         _structural_fields(self)
-        _set_texts(self, "fixed_target", "active_subgoal", "focus_before", "desired_focus_after", "summary")
+        _set_texts(self, "fixed_target", "active_subgoal")
+        _set_texts(self, "focus_before", "desired_focus_after", "summary", guard=_tactic_free)
         roles = _texts(self.proof_roles, "proof_roles", minimum=1, unique=True)
         if "active_subgoal" not in roles:
             raise TransferOutputError("proof_roles must declare active_subgoal")
         object.__setattr__(self, "proof_roles", roles)
-        _tactic_free(self.focus_before, self.desired_focus_after, self.summary)
+        _tactic_free((self.focus_before, self.desired_focus_after, self.summary))
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,9 +210,12 @@ class SourceAnalogy:
     rationale: str
 
     def __post_init__(self) -> None:
-        _set_texts(self, "analogy_id", "domain", "source_before", "source_after", "rationale")
-        object.__setattr__(self, "source_roles", _texts(self.source_roles, "source_roles", minimum=2, unique=True))
-        object.__setattr__(self, "relation_chain", _texts(self.relation_chain, "relation_chain", minimum=2, maximum=4))
+        _set_texts(self, "analogy_id")
+        _set_texts(self, "domain", "source_before", "source_after", "rationale", guard=_source_guard)
+        object.__setattr__(self, "source_roles", _texts(
+            self.source_roles, "source_roles", minimum=2, unique=True, guard=_source_guard))
+        object.__setattr__(self, "relation_chain", _texts(
+            self.relation_chain, "relation_chain", minimum=2, maximum=4, guard=_source_guard))
         if not isinstance(self.transformation, TransformationRecord):
             raise TransferOutputError("transformation must be a TransformationRecord")
         _source_guard(_source_texts(self))
@@ -252,12 +263,15 @@ class ProofReasoningTransfer:
     completion_expected: bool
 
     def __post_init__(self) -> None:
-        _set_texts(self, "transfer_id", "alignment_id", "active_subgoal", "predicted_next_subgoal")
-        object.__setattr__(self, "premises", _texts(self.premises, "premises", unique=True))
-        object.__setattr__(self, "reasoning_steps", _texts(self.reasoning_steps, "reasoning_steps", minimum=1))
+        _set_texts(self, "transfer_id", "alignment_id", "active_subgoal")
+        _set_texts(self, "predicted_next_subgoal", guard=_tactic_free)
+        object.__setattr__(self, "premises", _texts(
+            self.premises, "premises", unique=True, guard=_tactic_free))
+        object.__setattr__(self, "reasoning_steps", _texts(
+            self.reasoning_steps, "reasoning_steps", minimum=1, guard=_tactic_free))
         if not isinstance(self.completion_expected, bool):
             raise TransferOutputError("completion_expected must be a boolean")
-        _tactic_free(*self.premises, *self.reasoning_steps, self.predicted_next_subgoal)
+        _tactic_free((*self.premises, *self.reasoning_steps, self.predicted_next_subgoal))
 
 
 def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:

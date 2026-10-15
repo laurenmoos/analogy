@@ -85,7 +85,7 @@ The original one-shot baseline solved 4 of 25 problems. A benchmark-agnostic Lea
 
 The next-tactic baseline was exercised as a diagnostic pilot rather than a definitive benchmark. Run `98d06bc80dff4c23b17ab32b0b68f3c3` solved 13 of the 19 attempted problems and produced 7 explicit stuck states. It was intentionally stopped before the last six problems, so 13/19 should not be compared as a final success rate. The useful finding is that the search loop, Lean verification, and stuck-state capture work end to end; 198 of 254 checked proposals were invalid, making conventional tactic quality the next obvious bottleneck.
 
-## Generic rescue RL checkpoint
+## Generic rescue RL and analogy streams
 
 The first trainable checkpoint deliberately tests rescue without claiming an analogy benefit:
 
@@ -98,9 +98,13 @@ conventional proof search
 → return progress to conventional search
 ```
 
-Qwen stays frozen. A small Gaussian policy changes one final-token prefill activation, and Lean supplies completion, novel-state, or rejection reward. Training, validation, and held-out test connectives are structurally separated; conventional, zero-delta, random, and learned conditions share search and verifier budgets.
+Qwen stays frozen. A small direction/radius policy changes one final-token prefill activation, and Lean supplies completion, novel-state, or structured failure reward. Raw generations, bounded repairs, prediction error, and policy diagnostics are preserved. Verified stuck states can be reconstructed into a deterministic, split-safe replay curriculum.
 
-This checkpoint has no corpus retrieval and no analogy stream. Its purpose is to establish the generic RL and evaluation backbone before the next reviewed stage adds a one-hop generated analogy lens. See the [design specification](docs/superpowers/specs/2026-10-14-associative-analogy-rescue-rl-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-generic-stuck-rescue-rl.md).
+The corpus-free analogy path emits readable cards—domain, situation, relation chain, mapping, continuation, predicted consequence, and rationale—then chains those cards before a separate tactic decoder cites the motivating hop. Lean still decides whether the decoded continuation completes the proof or creates real progress. Discounted verified return propagates through every analogy action in the stream.
+
+> Match the proof’s reasoning up to the stuck point; treat the analogy’s next move as a testable guess for the proof’s next move.
+
+See the [quality and stream design](docs/superpowers/specs/2026-10-14-rescue-quality-and-analogy-stream-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-rescue-quality-and-analogy-stream.md).
 
 Run the complete preservation suite with:
 

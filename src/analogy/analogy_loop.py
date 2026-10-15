@@ -8,6 +8,7 @@ change stopping rules without hiding when generation or Lean is called.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Callable
 
 from .analogy_generation import (
@@ -78,6 +79,7 @@ class AnalogyIteration:
     views: ProofViews
     hop: AnalogyHop
     hop_generation_attempts: tuple[GenerationAttempt, ...]
+    action: PolicyActionRecord
     tactic_plan: AnalogyTacticPlan
     tactic_generation_attempts: tuple[GenerationAttempt, ...]
     proposals: tuple[RescueProposal, ...]
@@ -89,6 +91,7 @@ class AnalogyIteration:
     decision: SurpriseDecision
     model_calls: int
     lean_calls: int
+    elapsed_seconds: float
 
     @property
     def surprise(self) -> float | None:
@@ -124,6 +127,7 @@ class AnalogyLoopRunner:
         tactics_per_iteration: int,
         max_model_calls: int,
         max_lean_calls: int,
+        iteration_sink: Callable[[AnalogyIteration], None] | None = None,
     ) -> None:
         for value, name in (
             (tactics_per_iteration, "tactics_per_iteration"),
@@ -141,6 +145,7 @@ class AnalogyLoopRunner:
         self.tactics_per_iteration = tactics_per_iteration
         self.max_model_calls = max_model_calls
         self.max_lean_calls = max_lean_calls
+        self.iteration_sink = iteration_sink
         self.live_actions: tuple[Any, ...] = ()
 
     def search(
@@ -170,6 +175,8 @@ class AnalogyLoopRunner:
             if preflight is not None:
                 stop_reason = preflight
                 break
+
+            iteration_started = time.monotonic()
 
             context = ProofRescueContext(current, goal, accepted_tactics, failed_tactics)
             views = self.proof_view_builder(context)
@@ -265,6 +272,7 @@ class AnalogyLoopRunner:
                 views,
                 generated_hop.hop,
                 generated_hop.attempts,
+                _action_record(action),
                 generated_plan.plan,
                 generated_plan.attempts,
                 verified.proposals,
@@ -276,8 +284,11 @@ class AnalogyLoopRunner:
                 decision,
                 resources.model_calls,
                 resources.lean_calls,
+                time.monotonic() - iteration_started,
             )
             iterations.append(iteration)
+            if self.iteration_sink is not None:
+                self.iteration_sink(iteration)
             summaries.append(_summarize(iteration))
             stop_reason = decision.reason
             if not decision.continue_loop:
@@ -364,14 +375,7 @@ class AnalogyLoopRunner:
         completed_proof, successor, stop_reason,
     ):
         action = actions[0] if actions else None
-        action_record = PolicyActionRecord(
-            0,
-            0.0 if action is None else float(action.delta.detach().norm()),
-            0.0 if action is None else float(action.log_probability.detach()),
-            0.0 if action is None else float(action.entropy.detach()),
-            0.0 if action is None else float(action.radius.detach()),
-            0.0 if action is None else float(action.raw_direction_norm.detach()),
-        )
+        action_record = _action_record(action)
         if stop_reason is StopReason.CANCELLED:
             termination = RescueTermination.CANCELLED
         elif completed_proof is not None:
@@ -403,6 +407,17 @@ def _surprise_delta(
     if comparison is None or not state.values:
         return None
     return state.values[-1] - comparison.surprise
+
+
+def _action_record(action: Any | None) -> PolicyActionRecord:
+    return PolicyActionRecord(
+        0,
+        0.0 if action is None else float(action.delta.detach().norm()),
+        0.0 if action is None else float(action.log_probability.detach()),
+        0.0 if action is None else float(action.entropy.detach()),
+        0.0 if action is None else float(action.radius.detach()),
+        0.0 if action is None else float(action.raw_direction_norm.detach()),
+    )
 
 
 def _summarize(iteration: AnalogyIteration) -> IterationSummary:

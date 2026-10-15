@@ -168,6 +168,7 @@ class RescueRunWriter:
             "problems.jsonl",
             "metrics.jsonl",
             "stuck_states.jsonl",
+            "analogy_iterations.jsonl",
         ):
             (path / name).touch(exist_ok=False)
         return writer
@@ -177,6 +178,24 @@ class RescueRunWriter:
         with target.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(_jsonable(payload), sort_keys=True) + "\n")
             handle.flush()
+
+    def analogy_iteration_sink(
+        self, *, epoch: int, phase: str, problem_id: str, rollout_id: str
+    ) -> Callable[[Any], None]:
+        """Return a sink that flushes each completed loop iteration immediately."""
+        def append(iteration: Any) -> None:
+            self.append_jsonl(
+                "analogy_iterations.jsonl",
+                {
+                    "epoch": epoch,
+                    "phase": phase,
+                    "problem_id": problem_id,
+                    "rollout_id": rollout_id,
+                    **asdict(iteration),
+                },
+            )
+
+        return append
 
     def write_json(self, name: str, payload: Any) -> None:
         target = self.path / name
@@ -609,6 +628,19 @@ def _persist_episode(
                     **asdict(generation),
                 },
             )
+        trace = rollout.analogy_trace
+        if trace is not None:
+            for iteration in trace.iterations:
+                writer.append_jsonl(
+                    "analogy_iterations.jsonl",
+                    {
+                        "epoch": epoch,
+                        "phase": phase,
+                        "problem_id": episode.problem_id,
+                        "rollout_id": rollout.rollout_id,
+                        **asdict(iteration),
+                    },
+                )
     writer.append_jsonl(
         "problems.jsonl",
         {

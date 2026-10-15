@@ -27,10 +27,14 @@ from analogy.rl import (
     RewardBaseline,
     RewardWeights,
     TrainingSample,
+    discounted_iteration_samples,
+    intrinsic_surprise_reward,
     reinforce_step,
     verifier_reward,
     with_reward,
 )
+from analogy.analogy_loop import AnalogyLoopTrace
+from analogy.surprise import StopReason
 
 
 def representation(
@@ -417,6 +421,34 @@ def test_reinforce_clips_gradient_before_optimizer_step() -> None:
 
     assert policy.theta.item() == pytest.approx(0.1, abs=1e-5)
     assert metrics.gradient_norm == pytest.approx(100.0)
+
+
+def test_verified_return_reaches_every_iteration_action() -> None:
+    policy = OneParameterPolicy()
+    actions = tuple(policy.action(scale=index + 2) for index in range(3))
+    trace = AnalogyLoopTrace((object(), object(), object()), StopReason.MAX_ITERATIONS)
+
+    samples = discounted_iteration_samples(
+        trace,
+        actions,
+        rollout(RescueTermination.EXHAUSTED),
+        verified_reward=1.0,
+        discount=0.9,
+        iteration_cost=0.01,
+    )
+
+    assert [sample.reward for sample in samples] == pytest.approx([0.79, 0.89, 1.0])
+    loss = sum(-sample.reward * sample.action.log_probability for sample in samples)
+    loss.backward()
+    assert all(action.log_probability.grad_fn is not None for action in actions)
+    assert policy.theta.grad is not None
+
+
+def test_rejected_iteration_has_no_surprise_reward() -> None:
+    rejected = rollout(RescueTermination.REJECTED).attempts[0]
+    iteration = type("Iteration", (), {"attempts": (rejected,), "surprise": 1.5})()
+
+    assert intrinsic_surprise_reward(iteration, cap=0.1, enabled=True) == 0.0
 
 
 def test_with_reward_returns_new_scalar_rollout_without_graph() -> None:

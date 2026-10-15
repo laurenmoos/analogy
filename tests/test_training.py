@@ -126,6 +126,7 @@ def test_run_writer_is_non_overwriting_and_flushes_jsonl(tmp_path: Path) -> None
 
     assert [json.loads(line)["id"] for line in (writer.path / "rollouts.jsonl").read_text().splitlines()] == [1, 2]
     assert (writer.path / "generations.jsonl").exists()
+    assert (writer.path / "analogy_iterations.jsonl").exists()
     with pytest.raises(FileExistsError):
         RescueRunWriter.create(tmp_path, "fixed-run", {"seed": 7})
 

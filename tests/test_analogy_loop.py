@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from dataclasses import asdict
 
 import pytest
 import torch
+import json
 
 from analogy.analogy_generation import GeneratedHop, GeneratedTacticPlan
 from analogy.analogy_loop import AnalogyLoopRunner
@@ -28,6 +30,7 @@ from analogy.records import (
 from analogy.rescue import GenerationAttempt, GenerationStatus, TacticEvaluation
 from analogy.rl import PolicyAction
 from analogy.surprise import StopReason, SurpriseConfig, SurpriseController
+from analogy.training import RescueRunWriter
 
 
 def state(identifier: str, expression: str | None = None) -> SymbolicState:
@@ -143,6 +146,7 @@ def loop_runner(
     *, predicted=("p1", "p2", "p3"), surprises=(0.8, 0.1, 0.09),
     stops=(), min_iterations=1, max_iterations=8, threshold=0.2, patience=2,
     max_model_calls=20, max_lean_calls=20,
+    iteration_sink=None,
 ):
     return AnalogyLoopRunner(
         proof_view_builder=Views(),
@@ -163,6 +167,7 @@ def loop_runner(
         tactics_per_iteration=2,
         max_model_calls=max_model_calls,
         max_lean_calls=max_lean_calls,
+        iteration_sink=iteration_sink,
     )
 
 
@@ -182,6 +187,34 @@ def test_loop_conditions_tactics_and_stops_after_surprise_patience():
     assert len(runner.tactic_generator.contexts[2].analogy.stream.hops) == 3
     assert len(runner.analogy_generator.contexts[2].prior_iterations) == 2
     assert outcome.successor.state.expression == "a3"
+    row = asdict(trace.iterations[0])
+    assert {
+        "iteration_index", "state_before", "views", "hop",
+        "hop_generation_attempts", "action", "tactic_plan",
+        "tactic_generation_attempts", "attempts", "comparison",
+        "surprise_delta", "decision", "model_calls", "lean_calls",
+        "elapsed_seconds",
+    } <= row.keys()
+
+
+def test_loop_flushes_one_complete_jsonl_row_per_iteration(tmp_path):
+    writer = RescueRunWriter.create(tmp_path, "trace", {"seed": 7})
+    sink = writer.analogy_iteration_sink(
+        epoch=0, phase="train", problem_id="p", rollout_id="r"
+    )
+    runner = loop_runner(iteration_sink=sink)
+
+    runner.search(
+        state("stuck"), state("goal"), (), (), SequentialEvaluator(), NeverCancelled()
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (writer.path / "analogy_iterations.jsonl").read_text().splitlines()
+    ]
+    assert [row["iteration_index"] for row in rows] == [0, 1, 2]
+    assert all(row["hop_generation_attempts"] and row["attempts"] for row in rows)
+    assert all("views" in row and "decision" in row and "elapsed_seconds" in row for row in rows)
 
 
 @pytest.mark.parametrize("cancel_on_call", [1, 2, 3, 4])

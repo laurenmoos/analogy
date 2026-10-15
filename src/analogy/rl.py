@@ -502,6 +502,72 @@ def with_reward(rollout: RescueRollout, reward: float) -> RescueRollout:
     return replace(rollout, reward=reward)
 
 
+def discounted_iteration_samples(
+    trace: object,
+    actions: Sequence[PolicyAction],
+    rollout: RescueRollout,
+    *,
+    verified_reward: float,
+    discount: float,
+    iteration_cost: float,
+) -> tuple[TrainingSample, ...]:
+    """Propagate one verified outcome back through every analogy refinement."""
+    from .analogy_loop import AnalogyLoopTrace
+
+    if not isinstance(trace, AnalogyLoopTrace):
+        raise ValueError("trace must be an AnalogyLoopTrace")
+    normalized_actions = tuple(actions)
+    if len(normalized_actions) != len(trace.iterations):
+        raise ValueError("trace iterations and live actions must have equal length")
+    for value, name in (
+        (verified_reward, "verified_reward"),
+        (discount, "discount"),
+        (iteration_cost, "iteration_cost"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite")
+    if not 0.0 < float(discount) <= 1.0:
+        raise ValueError("discount must be in (0, 1]")
+    if float(iteration_cost) < 0.0:
+        raise ValueError("iteration_cost must be non-negative")
+    count = len(normalized_actions)
+    return tuple(
+        TrainingSample(
+            rollout,
+            action,
+            float(discount) ** (count - index - 1) * float(verified_reward)
+            - float(iteration_cost) * (count - index - 1),
+        )
+        for index, action in enumerate(normalized_actions)
+    )
+
+
+def intrinsic_surprise_reward(
+    iteration: object, *, cap: float, enabled: bool = False
+) -> float:
+    """Return capped surprise only for a verified, accepted transition."""
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a bool")
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(float(cap)) or cap < 0.0:
+        raise ValueError("cap must be finite and non-negative")
+    if not enabled:
+        return 0.0
+    attempts = tuple(getattr(iteration, "attempts", ()))
+    has_successor = any(
+        isinstance(item, object)
+        and getattr(getattr(item, "result", None), "status", None) is TacticStatus.ACCEPTED
+        and getattr(item, "discarded", None) is None
+        for item in attempts
+    )
+    surprise = getattr(iteration, "surprise", None)
+    if not has_successor or surprise is None:
+        return 0.0
+    value = float(surprise)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("iteration surprise must be finite and non-negative")
+    return min(float(cap), value)
+
+
 __all__ = [
     "DirectRescuePolicy",
     "PolicyAction",
@@ -510,6 +576,8 @@ __all__ = [
     "RewardWeights",
     "TrainingMetrics",
     "TrainingSample",
+    "discounted_iteration_samples",
+    "intrinsic_surprise_reward",
     "reinforce_step",
     "verifier_reward",
     "with_reward",

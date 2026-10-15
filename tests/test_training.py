@@ -298,12 +298,89 @@ def test_checkpoint_rejects_policy_schema_mismatch(tmp_path: Path) -> None:
     path = tmp_path / "schema.pt"
     save_training_checkpoint(path, policy, optimizer, 1, split, "hash")
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    assert payload["policy_schema_version"] == 2
-    payload["policy_schema_version"] = 1
+    assert payload["policy_schema_version"] == 3
+    payload["policy_schema_version"] = 2
     torch.save(payload, path)
 
-    with pytest.raises(ValueError, match="policy schema"):
+    with pytest.raises(ValueError, match="policy schema.*2.*3"):
         load_training_checkpoint(path, policy, optimizer, split, "hash")
+
+
+def test_direct_policy_receives_neutral_channels_and_remaining_resource_scalars():
+    from analogy.rescue import (
+        DirectRescueRunner, ProofRepresentation, ProofRescueContext, TacticEvaluation,
+    )
+    from analogy.records import Embedding
+    from analogy.rl import DirectRescuePolicy
+    from analogy.loop import NeverCancelled
+
+    observations = []
+
+    class ObservingPolicy(DirectRescuePolicy):
+        def sample(self, representation, generator):
+            observations.append(representation)
+            return super().sample(representation, generator)
+
+    def encode(context):
+        return ProofRepresentation(context, "language", "structure", Embedding("fake", (1.0, 0.0)), Embedding("fake", (0.0, 1.0)))
+
+    outputs = iter([
+        '{"predicted_state":"next", "tactics":["bad1"]}',
+        '{"predicted_state":"next", "tactics":["bad2"]}',
+    ])
+    runner = DirectRescueRunner(
+        encoder=SimpleNamespace(encode=encode),
+        policy=ObservingPolicy(2, 4, 0.5, -2.0),
+        generator=SimpleNamespace(generate_with_delta=lambda *args, **kwargs: next(outputs)),
+        rollouts_per_state=2, tactics_per_rollout=1, max_rescue_verifier_calls=4,
+        max_model_calls=4, base_seed=3, hidden_layer=-1,
+    )
+    runner.search(
+        SymbolicState("s", "⊢ P", "lean4"), SymbolicState("g", "P", "lean4"), (), (),
+        lambda candidate: TacticEvaluation(TacticResult(candidate, TacticStatus.ERROR)),
+        NeverCancelled(),
+    )
+    assert [item.scalar_features for item in observations] == [
+        (0.0, 1.0, 1.0, 0.0), (1.0, 0.75, 0.75, 1.0),
+    ]
+    assert all(item.transition_embedding.values == (0.0, 0.0) for item in observations)
+    assert all(item.analogy_embedding.values == (0.0, 0.0) for item in observations)
+
+
+def test_legacy_sampler_normalizes_cumulative_resources_and_resets_each_invocation():
+    from analogy.training import _new_analogy_runner
+    from analogy.proof_views import ProofStructure
+    from analogy.records import Embedding
+    from analogy.rescue import ProofRescueContext
+    from analogy.rl import DirectRescuePolicy
+
+    observations = []
+
+    class ObservingPolicy(DirectRescuePolicy):
+        def sample(self, representation, generator):
+            observations.append(representation)
+            return super().sample(representation, generator)
+
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, analogy=replace(base.analogy, max_iterations=3, max_model_calls=8, max_lean_calls=6))
+    generator = SimpleNamespace(embed_text=lambda *args, **kwargs: Embedding("fake", (1.0, 0.0)))
+    runner = _new_analogy_runner(
+        config, generator, SimpleNamespace(proof_structure_for=lambda state: ProofStructure(1, '"atom"', ())),
+        ObservingPolicy(2, 4, 0.5, -2.0),
+    )
+    state = SymbolicState("s", "⊢ P", "lean4")
+    context = ProofRescueContext(state, state, (), ())
+    views = runner.proof_view_builder(context)
+    runner.action_sampler(views, 0)
+    runner.iteration_sink("r", SimpleNamespace(model_calls=2, lean_calls=3))
+    views = runner.proof_view_builder(context)
+    runner.action_sampler(views, 1)
+    runner.action_sampler(views, 0)
+    assert [item.scalar_features for item in observations] == [
+        (0.0, 1.0, 5 / 6, 0.0), (0.5, 0.75, 2 / 6, 1.0), (0.0, 1.0, 5 / 6, 0.0),
+    ]
+    assert all(item.transition_embedding.values == (0.0, 0.0) for item in observations)
+    assert all(item.analogy_embedding.values == (0.0, 0.0) for item in observations)
 
 
 def test_matched_conditions_share_budgets_and_seed_family(tmp_path: Path) -> None:

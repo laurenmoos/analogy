@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import pytest
 import torch
 
@@ -73,6 +74,41 @@ def test_policy_sample_is_seeded_bounded_and_differentiable() -> None:
     assert first.delta.dtype is torch.float32
 
 
+def test_policy_consumes_four_channels_and_configured_scalars():
+    policy = DirectRescuePolicy(2, 4, 0.5, -2.0, scalar_feature_count=4)
+    observed = replace(
+        representation(), transition_embedding=Embedding("model", (2.0, 3.0)),
+        analogy_embedding=Embedding("model", (4.0, 5.0)),
+        scalar_features=(0.5, 0.75, 0.25, 1.0),
+    )
+    inputs = []
+    handle = policy.body[0].register_forward_pre_hook(lambda module, args: inputs.append(args[0]))
+    action = policy.sample(observed, torch.Generator().manual_seed(3))
+    handle.remove()
+    assert policy.body[0].in_features == 12
+    assert inputs[0].tolist() == [1.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.5, 0.75, 0.25, 1.0]
+    assert action.delta.shape == (2,)
+
+
+def test_policy_rejects_wrong_scalar_count():
+    policy = DirectRescuePolicy(2, 4, 0.5, -2.0, scalar_feature_count=3)
+    with pytest.raises(ValueError, match="scalar"):
+        policy.sample(representation(), torch.Generator().manual_seed(3))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True])
+def test_representation_rejects_nonfinite_or_boolean_scalars(value):
+    with pytest.raises(ValueError, match="scalar"):
+        replace(representation(), scalar_features=(value, 1.0, 1.0, 0.0))
+
+
+def test_legacy_representation_has_concrete_neutral_channels():
+    observed = representation()
+    assert observed.transition_embedding.values == (0.0, 0.0)
+    assert observed.analogy_embedding.values == (0.0, 0.0)
+    assert observed.scalar_features == (0.0, 1.0, 1.0, 0.0)
+
+
 def test_initial_policy_does_not_saturate_high_dimensional_actions() -> None:
     dimension = 4096
     policy = DirectRescuePolicy(dimension, 8, 2.0, -2.0)
@@ -117,6 +153,8 @@ def test_action_radius_matches_delta_norm_and_retains_gradient() -> None:
         {"max_delta_norm": 0.0},
         {"max_delta_norm": float("inf")},
         {"initial_log_scale": float("nan")},
+        {"scalar_feature_count": -1},
+        {"scalar_feature_count": True},
     ],
 )
 def test_policy_rejects_invalid_construction(kwargs) -> None:

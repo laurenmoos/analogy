@@ -274,6 +274,29 @@ class ProofReasoningTransfer:
         _tactic_free((*self.premises, *self.reasoning_steps, self.predicted_next_subgoal))
 
 
+@dataclass(frozen=True, slots=True)
+class AnalogyObservation:
+    """Readable trajectory snapshot available before one policy action."""
+
+    fixed_target: str
+    current_state: str
+    previous_state: str | None
+    last_tactic: str | None
+    accepted_tactics: tuple[str, ...]
+    rejected_tactics: tuple[tuple[str, tuple[str, ...]], ...]
+    latest_source: SourceAnalogy | None
+    latest_alignment: AnalogyAlignment | None
+    latest_transfer: ProofReasoningTransfer | None
+    predicted_transition: str | None
+    actual_transition: str | None
+    surprise: float | None
+    surprise_delta: float | None
+    repeated_state: bool
+    iteration_index: int
+    remaining_model_calls: int
+    remaining_lean_calls: int
+
+
 def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result = {}
     for key, value in pairs:
@@ -482,6 +505,6 @@ def derive_proof_need(structure: ProofStructure, active_subgoal: str, *,
 __all__ = [
     "OperationClass", "Arity", "Permutation", "InformationFlow", "TransferOutputError",
     "TransformationRecord", "ProofNeed", "SourceAnalogy", "AnalogyAlignment",
-    "ProofReasoningTransfer", "derive_proof_need", "parse_transformation_record",
+    "ProofReasoningTransfer", "AnalogyObservation", "derive_proof_need", "parse_transformation_record",
     "parse_source_analogy", "parse_alignment", "parse_proof_reasoning_transfer",
 ]

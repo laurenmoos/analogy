@@ -54,7 +54,7 @@ class PolicyAction:
 
 
 class DirectRescuePolicy(torch.nn.Module):
-    schema_version = 2
+    schema_version = 3
 
     def __init__(
         self,
@@ -62,8 +62,13 @@ class DirectRescuePolicy(torch.nn.Module):
         hidden_width: int,
         max_delta_norm: float,
         initial_log_scale: float,
+        *,
+        scalar_feature_count: int = 4,
     ) -> None:
         super().__init__()
+        if (isinstance(scalar_feature_count, bool)
+                or not isinstance(scalar_feature_count, int) or scalar_feature_count < 0):
+            raise ValueError("scalar_feature_count must be a non-negative integer")
         if (
             isinstance(embedding_dimension, bool)
             or not isinstance(embedding_dimension, int)
@@ -90,8 +95,9 @@ class DirectRescuePolicy(torch.nn.Module):
         ):
             raise ValueError("initial_log_scale must be finite")
         self.embedding_dimension = embedding_dimension
+        self.scalar_feature_count = scalar_feature_count
         self.body = torch.nn.Sequential(
-            torch.nn.Linear(embedding_dimension * 2, hidden_width),
+            torch.nn.Linear(embedding_dimension * 4 + scalar_feature_count, hidden_width),
             torch.nn.Tanh(),
         )
         self.mean = torch.nn.Linear(hidden_width, embedding_dimension)
@@ -114,6 +120,11 @@ class DirectRescuePolicy(torch.nn.Module):
             raise ValueError("representation must be a ProofRepresentation")
         if representation.dimension != self.embedding_dimension:
             raise ValueError("proof representation dimension does not match policy")
+        if len(representation.scalar_features) != self.scalar_feature_count:
+            raise ValueError("proof representation scalar feature count does not match policy")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) for value in representation.scalar_features):
+            raise ValueError("proof representation scalar features must be finite numbers")
         if not isinstance(generator, torch.Generator):
             raise ValueError("generator must be a torch.Generator")
         parameter = next(self.parameters())
@@ -121,7 +132,10 @@ class DirectRescuePolicy(torch.nn.Module):
             raise ValueError("generator device must match policy device")
         inputs = torch.tensor(
             representation.language_embedding.values
-            + representation.structure_embedding.values,
+            + representation.structure_embedding.values
+            + representation.transition_embedding.values
+            + representation.analogy_embedding.values
+            + representation.scalar_features,
             dtype=parameter.dtype,
             device=parameter.device,
         )

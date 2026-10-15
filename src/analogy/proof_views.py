@@ -6,11 +6,14 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any
 
 from .records import Embedding
-from .rescue import ProofRescueContext
+from .rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
+
+if TYPE_CHECKING:
+    from .analogy_transfer import AnalogyAlignment, ProofReasoningTransfer, SourceAnalogy
 
 
 class ProofViewError(ValueError):
@@ -107,6 +110,64 @@ def render_transition(before: str, after: str) -> str:
     )
 
 
+def render_observed_transition(previous: str, tactic: str | None, current: str) -> str:
+    return (
+        f"Before proof state:\n{_normalize_proof_state_text(previous)}\n"
+        f"Verified tactic:\n{tactic if tactic is not None else '(none)'}\n"
+        f"After proof state:\n{_normalize_proof_state_text(current)}"
+    )
+
+
+def render_transfer_observation(
+    source: SourceAnalogy | None,
+    alignment: AnalogyAlignment | None,
+    transfer: ProofReasoningTransfer | None,
+) -> str:
+    return json.dumps(
+        {"source": asdict(source) if source is not None else None,
+         "alignment": asdict(alignment) if alignment is not None else None,
+         "transfer": asdict(transfer) if transfer is not None else None},
+        ensure_ascii=False, sort_keys=True, indent=2,
+    )
+
+
+def build_policy_representation(
+    context: ProofRescueContext,
+    structure: ProofStructure,
+    encoder: Any,
+    layer: int,
+    *,
+    previous_state: str | None = None,
+    last_tactic: str | None = None,
+    verified_transition: str | None = None,
+    latest_source: SourceAnalogy | None = None,
+    latest_alignment: AnalogyAlignment | None = None,
+    latest_transfer: ProofReasoningTransfer | None = None,
+    scalar_features: tuple[float, ...] = (0.0, 1.0, 1.0, 0.0),
+) -> ProofRepresentation:
+    """Embed fixed target, current state, and optional verified trajectory."""
+    target_text = f"Fixed theorem target:\n{context.goal.expression}"
+    current_text = f"{render_language_view(context)}\nStructure:\n{render_structure_view(structure)}"
+    language = _embedded(target_text, encoder.embed_text(target_text, layer=layer))
+    structural = _embedded(current_text, encoder.embed_text(current_text, layer=layer))
+    transition_text = verified_transition
+    if transition_text is None and previous_state is not None:
+        transition_text = render_observed_transition(previous_state, last_tactic, context.state.expression)
+    transition = (
+        encoder.embed_text(transition_text, layer=layer) if transition_text is not None
+        else zero_embedding_like(language.embedding, rendering="(none)")
+    )
+    analogy = (
+        encoder.embed_text(render_transfer_observation(latest_source, latest_alignment, latest_transfer), layer=layer)
+        if any(item is not None for item in (latest_source, latest_alignment, latest_transfer))
+        else zero_embedding_like(language.embedding, rendering="(none)")
+    )
+    return ProofRepresentation(
+        context, language.provenance.text_hash, structural.provenance.text_hash,
+        language.embedding, structural.embedding, transition, analogy, scalar_features,
+    )
+
+
 def compare_transitions(
     before: str, predicted: str, actual: str, encoder: Any, layer: int
 ) -> TransitionComparison:
@@ -175,4 +236,6 @@ __all__ = [
     "ProofViews", "TransitionComparison", "build_proof_views",
     "compare_transitions", "render_language_view", "render_structure_view",
     "render_transition",
+    "render_observed_transition", "render_transfer_observation",
+    "build_policy_representation", "zero_embedding_like",
 ]

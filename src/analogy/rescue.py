@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Protocol
 
@@ -126,6 +126,14 @@ class ProofRescueContext:
         )
 
 
+def zero_embedding_like(embedding: Embedding, *, rendering: str = "(none)") -> Embedding:
+    """Keep encoder provenance while marking a channel as absent."""
+    return replace(
+        embedding, values=(0.0,) * embedding.dimension,
+        text_hash=hashlib.sha256(rendering.encode("utf-8")).hexdigest(),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProofRepresentation:
     context: ProofRescueContext
@@ -133,6 +141,9 @@ class ProofRepresentation:
     structure_prompt_hash: str
     language_embedding: Embedding
     structure_embedding: Embedding
+    transition_embedding: Embedding | None = None
+    analogy_embedding: Embedding | None = None
+    scalar_features: tuple[float, ...] = (0.0, 1.0, 1.0, 0.0)
 
     def __post_init__(self) -> None:
         if not isinstance(self.context, ProofRescueContext):
@@ -147,6 +158,20 @@ class ProofRepresentation:
             raise ValueError("structure_embedding must be an Embedding")
         if self.language_embedding.dimension != self.structure_embedding.dimension:
             raise ValueError("proof-view embedding dimensions must match")
+        # Existing frozen encoders may omit these constructor arguments, but
+        # every constructed observation has four concrete embedding channels.
+        for name in ("transition_embedding", "analogy_embedding"):
+            embedding = getattr(self, name)
+            if embedding is None:
+                embedding = zero_embedding_like(self.language_embedding)
+                object.__setattr__(self, name, embedding)
+            if not isinstance(embedding, Embedding):
+                raise ValueError(f"{name} must be an Embedding")
+            if embedding.dimension != self.dimension:
+                raise ValueError("proof-view embedding dimensions must match")
+        object.__setattr__(self, "scalar_features", tuple(
+            _finite_float(value, "scalar_features") for value in self.scalar_features
+        ))
 
     @property
     def dimension(self) -> int:
@@ -558,6 +583,11 @@ class DirectRescueRunner:
             failed_tactics=tuple(item.candidate.source for item in ordinary_attempts),
         )
         representation = self._encoder.encode(context)
+        representation = replace(
+            representation,
+            transition_embedding=zero_embedding_like(representation.language_embedding),
+            analogy_embedding=zero_embedding_like(representation.language_embedding),
+        )
         prompt = render_direct_rescue_prompt(context)
         messages = (
             Message(
@@ -586,7 +616,16 @@ class DirectRescueRunner:
             generation_seed = derive_rescue_seed(
                 self._base_seed, state.id, index, "generation"
             )
-            action = self._sample_action(representation, action_seed)
+            observation = replace(
+                representation,
+                scalar_features=(
+                    index / max(self._rollouts_per_state - 1, 1),
+                    (self._max_model_calls - model_calls) / self._max_model_calls,
+                    (self._max_rescue_verifier_calls - verifier_calls) / self._max_rescue_verifier_calls,
+                    float(index > 0),
+                ),
+            )
+            action = self._sample_action(observation, action_seed)
             action_record = PolicyActionRecord(
                 seed=action_seed,
                 delta_norm=float(

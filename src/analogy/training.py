@@ -340,7 +340,10 @@ def load_training_checkpoint(
         raise ValueError("checkpoint problem split does not match")
     expected_schema = int(getattr(policy, "schema_version", 1))
     if payload.get("policy_schema_version") != expected_schema:
-        raise ValueError("checkpoint policy schema does not match")
+        raise ValueError(
+            f"checkpoint policy schema {payload.get('policy_schema_version')} is incompatible "
+            f"with expected schema {expected_schema}"
+        )
     policy.load_state_dict(payload["policy"])
     optimizer.load_state_dict(payload["optimizer"])
     saved_baseline = payload.get("reward_baseline")
@@ -614,7 +617,10 @@ def evaluate_direct_rescue(
     if payload.get("split") != asdict(problem_split):
         raise ValueError("checkpoint split does not match evaluation split")
     if payload.get("policy_schema_version") != learned.schema_version:
-        raise ValueError("checkpoint policy schema does not match evaluation policy")
+        raise ValueError(
+            f"checkpoint policy schema {payload.get('policy_schema_version')} is incompatible "
+            f"with expected evaluation policy schema {learned.schema_version}"
+        )
     learned.load_state_dict(payload["policy"])
     writer = RescueRunWriter.create(
         config.run.output_dir / "rescue",
@@ -989,6 +995,11 @@ def _new_analogy_runner(
 ) -> AnalogyLoopRunner:
     """Compose the readable loop from the same frozen model and policy head."""
     representations: dict[int, ProofRepresentation] = {}
+    model_calls = 0
+    lean_calls = 0
+    seen_states: set[str] = set()
+    max_lean_calls = min(config.analogy.max_lean_calls, config.rl.max_rescue_verifier_calls)
+    proof_view_lean_cost = 1
 
     def build_views(context):
         views = build_proof_views(
@@ -997,6 +1008,7 @@ def _new_analogy_runner(
             generator,
             config.model.hidden_layer,
         )
+        representations.clear()
         representations[id(views)] = ProofRepresentation(
             context,
             views.language.provenance.text_hash,
@@ -1007,11 +1019,36 @@ def _new_analogy_runner(
         return views
 
     def sample_action(views, iteration_index):
+        nonlocal model_calls, lean_calls
+        if iteration_index == 0:
+            model_calls = lean_calls = 0
+            seen_states.clear()
+        representation = representations[id(views)]
+        fingerprint = proof_state_fingerprint(representation.context.state.expression)
+        observation = replace(
+            representation,
+            scalar_features=(
+                iteration_index / max(config.analogy.max_iterations - 1, 1),
+                (config.analogy.max_model_calls - model_calls) / config.analogy.max_model_calls,
+                (max_lean_calls - lean_calls - proof_view_lean_cost) / max_lean_calls,
+                float(fingerprint in seen_states),
+            ),
+        )
+        seen_states.add(fingerprint)
         parameter = next(policy.parameters())
         torch_generator = torch.Generator(device=parameter.device).manual_seed(
             config.run.seed + iteration_index
         )
-        return policy.sample(representations[id(views)], torch_generator)
+        return policy.sample(observation, torch_generator)
+
+    def record_iteration(rollout_id, iteration):
+        nonlocal model_calls, lean_calls
+        # Iteration totals include repairs and finishing calls. The next
+        # observation also accounts for its freshly verified proof structure.
+        model_calls = iteration.model_calls
+        lean_calls = iteration.lean_calls
+        if iteration_sink is not None:
+            iteration_sink(rollout_id, iteration)
 
     if analogy_hops is None:
         analogy_generator = AnalogyGenerator(
@@ -1077,14 +1114,11 @@ def _new_analogy_runner(
         controller=controller,
         tactics_per_iteration=config.analogy.tactics_per_iteration,
         max_model_calls=config.analogy.max_model_calls,
-        max_lean_calls=min(
-            config.analogy.max_lean_calls,
-            config.rl.max_rescue_verifier_calls,
-        ),
-        proof_view_lean_cost=1,
+        max_lean_calls=max_lean_calls,
+        proof_view_lean_cost=proof_view_lean_cost,
         tactic_reranker=(rerank_tactics if config.analogy.rerank_tactics else None),
         tactic_repairer=tactic_generator,
-        iteration_sink=iteration_sink,
+        iteration_sink=record_iteration,
     )
 
 

@@ -338,6 +338,17 @@ def test_transfer_assumption_prose_exception_does_not_allow_tactic_commands(text
                                        alignment=alignment(), transfer_id="transfer-1")
 
 
+@pytest.mark.parametrize("field", ["premises", "reasoning_steps", "predicted_next_subgoal"])
+@pytest.mark.parametrize("text", ["Use the assumption tactic.", "Use the assumption command.",
+                                  "Use the ASSUMPTION tactics."])
+def test_transfer_assumption_noun_exception_rejects_explicit_tactic_references(field, text):
+    payload = valid_transfer_payload()
+    payload[field] = [text] if isinstance(payload[field], list) else text
+    with pytest.raises(TransferOutputError, match="tactic-free"):
+        parse_proof_reasoning_transfer(json.dumps(payload), need=proof_need(),
+                                       alignment=alignment(), transfer_id="transfer-1")
+
+
 @pytest.mark.parametrize("tactic", ["sorry", "admit"])
 @pytest.mark.parametrize("field", ["premises", "reasoning_steps", "predicted_next_subgoal"])
 def test_proof_reasoning_rejects_proof_admission_tactics(field, tactic):

@@ -139,8 +139,10 @@ def _proof_reasoning_guard(texts: tuple[str, ...]) -> None:
             raise TransferOutputError("proof reasoning must be tactic-free")
         # Do not match across newlines: a later standalone `assumption` is a
         # command even when the preceding line happens to end in a determiner.
+        # Explicit tactic/command references are not grammatical premise nouns.
         prose = re.sub(
-            r"\b(?:our|the|an|this|that|introduced|temporary|local)[ \t]+assumption\b",
+            r"\b(?:our|the|an|this|that|introduced|temporary|local)[ \t]+assumption\b"
+            r"(?![ \t]+(?:tactic|command)s?\b)",
             "the premise", text, flags=re.IGNORECASE,
         )
         _tactic_free((prose,))

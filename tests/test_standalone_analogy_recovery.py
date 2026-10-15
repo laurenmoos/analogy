@@ -753,19 +753,139 @@ def test_matched_random_retrieve_is_deterministic_and_shortlist_bounded() -> Non
     assert module.matched_random_retrieve((), count=2, seed=9) == ()
 
 
-def test_cosine_and_random_retrieval_use_same_eligible_index() -> None:
+class HybridSpyModel:
+    model_revision = "hybrid-spy"
+
+    def __init__(self, module, *, pair_margins=None, tactic_means=None):
+        self.module = module
+        self.pair_margins = pair_margins or {}
+        self.tactic_means = tactic_means or {}
+        self.calls = []
+
+    def score_completions(self, messages, completions, *, max_batch_tokens=None):
+        rendered = "\n".join(message.content for message in messages)
+        self.calls.append((rendered, tuple(completions)))
+        if tuple(completions) == ("relevant", "irrelevant"):
+            identifier = next(
+                key for key in self.pair_margins if f'"id":"{key}"' in rendered
+            )
+            margin = self.pair_margins[identifier]
+            values = {"relevant": margin, "irrelevant": 0.0}
+        else:
+            values = {text: self.tactic_means.get(text, -1.0) for text in completions}
+        return tuple(
+            self.module.CompletionScore(text, values[text], values[text], 1)
+            for text in completions
+        )
+
+
+def structural_index(module):
+    return tuple(
+        indexed_transformation(module, identifier=identifier)
+        for identifier in ("a", "b", "c")
+    )
+
+
+def test_conditions_share_signature_pool_budget_and_shortlist() -> None:
+    module = load_script()
+    model = HybridSpyModel(
+        module,
+        pair_margins={"a": 0.3, "b": 0.2, "c": 0.1},
+        tactic_means={"split": -2.0, "cases h": -1.0, "exact h.right": -0.1, "assumption": -3.0},
+    )
+    ranker = module.HybridConditionRanker(
+        model=model,
+        index=structural_index(module),
+        retrieval_count=2,
+        structural_shortlist_size=4,
+        pair_margin_threshold=0.0,
+    )
+    signature = selecting_signature(module)
+    candidates = ("split", "cases h", "exact h.right", "assumption")
+    problem = module.Problem("p", "(P Q : Prop) (h : P ∧ Q)", "Q")
+
+    random_decision = ranker.rank(
+        module.Condition.RANDOM, problem, "state", signature, (), (), candidates, 7
+    )
+    analogy_decision = ranker.rank(
+        module.Condition.ANALOGY, problem, "state", signature, (), (), candidates, 7
+    )
+    none_decision = ranker.rank(
+        module.Condition.NONE, problem, "state", signature, (), (), candidates, 7
+    )
+
+    assert random_decision.structural_shortlist_ids == analogy_decision.structural_shortlist_ids
+    assert none_decision.structural_shortlist_ids == analogy_decision.structural_shortlist_ids
+    assert random_decision.candidates == analogy_decision.candidates == none_decision.candidates == candidates
+    assert random_decision.proof_rendering == analogy_decision.proof_rendering == none_decision.proof_rendering
+    assert analogy_decision.ordered_candidates[0] == "exact h.right"
+
+
+def test_hybrid_ranker_applies_margin_threshold_and_preserves_ties() -> None:
+    module = load_script()
+    model = HybridSpyModel(
+        module,
+        pair_margins={"a": -0.1, "b": 0.5, "c": -0.2},
+        tactic_means={"first": -0.4, "second": -0.4, "third": -0.8},
+    )
+    ranker = module.HybridConditionRanker(
+        model=model,
+        index=structural_index(module),
+        retrieval_count=2,
+        structural_shortlist_size=3,
+        pair_margin_threshold=0.0,
+    )
+
+    decision = ranker.rank(
+        module.Condition.ANALOGY,
+        module.Problem("p", "(P Q : Prop) (h : P ∧ Q)", "Q"),
+        "state",
+        selecting_signature(module),
+        (),
+        (),
+        ("first", "second", "third"),
+        3,
+    )
+
+    assert [hit.item.transition.id for hit in decision.hits] == ["b"]
+    assert decision.indices == (0, 1, 2)
+    assert decision.fallback_reason is None
+
+
+def test_hybrid_ranker_reports_below_margin_fallback() -> None:
+    module = load_script()
+    model = HybridSpyModel(
+        module,
+        pair_margins={"a": -0.1, "b": -0.2, "c": -0.3},
+        tactic_means={"first": -0.1},
+    )
+    decision = module.HybridConditionRanker(
+        model=model,
+        index=structural_index(module),
+        retrieval_count=2,
+        structural_shortlist_size=3,
+        pair_margin_threshold=0.0,
+    ).rank(
+        module.Condition.ANALOGY,
+        module.Problem("p", "(P Q : Prop) (h : P ∧ Q)", "Q"),
+        "state",
+        selecting_signature(module),
+        (),
+        (),
+        ("first",),
+        3,
+    )
+
+    assert decision.hits == ()
+    assert decision.fallback_reason == "below_pair_margin_threshold"
+
+
+def test_diagnostic_embeddings_do_not_change_structural_shortlist() -> None:
     module = load_script()
     index = indexed_fixture(module)
+    shortlist = module.structural_shortlist(selecting_signature(module), index, limit=3)
 
-    nearest = module.cosine_retrieve((1.0, 0.0), index, count=2)
-    random_hits = module.random_retrieve(index, count=2, seed=11)
-
-    assert [hit.item.transition.id for hit in nearest] == ["x", "y"]
-    assert len(random_hits) == len(nearest) == 2
-    assert {hit.item.transition.id for hit in random_hits} <= {
-        item.transition.id for item in index
-    }
-    assert all(hit.similarity is None for hit in random_hits)
+    assert [item.item.transition.id for item in shortlist] == ["x", "y", "z"]
 
 
 def test_cache_key_changes_with_prompt_model_layer_or_source() -> None:
@@ -893,6 +1013,7 @@ class SpyModel:
     def __init__(self) -> None:
         self.generation_calls = []
         self.embedding_calls = []
+        self.scoring_calls = []
 
     def generate(self, messages, *, seed: int):
         self.generation_calls.append((messages, seed))
@@ -918,6 +1039,19 @@ class SpyModel:
         self.embedding_calls.append((text, layer))
         module = load_script()
         return module.Embedding((1.0, 0.0), layer, 0, self.model_revision, module.sha256_text(text))
+
+    def score_completions(self, messages, completions, *, max_batch_tokens=None):
+        module = getattr(self, "module", sys.modules["standalone_analogy_recovery"])
+        self.scoring_calls.append((messages, tuple(completions)))
+        values = (
+            {"relevant": 0.0, "irrelevant": -1.0}
+            if tuple(completions) == ("relevant", "irrelevant")
+            else {text: -float(index) for index, text in enumerate(completions)}
+        )
+        return tuple(
+            module.CompletionScore(text, values[text], values[text], 1)
+            for text in completions
+        )
 
 
 class PolicySpyModel(SpyModel):
@@ -952,6 +1086,7 @@ def test_no_retrieval_never_calls_embedding_or_retriever() -> None:
         model,
         2,
         0,
+        proof_signature=selecting_signature(module),
     )
 
     assert decision.indices == (0,)
@@ -1004,7 +1139,6 @@ def test_generation_operations_receive_difficulty_and_json_contract(tmp_path: Pa
     assert model.generation_options == [
         {"operation": "candidate", "difficulty": 5, "expected_json": "array"},
         {"operation": "transformation", "difficulty": 1, "expected_json": "object"},
-        {"operation": "ranking", "difficulty": 5, "expected_json": "array"},
     ]
 
 
@@ -1052,9 +1186,22 @@ class FixedPoolStore:
 
 
 class IdentityRanker:
-    def rank(self, condition, problem, state, accepted, failed, candidates, seed, deadline=None):
-        module = load_script()
-        return module.RankingDecision(candidates, tuple(range(len(candidates))))
+    def rank(self, condition, problem, state, signature, accepted, failed, candidates, seed, deadline=None):
+        module = sys.modules["standalone_analogy_recovery"]
+        scores = tuple(
+            module.CompletionScore(candidate, 0.0, 0.0, 1) for candidate in candidates
+        )
+        return module.RankingDecision(
+            candidates,
+            tuple(range(len(candidates))),
+            signature,
+            module.render_proof_signature(signature),
+            (),
+            (),
+            scores,
+            (),
+            None,
+        )
 
 
 def test_search_counts_only_completion_as_solved() -> None:
@@ -1278,6 +1425,14 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
     )
     assert transition_row["record"]["operation"] == "select"
     assert transition_row["diagnostic_embedding"] is None
+    attempt_rows = [
+        json.loads(line)
+        for line in (output / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert all(row["signature_version"] == "proof-signature-v1" for row in attempt_rows)
+    assert all(len(row["signature_fingerprint"]) == 64 for row in attempt_rows)
+    assert all(row["proof_rendering_hash"] for row in attempt_rows)
+    assert all(row["tactic_scores"] for row in attempt_rows)
     trial_rows = [json.loads(line) for line in (output / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
     sentinel = next(row for row in trial_rows if row["problem_id"] == "sentinel" and row["condition"] == "none")
     ordinary = next(row for row in trial_rows if row["problem_id"] == "ordinary" and row["condition"] == "none")
@@ -1289,6 +1444,7 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
         for message in messages
     )
     assert "DO_NOT_LEAK" not in captured_prompts
+    assert "ranking-v1" not in captured_prompts
     assert "DO_NOT_LEAK" not in (output / "attempts.jsonl").read_text(encoding="utf-8")
     assert "DO_NOT_LEAK" not in (output / "transitions.jsonl").read_text(encoding="utf-8")
 
@@ -1623,11 +1779,11 @@ def test_retrieval_query_uses_deterministic_signature_not_generated_need(tmp_pat
     )
 
     rendered = "\n".join(
-        message.content for messages, _ in model.generation_calls for message in messages
+        message.content for messages, _ in model.scoring_calls for message in messages
     )
     assert "The target is atomic" in rendered
     assert "proof-need-v1" not in rendered
-    assert decision.proof_need is None
+    assert decision.signature.failed_operation_classes == (module.OperationClass.REUSE,)
 
 
 def test_manifest_records_inputs_model_lean_environment_and_problem_statements(tmp_path: Path) -> None:

@@ -721,6 +721,37 @@ def ranking_prompt(
     )
 
 
+def tactic_scoring_prompt(
+    problem: Problem,
+    state: str,
+    signature: ProofSignature,
+    hits: tuple["RetrievalHit", ...],
+) -> tuple[Message, ...]:
+    payload = masked_problem_payload(problem)
+    transformations = [
+        {
+            "id": hit.item.transition.id,
+            "domain": hit.item.transition.domain,
+            "record": _jsonable(hit.item.record),
+        }
+        for hit in hits
+    ]
+    return (
+        Message(
+            "system",
+            "Score the supplied completion as the next Lean 4 tactic. The proof state "
+            "and any retrieved cross-domain transformations are fixed context.",
+        ),
+        Message(
+            "user",
+            f"Overall target: {payload['target']}\nCurrent goals:\n{state}\n"
+            f"Proof structure: {render_proof_signature(signature)}\n"
+            f"Retrieved transformations: {json.dumps(transformations, sort_keys=True, separators=(',', ':'))}\n"
+            "Next tactic:",
+        ),
+    )
+
+
 def _parse_bare_candidate_array(text: str) -> list[str] | None:
     """Recover Qwen's unquoted ``[tactic, tactic]`` serialization safely.
 
@@ -1443,6 +1474,7 @@ def relevance_pair_prompt(
         ),
         Message(
             "user",
+            f"Transition provenance: {json.dumps({'id': item.transition.id, 'domain': item.transition.domain}, sort_keys=True, separators=(',', ':'))}\n"
             f"Proof structure: {render_proof_signature(signature)}\n"
             f"Proof signature: {json.dumps(_jsonable(signature), sort_keys=True, separators=(',', ':'))}\n"
             f"Transformation schema: {json.dumps(_jsonable(item.record), sort_keys=True, separators=(',', ':'))}\n"
@@ -1500,32 +1532,32 @@ def score_relevance_pairs(
 @dataclass(frozen=True, slots=True)
 class RetrievalHit:
     item: IndexedTransformation
-    similarity: float | None
+    structural: CompatibilityBreakdown
+    pair_score: PairScore | None
+    selection: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.item, IndexedTransformation):
             raise ExperimentError("retrieval hit requires an IndexedTransformation")
-        if self.similarity is not None and not math.isfinite(float(self.similarity)):
-            raise ExperimentError("retrieval similarity must be finite or None")
-
-
-@dataclass(frozen=True, slots=True)
-class ProofNeed:
-    description: str
-    embedding: Embedding
-
-    def __post_init__(self) -> None:
-        _nonblank(self.description, "proof_need.description")
-        if not isinstance(self.embedding, Embedding):
-            raise ExperimentError("proof need requires an Embedding")
+        if not isinstance(self.structural, CompatibilityBreakdown):
+            raise ExperimentError("retrieval hit requires structural compatibility")
+        if self.pair_score is not None and not isinstance(self.pair_score, PairScore):
+            raise ExperimentError("retrieval hit pair score is invalid")
+        if self.selection not in {"matched_random", "analogy"}:
+            raise ExperimentError("retrieval hit selection is invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class RankingDecision:
     candidates: tuple[str, ...]
     indices: tuple[int, ...]
-    hits: tuple[RetrievalHit, ...] = ()
-    proof_need: ProofNeed | None = None
+    signature: ProofSignature
+    proof_rendering: str
+    structural_shortlist_ids: tuple[str, ...]
+    hits: tuple[RetrievalHit, ...]
+    tactic_scores: tuple[CompletionScore, ...]
+    pair_scores: tuple[PairScore, ...]
+    fallback_reason: str | None
 
     def __post_init__(self) -> None:
         candidates = tuple(self.candidates)
@@ -1535,6 +1567,15 @@ class RankingDecision:
             raise ExperimentError("ranking decision must be a permutation of candidates")
         if not all(isinstance(item, RetrievalHit) for item in hits):
             raise ExperimentError("ranking hits must contain RetrievalHit values")
+        if not isinstance(self.signature, ProofSignature):
+            raise ExperimentError("ranking decision requires a proof signature")
+        _nonblank(self.proof_rendering, "ranking_decision.proof_rendering")
+        if len(self.tactic_scores) != len(candidates):
+            raise ExperimentError("ranking decision requires one tactic score per candidate")
+        if tuple(score.text for score in self.tactic_scores) != candidates:
+            raise ExperimentError("ranking tactic scores must preserve candidate order")
+        if not all(isinstance(item, PairScore) for item in self.pair_scores):
+            raise ExperimentError("ranking pair scores are invalid")
         object.__setattr__(self, "candidates", candidates)
         object.__setattr__(self, "indices", indices)
         object.__setattr__(self, "hits", hits)
@@ -1764,15 +1805,6 @@ def build_index(
     return index
 
 
-def _validated_retrieval(index: tuple[IndexedTransformation, ...], count: int) -> None:
-    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
-        raise ExperimentError("retrieval count must be a positive integer")
-    if not index:
-        raise ExperimentError("retrieval index is empty")
-    if count > len(index):
-        raise ExperimentError("retrieval count exceeds the eligible index")
-
-
 # Structural retrieval
 
 
@@ -1964,40 +1996,6 @@ def matched_random_retrieve(
     return tuple(sorted(selected, key=lambda candidate: candidate.item.transition.id))
 
 
-def cosine_retrieve(
-    query: Embedding | tuple[float, ...],
-    index: tuple[IndexedTransformation, ...],
-    count: int,
-) -> tuple[RetrievalHit, ...]:
-    _validated_retrieval(index, count)
-    values = query.values if isinstance(query, Embedding) else tuple(float(item) for item in query)
-    if not values or not all(math.isfinite(item) for item in values):
-        raise ExperimentError("query vector must be nonempty and finite")
-    norm = math.sqrt(sum(item * item for item in values))
-    if norm == 0.0:
-        raise ExperimentError("query vector must not be zero")
-    scored: list[RetrievalHit] = []
-    for item in index:
-        other = item.embedding.values
-        if len(other) != len(values):
-            raise ExperimentError("retrieval embedding dimensions do not match")
-        other_norm = math.sqrt(sum(value * value for value in other))
-        similarity = sum(left * right for left, right in zip(values, other)) / (norm * other_norm)
-        scored.append(RetrievalHit(item, similarity))
-    scored.sort(key=lambda hit: (-float(hit.similarity), hit.item.transition.id))
-    return tuple(scored[:count])
-
-
-def random_retrieve(
-    index: tuple[IndexedTransformation, ...],
-    count: int,
-    seed: int,
-) -> tuple[RetrievalHit, ...]:
-    _validated_retrieval(index, count)
-    selected = random.Random(seed).sample(list(index), count)
-    return tuple(RetrievalHit(item, None) for item in selected)
-
-
 def _generate_before_deadline(
     model: TextModel,
     messages: tuple[Message, ...],
@@ -2025,12 +2023,150 @@ def _generate_before_deadline(
     return result
 
 
+class HybridConditionRanker:
+    def __init__(
+        self,
+        *,
+        model: TextModel,
+        index: tuple[IndexedTransformation, ...],
+        retrieval_count: int,
+        structural_shortlist_size: int,
+        pair_margin_threshold: float,
+        max_batch_tokens: int | None = None,
+    ) -> None:
+        if retrieval_count <= 0 or structural_shortlist_size <= 0:
+            raise ExperimentError("retrieval and shortlist sizes must be positive")
+        if not math.isfinite(pair_margin_threshold):
+            raise ExperimentError("pair margin threshold must be finite")
+        self.model = model
+        self.index = tuple(index)
+        self.retrieval_count = retrieval_count
+        self.structural_shortlist_size = structural_shortlist_size
+        self.pair_margin_threshold = float(pair_margin_threshold)
+        self.max_batch_tokens = max_batch_tokens
+        self._shortlist_cache: dict[str, tuple[StructuralCandidate, ...]] = {}
+
+    def rank(
+        self,
+        condition: Condition,
+        problem: Problem,
+        state: str,
+        signature: ProofSignature,
+        accepted: tuple[str, ...],
+        failed: tuple[str, ...],
+        candidates: tuple[str, ...],
+        seed: int,
+        deadline: float | None = None,
+    ) -> RankingDecision:
+        if not isinstance(condition, Condition):
+            raise ExperimentError("condition must be a Condition")
+        candidates = tuple(candidates)
+        if not candidates:
+            raise ExperimentError("candidate pool must not be empty")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("theorem timeout")
+        failed_operations = {
+            operation
+            for tactic in failed
+            if (operation := classify_failed_tactic(tactic)) is not None
+        }
+        merged_signature = replace(
+            signature,
+            failed_operation_classes=_enum_tuple(OperationClass, failed_operations),
+        )
+        proof_rendering = render_proof_signature(merged_signature)
+        signature_key = proof_signature_fingerprint(merged_signature)
+        if signature_key not in self._shortlist_cache:
+            self._shortlist_cache[signature_key] = structural_shortlist(
+                merged_signature, self.index, self.structural_shortlist_size
+            )
+        shortlist = self._shortlist_cache[signature_key]
+        shortlist_ids = tuple(item.item.transition.id for item in shortlist)
+        pair_scores: tuple[PairScore, ...] = ()
+        hits: tuple[RetrievalHit, ...] = ()
+        fallback_reason: str | None = None
+
+        if condition is Condition.RANDOM:
+            selected = matched_random_retrieve(
+                shortlist,
+                self.retrieval_count,
+                derived_seed(seed, problem.id, sha256_text(state), "random-retrieval"),
+            )
+            hits = tuple(
+                RetrievalHit(item.item, item.breakdown, None, "matched_random")
+                for item in selected
+            )
+            if not shortlist:
+                fallback_reason = "empty_structural_shortlist"
+        elif condition is Condition.ANALOGY:
+            if shortlist:
+                pair_scores = score_relevance_pairs(
+                    self.model,
+                    tuple((merged_signature, candidate.item) for candidate in shortlist),
+                    max_batch_tokens=self.max_batch_tokens,
+                )
+                by_id = {score.transition_id: score for score in pair_scores}
+                eligible = [
+                    candidate
+                    for candidate in shortlist
+                    if by_id[candidate.item.transition.id].margin
+                    >= self.pair_margin_threshold
+                ]
+                eligible.sort(
+                    key=lambda candidate: (
+                        -by_id[candidate.item.transition.id].margin,
+                        candidate.item.transition.id,
+                    )
+                )
+                selected = eligible[: self.retrieval_count]
+                hits = tuple(
+                    RetrievalHit(
+                        candidate.item,
+                        candidate.breakdown,
+                        by_id[candidate.item.transition.id],
+                        "analogy",
+                    )
+                    for candidate in selected
+                )
+                if not selected:
+                    fallback_reason = "below_pair_margin_threshold"
+            else:
+                fallback_reason = "empty_structural_shortlist"
+
+        tactic_scores = self.model.score_completions(
+            tactic_scoring_prompt(problem, state, merged_signature, hits),
+            candidates,
+            max_batch_tokens=self.max_batch_tokens,
+        )
+        if tuple(score.text for score in tactic_scores) != candidates:
+            raise ModelOutputError("tactic scorer changed candidate identity or order")
+        indices = tuple(
+            sorted(
+                range(len(candidates)),
+                key=lambda index: (-tactic_scores[index].mean_log_likelihood, index),
+            )
+        )
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("theorem timeout")
+        return RankingDecision(
+            candidates,
+            indices,
+            merged_signature,
+            proof_rendering,
+            shortlist_ids,
+            hits,
+            tactic_scores,
+            pair_scores,
+            fallback_reason,
+        )
+
+
 def rank_for_condition(
     condition: Condition,
     problem: Problem,
     state: str,
     candidates: tuple[str, ...],
-    proof_need: ProofNeed | None,
+    proof_need: Any,
     index: tuple[IndexedTransformation, ...],
     model: TextModel,
     retrieval_count: int,
@@ -2042,47 +2178,26 @@ def rank_for_condition(
     deadline: float | None = None,
     proof_signature: ProofSignature | None = None,
 ) -> RankingDecision:
-    if not isinstance(condition, Condition):
-        raise ExperimentError("condition must be a Condition")
-    candidates = tuple(candidates)
-    if not candidates:
-        raise ExperimentError("candidate pool must not be empty")
-    hits: tuple[RetrievalHit, ...] = ()
-    if condition is not Condition.NONE:
-        if proof_signature is None:
-            raise ExperimentError("retrieval conditions require a deterministic proof signature")
-        shortlist = structural_shortlist(proof_signature, index, max(len(index), 1))
-        if not shortlist:
-            return RankingDecision(candidates, tuple(range(len(candidates))))
-        if condition is Condition.ANALOGY:
-            selected = shortlist[: min(retrieval_count, len(shortlist))]
-        else:
-            selected = matched_random_retrieve(
-                shortlist,
-                retrieval_count,
-                derived_seed(seed, problem.id, sha256_text(state), "random-retrieval"),
-            )
-        hits = tuple(
-            RetrievalHit(candidate.item, candidate.breakdown.total) for candidate in selected
-        )
-    transformations = tuple(hit.item.transformation for hit in hits)
-    generated = _generate_before_deadline(
-        model,
-        ranking_prompt(
-            problem,
-            state,
-            candidates,
-            transformations,
-            render_proof_signature(proof_signature) if proof_signature is not None else None,
-        ),
-        seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "ranking"),
-        deadline=deadline,
-        operation="ranking",
-        difficulty=problem.difficulty,
-        expected_json="array",
+    del proof_need, layer
+    if proof_signature is None:
+        raise ExperimentError("all conditions require a deterministic proof signature")
+    return HybridConditionRanker(
+        model=model,
+        index=index,
+        retrieval_count=retrieval_count,
+        structural_shortlist_size=max(len(index), 1),
+        pair_margin_threshold=0.0,
+    ).rank(
+        condition,
+        problem,
+        state,
+        proof_signature,
+        accepted,
+        failed,
+        candidates,
+        seed,
+        deadline,
     )
-    indices = parse_ranking(generated, len(candidates))
-    return RankingDecision(candidates, indices, hits, proof_need)
 
 
 class CandidatePoolStore:
@@ -2543,8 +2658,14 @@ class AttemptRecord:
     diagnostics: tuple[str, ...]
     retrieval_hits: tuple[str, ...] = ()
     retrieval_domains: tuple[str, ...] = ()
-    retrieval_similarities: tuple[float | None, ...] = ()
-    proof_need: Mapping[str, Any] | None = None
+    signature_fingerprint: str = ""
+    signature_version: str = ""
+    proof_rendering_hash: str = ""
+    structural_shortlist_ids: tuple[str, ...] = ()
+    retrieval_compatibility: tuple[Mapping[str, Any], ...] = ()
+    pair_scores: tuple[Mapping[str, Any], ...] = ()
+    tactic_scores: tuple[Mapping[str, Any], ...] = ()
+    fallback_reason: str | None = None
     operation_seeds: Mapping[str, int] = field(default_factory=dict)
 
 
@@ -2577,12 +2698,12 @@ class SearchRanker(Protocol):
         condition: Condition,
         problem: Problem,
         state: str,
+        signature: ProofSignature,
         accepted: tuple[str, ...],
         failed: tuple[str, ...],
         candidates: tuple[str, ...],
         seed: int,
         deadline: float | None = None,
-        proof_signature: ProofSignature | None = None,
     ) -> RankingDecision: ...
 
 
@@ -2606,26 +2727,27 @@ def _attempt_metadata(
     state: str,
     seed: int,
     condition: Condition,
-) -> tuple[Mapping[str, Any] | None, Mapping[str, int]]:
-    need = decision.proof_need
-    proof_need = None
-    if need is not None:
-        proof_need = {
-            "description": need.description,
-            "embedding": {
-                "text_hash": need.embedding.text_hash,
-                "model_revision": need.embedding.model_revision,
-                "layer": need.embedding.layer,
-                "token_index": need.embedding.token_index,
-                "dimension": need.embedding.dimension,
-            },
-        }
+) -> tuple[Mapping[str, Any], Mapping[str, int]]:
+    metadata = {
+        "signature_fingerprint": proof_signature_fingerprint(decision.signature),
+        "signature_version": decision.signature.version,
+        "proof_rendering_hash": sha256_text(decision.proof_rendering),
+        "structural_shortlist_ids": decision.structural_shortlist_ids,
+        "retrieval_compatibility": tuple(
+            {
+                "transition_id": hit.item.transition.id,
+                **_jsonable(hit.structural),
+            }
+            for hit in decision.hits
+        ),
+        "pair_scores": tuple(_jsonable(score) for score in decision.pair_scores),
+        "tactic_scores": tuple(_jsonable(score) for score in decision.tactic_scores),
+        "fallback_reason": decision.fallback_reason,
+    }
     state_hash = sha256_text(state)
-    return proof_need, {
+    return metadata, {
         "candidate": derived_seed(seed, problem.id, state_hash, "candidates"),
-        "proof_need": derived_seed(seed, problem.id, state_hash, "proof-need"),
         "random_retrieval": derived_seed(seed, problem.id, state_hash, "random-retrieval"),
-        "ranking": derived_seed(seed, problem.id, state_hash, condition.value, "ranking"),
     }
 
 
@@ -2693,15 +2815,6 @@ def search_problem(
         fingerprint = state_fingerprint(problem, state)
         expansions += 1
         failed = tuple(failed_by_state.get(fingerprint, ()))
-        failed_operations = {
-            operation
-            for tactic in failed
-            if (operation := classify_failed_tactic(tactic)) is not None
-        }
-        ranked_signature = replace(
-            signature,
-            failed_operation_classes=_enum_tuple(OperationClass, failed_operations),
-        )
         try:
             pool_started = time.monotonic()
             candidates = pool_store.get(
@@ -2713,12 +2826,16 @@ def search_problem(
                 top_k=limits.top_k,
             )
             deadline += time.monotonic() - pool_started
-            rank_parameters = inspect.signature(ranker.rank).parameters
-            rank_kwargs: dict[str, Any] = {"deadline": deadline}
-            if "proof_signature" in rank_parameters:
-                rank_kwargs["proof_signature"] = ranked_signature
             decision = ranker.rank(
-                condition, problem, state, prefix, failed, candidates, seed, **rank_kwargs
+                condition,
+                problem,
+                state,
+                signature,
+                prefix,
+                failed,
+                candidates,
+                seed,
+                deadline=deadline,
             )
         except TimeoutError as error:
             if time.monotonic() >= deadline or str(error) == "theorem timeout":
@@ -2755,29 +2872,32 @@ def search_problem(
                 failure = "theorem timeout"
                 break
             successor_fingerprint: str | None = None
-            proof_need, operation_seeds = _attempt_metadata(
+            ranking_metadata, operation_seeds = _attempt_metadata(
                 decision, problem, state, seed, condition
             )
             if result.status is LeanStatus.COMPLETE and result.accepted:
                 disposition = "complete"
                 attempt_sink(
                     AttemptRecord(
-                        problem.id,
-                        condition.value,
-                        seed,
-                        fingerprint,
-                        prefix,
-                        tuple(candidates),
-                        tuple(decision.indices),
-                        candidate,
-                        disposition,
-                        None,
-                        result.diagnostics,
-                        tuple(hit.item.transition.id for hit in decision.hits),
-                        tuple(hit.item.transition.domain for hit in decision.hits),
-                        tuple(hit.similarity for hit in decision.hits),
-                        proof_need,
-                        operation_seeds,
+                        problem_id=problem.id,
+                        condition=condition.value,
+                        seed=seed,
+                        state_fingerprint=fingerprint,
+                        prefix=prefix,
+                        candidates=tuple(candidates),
+                        ordered_indices=tuple(decision.indices),
+                        candidate=candidate,
+                        disposition=disposition,
+                        successor_fingerprint=None,
+                        diagnostics=result.diagnostics,
+                        retrieval_hits=tuple(
+                            hit.item.transition.id for hit in decision.hits
+                        ),
+                        retrieval_domains=tuple(
+                            hit.item.transition.domain for hit in decision.hits
+                        ),
+                        **ranking_metadata,
+                        operation_seeds=operation_seeds,
                     )
                 )
                 tactics = prefix + (candidate,)
@@ -2828,22 +2948,25 @@ def search_problem(
                 failed_by_state.setdefault(fingerprint, []).append(candidate)
             attempt_sink(
                 AttemptRecord(
-                    problem.id,
-                    condition.value,
-                    seed,
-                    fingerprint,
-                    prefix,
-                    tuple(candidates),
-                    tuple(decision.indices),
-                    candidate,
-                    disposition,
-                    successor_fingerprint,
-                    result.diagnostics,
-                    tuple(hit.item.transition.id for hit in decision.hits),
-                    tuple(hit.item.transition.domain for hit in decision.hits),
-                    tuple(hit.similarity for hit in decision.hits),
-                    proof_need,
-                    operation_seeds,
+                    problem_id=problem.id,
+                    condition=condition.value,
+                    seed=seed,
+                    state_fingerprint=fingerprint,
+                    prefix=prefix,
+                    candidates=tuple(candidates),
+                    ordered_indices=tuple(decision.indices),
+                    candidate=candidate,
+                    disposition=disposition,
+                    successor_fingerprint=successor_fingerprint,
+                    diagnostics=result.diagnostics,
+                    retrieval_hits=tuple(
+                        hit.item.transition.id for hit in decision.hits
+                    ),
+                    retrieval_domains=tuple(
+                        hit.item.transition.domain for hit in decision.hits
+                    ),
+                    **ranking_metadata,
+                    operation_seeds=operation_seeds,
                 )
             )
             if result.status is LeanStatus.INTERNAL_ERROR:
@@ -3078,7 +3201,9 @@ def summarize_trials(trials: Sequence[TrialResult]) -> dict[str, object]:
     }
 
 
-class ConditionRanker:
+class ConditionRanker(HybridConditionRanker):
+    """Compatibility constructor for callers using the pre-hybrid ranker name."""
+
     def __init__(
         self,
         model: TextModel,
@@ -3086,38 +3211,13 @@ class ConditionRanker:
         retrieval_count: int,
         layer: int,
     ) -> None:
-        self.model = model
-        self.index = index
-        self.retrieval_count = retrieval_count
-        self.layer = layer
-
-    def rank(
-        self,
-        condition: Condition,
-        problem: Problem,
-        state: str,
-        accepted: tuple[str, ...],
-        failed: tuple[str, ...],
-        candidates: tuple[str, ...],
-        seed: int,
-        deadline: float | None = None,
-        proof_signature: ProofSignature | None = None,
-    ) -> RankingDecision:
-        return rank_for_condition(
-            condition,
-            problem,
-            state,
-            candidates,
-            None,
-            self.index,
-            self.model,
-            self.retrieval_count,
-            seed,
-            layer=self.layer,
-            accepted=accepted,
-            failed=failed,
-            deadline=deadline,
-            proof_signature=proof_signature,
+        del layer
+        super().__init__(
+            model=model,
+            index=index,
+            retrieval_count=retrieval_count,
+            structural_shortlist_size=max(len(index), 1),
+            pair_margin_threshold=0.0,
         )
 
 

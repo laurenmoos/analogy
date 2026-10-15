@@ -66,6 +66,12 @@ class RLConfig:
     progress_reward: float
     rejection_reward: float
     max_rescue_verifier_calls: int
+    epochs: int
+    checkpoint_interval: int
+    checkpoint: Path | None
+    train_connectives: tuple[str, ...]
+    validation_connectives: tuple[str, ...]
+    test_connectives: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -124,6 +130,12 @@ _SCHEMA: dict[str, frozenset[str]] = {
             "progress_reward",
             "rejection_reward",
             "max_rescue_verifier_calls",
+            "epochs",
+            "checkpoint_interval",
+            "checkpoint",
+            "train_connectives",
+            "validation_connectives",
+            "test_connectives",
         }
     ),
     "run": frozenset({"output_dir", "seed"}),
@@ -206,6 +218,23 @@ def _path(value: Any, path: str, base: Path) -> Path:
     return (raw if raw.is_absolute() else base / raw).resolve()
 
 
+def _optional_path(value: Any, path: str, base: Path) -> Path | None:
+    if value is None:
+        return None
+    return _path(value, path, base)
+
+
+def _string_tuple(value: Any, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"{path} must be a non-empty list of strings")
+    normalized = tuple(
+        _string(item, f"{path}[{index}]") for index, item in enumerate(value)
+    )
+    if len(set(normalized)) != len(normalized):
+        raise ConfigError(f"{path} must not contain duplicates")
+    return normalized
+
+
 def load_config(path: Path) -> AppConfig:
     """Load and validate a complete configuration from ``path``."""
 
@@ -249,6 +278,23 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError(
             "rl reward ordering must satisfy completion > progress >= 0 > rejection"
         )
+    train_connectives = _string_tuple(
+        rl["train_connectives"], "config.rl.train_connectives"
+    )
+    validation_connectives = _string_tuple(
+        rl["validation_connectives"], "config.rl.validation_connectives"
+    )
+    test_connectives = _string_tuple(
+        rl["test_connectives"], "config.rl.test_connectives"
+    )
+    connective_sets = tuple(
+        map(set, (train_connectives, validation_connectives, test_connectives))
+    )
+    if any(
+        connective_sets[left] & connective_sets[right]
+        for left, right in ((0, 1), (0, 2), (1, 2))
+    ):
+        raise ConfigError("rl connective splits must be pairwise disjoint")
 
     return AppConfig(
         experiment=ExperimentConfig(
@@ -320,6 +366,16 @@ def load_config(path: Path) -> AppConfig:
                 rl["max_rescue_verifier_calls"],
                 "config.rl.max_rescue_verifier_calls",
             ),
+            epochs=_positive_integer(rl["epochs"], "config.rl.epochs"),
+            checkpoint_interval=_positive_integer(
+                rl["checkpoint_interval"], "config.rl.checkpoint_interval"
+            ),
+            checkpoint=_optional_path(
+                rl["checkpoint"], "config.rl.checkpoint", base
+            ),
+            train_connectives=train_connectives,
+            validation_connectives=validation_connectives,
+            test_connectives=test_connectives,
         ),
         run=RunConfig(
             output_dir=_path(run["output_dir"], "config.run.output_dir", base),

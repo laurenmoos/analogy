@@ -39,6 +39,12 @@ rl:
   progress_reward: 0.1
   rejection_reward: -0.1
   max_rescue_verifier_calls: 8
+  epochs: 10
+  checkpoint_interval: 1
+  checkpoint: null
+  train_connectives: [implication, and, or]
+  validation_connectives: [not]
+  test_connectives: [iff]
 
 run:
   output_dir: runs

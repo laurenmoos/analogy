@@ -60,6 +60,9 @@ All Python code lives in one package:
 - `src/analogy/records.py` — immutable shared records.
 - `src/analogy/loop.py` — best-first search, progress, and stuckness.
 - `src/analogy/daydream.py` — analogy sampling, refinement, pertinence, and constrained choice.
+- `src/analogy/rescue.py` — generic rescue records, prompts, parsing, and bounded rollouts.
+- `src/analogy/rl.py` — the trainable latent policy and verifier-only learning rule.
+- `src/analogy/training.py` — structural splits, checkpoints, run artifacts, and matched controls.
 - `src/analogy/lean_gym/` — the 25-problem corpus, pinned Lean project, verifier, sessions, traces, and replay.
 - `config.yaml` — the single experiment, model, search, analogy, RL, run, and data configuration.
 - `docs/plans/` — numbered implementation plans.
@@ -81,6 +84,23 @@ The `capability` stage loads frozen Qwen3-8B locally, asks it for one JSON tacti
 The original one-shot baseline solved 4 of 25 problems. A benchmark-agnostic Lean syntax primer and clearer prompt layout raised the deterministic result to 14 of 25 with seed 0 (run `b895bf8c77e04df493a922e0f9cc9374`). This clears Step 0: the frozen small model can solve a meaningful portion of the corpus before analogy or RL is introduced.
 
 The next-tactic baseline was exercised as a diagnostic pilot rather than a definitive benchmark. Run `98d06bc80dff4c23b17ab32b0b68f3c3` solved 13 of the 19 attempted problems and produced 7 explicit stuck states. It was intentionally stopped before the last six problems, so 13/19 should not be compared as a final success rate. The useful finding is that the search loop, Lean verification, and stuck-state capture work end to end; 198 of 254 checked proposals were invalid, making conventional tactic quality the next obvious bottleneck.
+
+## Generic rescue RL checkpoint
+
+The first trainable checkpoint deliberately tests rescue without claiming an analogy benefit:
+
+```text
+conventional proof search
+→ observable stuckness
+→ direct latent rescue rollout
+→ predicted next state + generated tactics
+→ Lean verification
+→ return progress to conventional search
+```
+
+Qwen stays frozen. A small Gaussian policy changes one final-token prefill activation, and Lean supplies completion, novel-state, or rejection reward. Training, validation, and held-out test connectives are structurally separated; conventional, zero-delta, random, and learned conditions share search and verifier budgets.
+
+This checkpoint has no corpus retrieval and no analogy stream. Its purpose is to establish the generic RL and evaluation backbone before the next reviewed stage adds a one-hop generated analogy lens. See the [design specification](docs/superpowers/specs/2026-10-14-associative-analogy-rescue-rl-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-generic-stuck-rescue-rl.md).
 
 Run the complete preservation suite with:
 

@@ -94,6 +94,8 @@ class QwenGenerator:
             or getattr(getattr(model, "config", None), "name_or_path", None)
             or "unknown"
         )
+        raw_hidden_size = getattr(getattr(model, "config", None), "hidden_size", None)
+        self.hidden_size = int(raw_hidden_size) if raw_hidden_size is not None else 0
         for parameter in model.parameters():
             parameter.requires_grad_(False)
         model.eval()

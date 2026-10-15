@@ -138,6 +138,7 @@ class FakeParameter:
 class FakeModel:
     def __init__(self) -> None:
         self.device = "mps"
+        self.config = type("Config", (), {"hidden_size": 4096})()
         self.parameter = FakeParameter()
         self.eval_called = False
         self.generate_call = None
@@ -218,6 +219,7 @@ def test_qwen_generator_uses_chat_template_seed_and_only_decodes_new_tokens() ->
     assert tokenizer.decoded == ([99, 100], {"skip_special_tokens": True})
     assert model.parameter.required is False
     assert model.eval_called is True
+    assert generator.hidden_size == 4096
 
 
 def test_capability_prompt_teaches_structure_without_problem_metadata() -> None:

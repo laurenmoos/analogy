@@ -11,6 +11,7 @@ from .config import ConfigError, load_config
 from .lean_gym.resources import LEAN_PROJECT_ROOT
 from .lean_gym.verifier import LeanSubprocessVerifier
 from .model import ModelConfigurationError, QwenGenerator, run_baseline, run_capability
+from .training import evaluate_direct_rescue, train_direct_rescue
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,12 +33,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 2
 
-    if config.experiment.stage not in {"capability", "baseline"}:
+    if config.experiment.stage not in {
+        "capability",
+        "baseline",
+        "train_rescue",
+        "evaluate_rescue",
+    }:
         print(
             f"Unsupported experiment stage: {config.experiment.stage}",
             file=sys.stderr,
         )
         return 2
+    if config.experiment.stage in {"train_rescue", "evaluate_rescue"}:
+        if not config.rl.enabled or config.analogy.enabled:
+            print(
+                "Rescue stages require rl.enabled=true and analogy.enabled=false",
+                file=sys.stderr,
+            )
+            return 2
+        if config.experiment.stage == "evaluate_rescue" and config.rl.checkpoint is None:
+            print(
+                "evaluate_rescue requires rl.checkpoint",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         generator = QwenGenerator.from_config(config.model)
@@ -55,6 +74,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         passed = solved >= config.experiment.minimum_solved
         print(f"gate: {'passed' if passed else 'failed'}")
         return 0 if passed else 1
+
+    if config.experiment.stage == "train_rescue":
+        summary = train_direct_rescue(config, generator, verifier)
+        print(
+            f"train_rescue: {summary.epochs_completed} epochs; "
+            f"checkpoint={summary.best_checkpoint}"
+        )
+        return 0
+
+    if config.experiment.stage == "evaluate_rescue":
+        assert config.rl.checkpoint is not None
+        summary = evaluate_direct_rescue(
+            config, generator, verifier, config.rl.checkpoint
+        )
+        print(f"evaluate_rescue: {summary.run_id}")
+        for condition in summary.condition_summaries:
+            print(f"{condition.name}: {condition.solved}/{condition.attempted} solved")
+        return 0
 
     run = run_baseline(config, generator, verifier)
     print(f"baseline: {run.solved_count}/{run.attempted_count} solved")

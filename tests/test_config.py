@@ -48,6 +48,12 @@ rl:
   progress_reward: 0.1
   rejection_reward: -0.1
   max_rescue_verifier_calls: 8
+  epochs: 2
+  checkpoint_interval: 1
+  checkpoint: null
+  train_connectives: [implication, and, or]
+  validation_connectives: [not]
+  test_connectives: [iff]
 run:
   output_dir: runs
   seed: 0
@@ -75,6 +81,8 @@ def test_load_config_resolves_paths_from_config_file(tmp_path: Path) -> None:
     assert config.model.top_p == 0.9
     assert config.rl.rollouts_per_state == 4
     assert config.rl.completion_reward == 1.0
+    assert config.rl.checkpoint is None
+    assert config.rl.train_connectives == ("implication", "and", "or")
 
 
 def test_load_config_rejects_unknown_root_key(tmp_path: Path) -> None:
@@ -190,3 +198,35 @@ def test_load_config_rejects_unknown_rl_key(tmp_path: Path) -> None:
 
     with pytest.raises(module.ConfigError, match=r"config\.rl\.typo"):
         module.load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "error_path"),
+    [
+        ("  epochs: 2", "  epochs: 0", "epochs"),
+        ("  checkpoint_interval: 1", "  checkpoint_interval: false", "checkpoint_interval"),
+        ("  train_connectives: [implication, and, or]", "  train_connectives: []", "train_connectives"),
+        ("  validation_connectives: [not]", "  validation_connectives: [not, not]", "validation_connectives"),
+        ("  test_connectives: [iff]", "  test_connectives: [or]", "disjoint"),
+    ],
+)
+def test_load_config_rejects_invalid_training_split_fields(
+    tmp_path: Path, old: str, new: str, error_path: str
+) -> None:
+    module = _config_module()
+    path = tmp_path / "config.yaml"
+    path.write_text(_valid_yaml().replace(old, new, 1), encoding="utf-8")
+
+    with pytest.raises(module.ConfigError, match=error_path):
+        module.load_config(path)
+
+
+def test_load_config_resolves_optional_checkpoint_path(tmp_path: Path) -> None:
+    module = _config_module()
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        _valid_yaml().replace("  checkpoint: null", "  checkpoint: saved/policy.pt"),
+        encoding="utf-8",
+    )
+
+    assert module.load_config(path).rl.checkpoint == (tmp_path / "saved/policy.pt").resolve()

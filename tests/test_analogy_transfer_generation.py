@@ -95,6 +95,13 @@ class RecordingBackend:
         return self._respond(messages, seed, delta)
 
 
+def test_source_prompt_keeps_rationale_inside_the_concrete_source_contract():
+    prompt = render_source_prompt(observation(), NEED)
+    assert "including rationale" in prompt
+    assert "words proof, Lean, or tactic" in prompt
+    assert "Explain the fit using only domain-neutral transformation language" in prompt
+
+
 def generate(stage, backend, **kwargs):
     source, alignment, transfer = records()
     options = dict(hidden_layer=-1, base_seed=7, max_repair_calls=3)

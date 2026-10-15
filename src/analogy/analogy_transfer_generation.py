@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from .rl import PolicyAction
 
 
-SOURCE_PROMPT_VERSION = "source-analogy-v1"
+SOURCE_PROMPT_VERSION = "source-analogy-v2"
 ALIGNMENT_PROMPT_VERSION = "analogy-alignment-v1"
 TRANSFER_PROMPT_VERSION = "proof-reasoning-transfer-v1"
 TACTIC_PROMPT_VERSION = "transferred-tactic-v1"
@@ -102,6 +102,8 @@ def render_source_prompt(observation: AnalogyObservation, need: ProofNeed) -> st
         "transition that exhibits the needed transformation. Do not restate the proof. "
         "Use specific physical or everyday roles. Never copy proposition expressions, "
         "proof identifiers, Lean syntax, or tactic names into the source text. "
+        "Every concrete-source field, including rationale, must avoid the words proof, Lean, or tactic. "
+        "Explain the fit using only domain-neutral transformation language and concrete source roles. "
         "Generic logical vocabulary belongs only in the domain-neutral transformation. "
         "Return exactly one JSON object with domain, source_before, source_after, "
         "source_roles (at least two unique role names), relation_chain (two to four strings), "

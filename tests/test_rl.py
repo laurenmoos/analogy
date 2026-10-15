@@ -3,9 +3,33 @@ from __future__ import annotations
 import pytest
 import torch
 
-from analogy.records import Embedding, SymbolicState
-from analogy.rescue import ProofRepresentation, ProofRescueContext
-from analogy.rl import DirectRescuePolicy, PolicyAction
+from analogy.records import (
+    CandidateOrigin,
+    Embedding,
+    SearchNode,
+    SymbolicState,
+    TacticCandidate,
+    TacticResult,
+    TacticStatus,
+)
+from analogy.rescue import (
+    PolicyActionRecord,
+    ProofRepresentation,
+    ProofRescueContext,
+    RescueAttempt,
+    RescueProposal,
+    RescueRollout,
+    RescueTermination,
+)
+from analogy.rl import (
+    DirectRescuePolicy,
+    PolicyAction,
+    RewardWeights,
+    TrainingSample,
+    reinforce_step,
+    verifier_reward,
+    with_reward,
+)
 
 
 def representation(
@@ -108,3 +132,194 @@ def test_policy_rejects_generator_on_wrong_device_when_available() -> None:
 
     with pytest.raises(ValueError, match="generator device"):
         policy.sample(representation(), torch.Generator(device="cpu"))
+
+
+def rollout(termination, *, tactic="simp", predicted="smaller goal", delta_norm=0.0):
+    selected = TacticCandidate(tactic, 1.0, CandidateOrigin.ANALOGICAL)
+    proposal = RescueProposal(selected, predicted)
+    attempts = ()
+    proposals = ()
+    if termination is RescueTermination.COMPLETE:
+        result = TacticResult(selected, TacticStatus.COMPLETE, proof="by simp")
+        attempts = (RescueAttempt(proposal, result),)
+        proposals = (proposal,)
+    elif termination is RescueTermination.PROGRESS:
+        result = TacticResult(
+            selected, TacticStatus.ACCEPTED, SymbolicState("next", "⊢ Q", "lean4")
+        )
+        attempts = (RescueAttempt(proposal, result),)
+        proposals = (proposal,)
+    elif termination is RescueTermination.REJECTED:
+        result = TacticResult(selected, TacticStatus.ERROR)
+        attempts = (RescueAttempt(proposal, result),)
+        proposals = (proposal,)
+    return RescueRollout(
+        "r",
+        "s",
+        PolicyActionRecord(1, delta_norm, 0.0, 0.0),
+        proposals,
+        attempts,
+        termination,
+    )
+
+
+def weights():
+    return RewardWeights(completion=1.0, progress=0.1, rejection=-0.1)
+
+
+@pytest.mark.parametrize(
+    ("termination", "expected"),
+    [
+        (RescueTermination.COMPLETE, 1.0),
+        (RescueTermination.PROGRESS, 0.1),
+        (RescueTermination.REJECTED, -0.1),
+        (RescueTermination.EXHAUSTED, 0.0),
+        (RescueTermination.BUDGET_EXHAUSTED, 0.0),
+    ],
+)
+def test_verifier_reward_is_determined_only_by_lean_outcome(termination, expected):
+    assert verifier_reward(rollout(termination), weights()).total == expected
+
+
+def test_verifier_reward_ignores_text_action_size_and_domain_words() -> None:
+    first = rollout(
+        RescueTermination.REJECTED,
+        tactic="simp",
+        predicted="small goal",
+        delta_norm=0.0,
+    )
+    second = rollout(
+        RescueTermination.REJECTED,
+        tactic="imagine a planetary orbit then exact h",
+        predicted="a long poetic physics prediction " * 20,
+        delta_norm=99.0,
+    )
+
+    assert verifier_reward(first, weights()) == verifier_reward(second, weights())
+
+
+def test_verifier_reward_revalidates_mutated_terminal_classification() -> None:
+    invalid = rollout(RescueTermination.REJECTED)
+    object.__setattr__(invalid, "termination", RescueTermination.COMPLETE)
+
+    with pytest.raises(ValueError, match="contradicts"):
+        verifier_reward(invalid, weights())
+
+
+class OneParameterPolicy(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.theta = torch.nn.Parameter(torch.tensor(0.0))
+
+    def action(self, *, scale=1.0, entropy=None):
+        entropy_value = self.theta * 0.0 if entropy is None else entropy
+        log_probability = self.theta if scale == 1.0 else self.theta * scale
+        return PolicyAction(
+            torch.zeros(1), log_probability, entropy_value
+        )
+
+
+def training_sample(policy, reward, *, scale=1.0, entropy=None):
+    return TrainingSample(
+        rollout(RescueTermination.EXHAUSTED),
+        policy.action(scale=scale, entropy=entropy),
+        reward,
+    )
+
+
+@pytest.mark.parametrize(("reward", "direction"), [(1.0, 1), (-1.0, -1)])
+def test_reinforce_single_sample_moves_log_probability_with_reward(reward, direction):
+    policy = OneParameterPolicy()
+    action = policy.action()
+    sample = TrainingSample(rollout(RescueTermination.EXHAUSTED), action, reward)
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+
+    before = float(action.log_probability.detach())
+    reinforce_step(policy, optimizer, (sample,), 0.0, 1.0)
+
+    after = float(action.log_probability.detach())
+    assert (after - before) * direction > 0
+
+
+def test_zero_advantage_and_entropy_leave_parameters_unchanged() -> None:
+    policy = OneParameterPolicy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+
+    reinforce_step(
+        policy, optimizer, (training_sample(policy, 0.0),), 0.0, 1.0
+    )
+
+    assert policy.theta.item() == 0.0
+
+
+def test_reinforce_does_not_create_gradients_for_external_generator() -> None:
+    policy = OneParameterPolicy()
+    frozen_generator = torch.nn.Linear(1, 1)
+    for parameter in frozen_generator.parameters():
+        parameter.requires_grad_(False)
+
+    reinforce_step(
+        policy,
+        torch.optim.SGD(policy.parameters(), lr=0.1),
+        (training_sample(policy, 1.0),),
+        0.0,
+        1.0,
+    )
+
+    assert all(parameter.grad is None for parameter in frozen_generator.parameters())
+
+
+def test_reinforce_rejects_empty_detached_and_nonfinite_inputs() -> None:
+    policy = OneParameterPolicy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+    with pytest.raises(ValueError, match="non-empty"):
+        reinforce_step(policy, optimizer, (), 0.0, 1.0)
+    detached = PolicyAction(torch.zeros(1), torch.tensor(0.0), torch.tensor(0.0))
+    with pytest.raises(ValueError, match="gradient"):
+        reinforce_step(
+            policy,
+            optimizer,
+            (TrainingSample(rollout(RescueTermination.EXHAUSTED), detached, 1.0),),
+            0.0,
+            1.0,
+        )
+    with pytest.raises(ValueError, match="reward"):
+        TrainingSample(rollout(RescueTermination.EXHAUSTED), policy.action(), float("nan"))
+
+
+def test_reinforce_rejects_nonfinite_gradients_before_step() -> None:
+    policy = OneParameterPolicy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+    policy.theta.register_hook(lambda gradient: gradient * float("nan"))
+
+    with pytest.raises(ValueError, match="gradients"):
+        reinforce_step(
+            policy, optimizer, (training_sample(policy, 1.0),), 0.0, 1.0
+        )
+
+    assert policy.theta.item() == 0.0
+
+
+def test_reinforce_clips_gradient_before_optimizer_step() -> None:
+    policy = OneParameterPolicy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=1.0)
+
+    metrics = reinforce_step(
+        policy,
+        optimizer,
+        (training_sample(policy, 1.0, scale=100.0),),
+        0.0,
+        0.1,
+    )
+
+    assert policy.theta.item() == pytest.approx(0.1, abs=1e-5)
+    assert metrics.gradient_norm == pytest.approx(100.0)
+
+
+def test_with_reward_returns_new_scalar_rollout_without_graph() -> None:
+    original = rollout(RescueTermination.PROGRESS)
+
+    rewarded = with_reward(original, 0.1)
+
+    assert rewarded.reward == 0.1
+    assert original.reward is None

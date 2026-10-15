@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Sequence
 
 import torch
 
-from .rescue import ProofRepresentation
+from .records import TacticStatus
+from .rescue import ProofRepresentation, RescueRollout, RescueTermination
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,4 +128,203 @@ def _clip_vector_norm(vector: torch.Tensor, maximum: float) -> torch.Tensor:
     return vector * scale
 
 
-__all__ = ["DirectRescuePolicy", "PolicyAction"]
+@dataclass(frozen=True, slots=True)
+class RewardWeights:
+    completion: float
+    progress: float
+    rejection: float
+
+    def __post_init__(self) -> None:
+        values = (self.completion, self.progress, self.rejection)
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values
+        ):
+            raise ValueError("reward weights must be finite numbers")
+        object.__setattr__(self, "completion", float(self.completion))
+        object.__setattr__(self, "progress", float(self.progress))
+        object.__setattr__(self, "rejection", float(self.rejection))
+        if not self.completion > self.progress >= 0.0 > self.rejection:
+            raise ValueError(
+                "reward weights require completion > progress >= 0 > rejection"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class RewardBreakdown:
+    completion: float = 0.0
+    progress: float = 0.0
+    rejection: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in ("completion", "progress", "rejection"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"{name} reward must be finite")
+            object.__setattr__(self, name, float(value))
+
+    @property
+    def total(self) -> float:
+        return self.completion + self.progress + self.rejection
+
+
+def verifier_reward(
+    rollout: RescueRollout, weights: RewardWeights
+) -> RewardBreakdown:
+    if not isinstance(rollout, RescueRollout):
+        raise ValueError("rollout must be a RescueRollout")
+    if not isinstance(weights, RewardWeights):
+        raise ValueError("weights must be RewardWeights")
+    _validate_rollout_termination(rollout)
+    if rollout.termination is RescueTermination.COMPLETE:
+        return RewardBreakdown(completion=weights.completion)
+    if rollout.termination is RescueTermination.PROGRESS:
+        return RewardBreakdown(progress=weights.progress)
+    if rollout.termination is RescueTermination.REJECTED:
+        return RewardBreakdown(rejection=weights.rejection)
+    return RewardBreakdown()
+
+
+def _validate_rollout_termination(rollout: RescueRollout) -> None:
+    has_complete = any(
+        item.result.status is TacticStatus.COMPLETE for item in rollout.attempts
+    )
+    has_progress = any(
+        item.result.status is TacticStatus.ACCEPTED and item.discarded is None
+        for item in rollout.attempts
+    )
+    all_rejected = bool(rollout.attempts) and all(
+        item.result.status is TacticStatus.ERROR for item in rollout.attempts
+    )
+    valid = {
+        RescueTermination.COMPLETE: has_complete,
+        RescueTermination.PROGRESS: has_progress and not has_complete,
+        RescueTermination.REJECTED: all_rejected,
+    }
+    expected = valid.get(rollout.termination)
+    if expected is False:
+        raise ValueError("rollout termination contradicts its attempts")
+    if rollout.termination not in valid and (has_complete or has_progress):
+        raise ValueError("rollout termination contradicts its attempts")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSample:
+    rollout: RescueRollout
+    action: PolicyAction
+    reward: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rollout, RescueRollout):
+            raise ValueError("rollout must be a RescueRollout")
+        if not isinstance(self.action, PolicyAction):
+            raise ValueError("action must be a PolicyAction")
+        if (
+            isinstance(self.reward, bool)
+            or not isinstance(self.reward, (int, float))
+            or not math.isfinite(float(self.reward))
+        ):
+            raise ValueError("reward must be finite")
+        object.__setattr__(self, "reward", float(self.reward))
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingMetrics:
+    loss: float
+    mean_reward: float
+    gradient_norm: float
+
+    def __post_init__(self) -> None:
+        for name in ("loss", "mean_reward", "gradient_norm"):
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"{name} must be finite")
+
+
+def reinforce_step(
+    policy: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    samples: Sequence[TrainingSample],
+    entropy_weight: float,
+    max_gradient_norm: float,
+) -> TrainingMetrics:
+    normalized = tuple(samples)
+    if not normalized:
+        raise ValueError("training samples must be non-empty")
+    if not all(isinstance(sample, TrainingSample) for sample in normalized):
+        raise ValueError("samples must contain only TrainingSample values")
+    if (
+        isinstance(entropy_weight, bool)
+        or not isinstance(entropy_weight, (int, float))
+        or not math.isfinite(float(entropy_weight))
+        or entropy_weight < 0.0
+    ):
+        raise ValueError("entropy_weight must be finite and non-negative")
+    if (
+        isinstance(max_gradient_norm, bool)
+        or not isinstance(max_gradient_norm, (int, float))
+        or not math.isfinite(float(max_gradient_norm))
+        or max_gradient_norm <= 0.0
+    ):
+        raise ValueError("max_gradient_norm must be finite and positive")
+    if any(not sample.action.log_probability.requires_grad for sample in normalized):
+        raise ValueError("action log probabilities must retain a gradient graph")
+    rewards = torch.tensor(
+        [sample.reward for sample in normalized], dtype=torch.float32
+    )
+    advantages = rewards - rewards.mean() if len(normalized) > 1 else rewards
+    log_probabilities = torch.stack(
+        [sample.action.log_probability for sample in normalized]
+    )
+    entropies = torch.stack([sample.action.entropy for sample in normalized])
+    loss = -(
+        advantages.to(log_probabilities.device).detach() * log_probabilities
+    ).mean() - float(entropy_weight) * entropies.mean()
+    if not bool(torch.isfinite(loss).item()):
+        raise ValueError("training loss must be finite")
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    parameters = tuple(policy.parameters())
+    gradients = tuple(
+        parameter.grad for parameter in parameters if parameter.grad is not None
+    )
+    if not gradients:
+        optimizer.zero_grad(set_to_none=True)
+        raise ValueError("training loss must produce policy gradients")
+    if any(not bool(torch.isfinite(gradient).all().item()) for gradient in gradients):
+        optimizer.zero_grad(set_to_none=True)
+        raise ValueError("policy gradients must be finite")
+    gradient_norm = torch.nn.utils.clip_grad_norm_(
+        parameters, float(max_gradient_norm)
+    )
+    if not bool(torch.isfinite(gradient_norm).item()):
+        optimizer.zero_grad(set_to_none=True)
+        raise ValueError("policy gradients must be finite")
+    optimizer.step()
+    return TrainingMetrics(
+        float(loss.detach().cpu().item()),
+        float(rewards.mean().item()),
+        float(gradient_norm.detach().cpu().item()),
+    )
+
+
+def with_reward(rollout: RescueRollout, reward: float) -> RescueRollout:
+    return replace(rollout, reward=reward)
+
+
+__all__ = [
+    "DirectRescuePolicy",
+    "PolicyAction",
+    "RewardBreakdown",
+    "RewardWeights",
+    "TrainingMetrics",
+    "TrainingSample",
+    "reinforce_step",
+    "verifier_reward",
+    "with_reward",
+]

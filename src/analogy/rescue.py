@@ -172,6 +172,8 @@ class PolicyActionRecord:
     delta_norm: float
     log_probability: float
     entropy: float
+    radius: float | None = None
+    raw_direction_norm: float | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
@@ -184,6 +186,16 @@ class PolicyActionRecord:
             self, "log_probability", _finite_float(self.log_probability, "log_probability")
         )
         object.__setattr__(self, "entropy", _finite_float(self.entropy, "entropy"))
+        radius = delta_norm if self.radius is None else _finite_float(self.radius, "radius")
+        raw_direction_norm = (
+            delta_norm
+            if self.raw_direction_norm is None
+            else _finite_float(self.raw_direction_norm, "raw_direction_norm")
+        )
+        if radius < 0.0 or raw_direction_norm < 0.0:
+            raise ValueError("action radius diagnostics must be non-negative")
+        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "raw_direction_norm", raw_direction_norm)
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +584,10 @@ class DirectRescueRunner:
                     action.log_probability.detach().float().cpu().item()
                 ),
                 entropy=float(action.entropy.detach().float().cpu().item()),
+                radius=float(action.radius.detach().float().cpu().item()),
+                raw_direction_norm=float(
+                    action.raw_direction_norm.detach().float().cpu().item()
+                ),
             )
             rollout_id = f"{state.id}:direct:{index}"
             generations: list[GenerationAttempt] = []

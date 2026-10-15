@@ -183,6 +183,29 @@ def test_checkpoint_round_trip_restores_rng_optimizer_and_policy(tmp_path: Path)
         load_training_checkpoint(path, policy, optimizer, split, "other")
 
 
+def test_checkpoint_rejects_policy_schema_mismatch(tmp_path: Path) -> None:
+    from analogy.rl import DirectRescuePolicy
+
+    policy = DirectRescuePolicy(2, 4, 0.5, -2.0)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=0.01)
+    split = split_problems(
+        (
+            problem("imp", "implication"),
+            problem("not", "not"),
+            problem("iff", "iff"),
+        )
+    )
+    path = tmp_path / "schema.pt"
+    save_training_checkpoint(path, policy, optimizer, 1, split, "hash")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    assert payload["policy_schema_version"] == 2
+    payload["policy_schema_version"] = 1
+    torch.save(payload, path)
+
+    with pytest.raises(ValueError, match="policy schema"):
+        load_training_checkpoint(path, policy, optimizer, split, "hash")
+
+
 def test_matched_conditions_share_budgets_and_seed_family(tmp_path: Path) -> None:
     config = load_config(ROOT / "config.yaml")
 

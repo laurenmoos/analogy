@@ -17,6 +17,8 @@ class PolicyAction:
     delta: torch.Tensor
     log_probability: torch.Tensor
     entropy: torch.Tensor
+    radius: torch.Tensor | None = None
+    raw_direction_norm: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.delta, torch.Tensor) or self.delta.ndim != 1:
@@ -31,9 +33,29 @@ class PolicyAction:
             raise ValueError("log_probability must be finite")
         if not torch.isfinite(self.entropy):
             raise ValueError("entropy must be finite")
+        radius = self.radius
+        if radius is None:
+            radius = torch.linalg.vector_norm(self.delta)
+            object.__setattr__(self, "radius", radius)
+        raw_direction_norm = self.raw_direction_norm
+        if raw_direction_norm is None:
+            raw_direction_norm = torch.linalg.vector_norm(self.delta)
+            object.__setattr__(self, "raw_direction_norm", raw_direction_norm)
+        for value, name in (
+            (radius, "radius"),
+            (raw_direction_norm, "raw_direction_norm"),
+        ):
+            if not isinstance(value, torch.Tensor) or value.ndim != 0:
+                raise ValueError(f"{name} must be a scalar Torch tensor")
+            if not torch.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
 
 
 class DirectRescuePolicy(torch.nn.Module):
+    schema_version = 2
+
     def __init__(
         self,
         embedding_dimension: int,
@@ -75,6 +97,14 @@ class DirectRescuePolicy(torch.nn.Module):
         self.mean = torch.nn.Linear(hidden_width, embedding_dimension)
         self.log_scale = torch.nn.Linear(hidden_width, embedding_dimension)
         torch.nn.init.constant_(self.log_scale.bias, float(initial_log_scale))
+        self.radius_mean = torch.nn.Linear(hidden_width, 1)
+        self.radius_log_scale = torch.nn.Linear(hidden_width, 1)
+        torch.nn.init.zeros_(self.radius_mean.weight)
+        torch.nn.init.constant_(self.radius_mean.bias, math.log(0.1 / 0.9))
+        torch.nn.init.zeros_(self.radius_log_scale.weight)
+        torch.nn.init.constant_(
+            self.radius_log_scale.bias, float(initial_log_scale)
+        )
         self.max_delta_norm = float(max_delta_norm)
 
     def sample(
@@ -98,7 +128,14 @@ class DirectRescuePolicy(torch.nn.Module):
         hidden = self.body(inputs)
         mean = self.mean(hidden).float()
         log_scale = self.log_scale(hidden).float().clamp(-6.0, 2.0)
-        if not torch.isfinite(mean).all() or not torch.isfinite(log_scale).all():
+        radius_mean = self.radius_mean(hidden).float().squeeze(-1)
+        radius_log_scale = self.radius_log_scale(hidden).float().squeeze(-1).clamp(-6.0, 2.0)
+        if (
+            not torch.isfinite(mean).all()
+            or not torch.isfinite(log_scale).all()
+            or not torch.isfinite(radius_mean)
+            or not torch.isfinite(radius_log_scale)
+        ):
             raise ValueError("policy distribution parameters must be finite")
         noise = torch.randn(
             mean.shape,
@@ -106,15 +143,32 @@ class DirectRescuePolicy(torch.nn.Module):
             device=mean.device,
             dtype=torch.float32,
         )
-        raw = mean + log_scale.exp() * noise
-        if not torch.isfinite(raw).all():
+        direction_scale = log_scale.exp() / math.sqrt(self.embedding_dimension)
+        raw_direction = mean + direction_scale * noise
+        radius_noise = torch.randn(
+            (), generator=generator, device=mean.device, dtype=torch.float32
+        )
+        raw_radius = radius_mean + radius_log_scale.exp() * radius_noise
+        if not torch.isfinite(raw_direction).all() or not torch.isfinite(raw_radius):
             raise ValueError("sampled policy action must be finite")
-        delta = _clip_vector_norm(raw, self.max_delta_norm)
-        distribution = torch.distributions.Normal(mean, log_scale.exp())
+        raw_direction_norm = torch.linalg.vector_norm(raw_direction)
+        direction = raw_direction / raw_direction_norm.clamp_min(
+            torch.finfo(raw_direction.dtype).tiny
+        )
+        radius = self.max_delta_norm * torch.sigmoid(raw_radius)
+        delta = direction * radius
+        direction_distribution = torch.distributions.Normal(mean, direction_scale)
+        radius_distribution = torch.distributions.Normal(
+            radius_mean, radius_log_scale.exp()
+        )
         return PolicyAction(
             delta,
-            distribution.log_prob(raw.detach()).sum(),
-            distribution.entropy().sum(),
+            direction_distribution.log_prob(raw_direction.detach()).sum()
+            + radius_distribution.log_prob(raw_radius.detach()),
+            direction_distribution.entropy().sum()
+            + radius_distribution.entropy(),
+            radius,
+            raw_direction_norm,
         )
 
 

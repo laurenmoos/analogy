@@ -68,6 +68,41 @@ def test_policy_sample_is_seeded_bounded_and_differentiable() -> None:
     assert first.delta.dtype is torch.float32
 
 
+def test_initial_policy_does_not_saturate_high_dimensional_actions() -> None:
+    dimension = 4096
+    policy = DirectRescuePolicy(dimension, 8, 2.0, -2.0)
+    view = tuple(1.0 if index == 0 else 0.0 for index in range(dimension))
+    proof = representation(view, view)
+
+    actions = [
+        policy.sample(proof, torch.Generator().manual_seed(seed))
+        for seed in range(128)
+    ]
+    saturated = sum(
+        float(action.delta.detach().norm()) >= 0.99 * policy.max_delta_norm
+        for action in actions
+    )
+
+    assert saturated / len(actions) < 0.10
+
+
+def test_action_radius_matches_delta_norm_and_retains_gradient() -> None:
+    dimension = 8
+    policy = DirectRescuePolicy(dimension, 4, 2.0, -2.0)
+    view = tuple(1.0 if index == 0 else 0.0 for index in range(dimension))
+
+    action = policy.sample(
+        representation(view, view), torch.Generator().manual_seed(1)
+    )
+
+    assert float(action.delta.detach().norm()) == pytest.approx(
+        float(action.radius.detach())
+    )
+    assert action.radius.ndim == 0
+    assert action.raw_direction_norm.ndim == 0
+    assert action.log_probability.requires_grad
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

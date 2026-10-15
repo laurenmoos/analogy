@@ -51,6 +51,20 @@ def action() -> PolicyActionRecord:
     return PolicyActionRecord(seed=7, delta_norm=0.25, log_probability=-0.5, entropy=1.0)
 
 
+def test_policy_action_record_preserves_radius_diagnostics() -> None:
+    record = PolicyActionRecord(
+        seed=7,
+        delta_norm=0.25,
+        log_probability=-0.5,
+        entropy=1.0,
+        radius=0.25,
+        raw_direction_norm=3.5,
+    )
+
+    assert record.radius == 0.25
+    assert record.raw_direction_norm == 3.5
+
+
 def attempt(status: TacticStatus, *, discarded: bool = False) -> RescueAttempt:
     selected = candidate()
     proposal = RescueProposal(selected, "smaller goal")

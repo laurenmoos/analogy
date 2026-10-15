@@ -199,6 +199,7 @@ def save_training_checkpoint(
         "torch_rng": torch.random.get_rng_state(),
         "split": asdict(problem_split),
         "config_hash": config_hash,
+        "policy_schema_version": int(getattr(policy, "schema_version", 1)),
     }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -219,6 +220,9 @@ def load_training_checkpoint(
         raise ValueError("checkpoint config hash does not match")
     if payload.get("split") != asdict(problem_split):
         raise ValueError("checkpoint problem split does not match")
+    expected_schema = int(getattr(policy, "schema_version", 1))
+    if payload.get("policy_schema_version") != expected_schema:
+        raise ValueError("checkpoint policy schema does not match")
     policy.load_state_dict(payload["policy"])
     optimizer.load_state_dict(payload["optimizer"])
     random.setstate(payload["python_rng"])
@@ -372,6 +376,8 @@ def evaluate_direct_rescue(
         raise ValueError("checkpoint config hash does not match evaluation config")
     if payload.get("split") != asdict(problem_split):
         raise ValueError("checkpoint split does not match evaluation split")
+    if payload.get("policy_schema_version") != learned.schema_version:
+        raise ValueError("checkpoint policy schema does not match evaluation policy")
     learned.load_state_dict(payload["policy"])
     writer = RescueRunWriter.create(
         config.run.output_dir / "rescue",

@@ -1,0 +1,467 @@
+{
+  "problem": {
+    "id": "iff_intro_04",
+    "title": "Iff Reverse",
+    "binders": "(P Q R : Prop) (h1 : P ↔ R) (h2 : P → Q)",
+    "target": "R → Q",
+    "source_path": "Game/Levels/IffIntro/L04.lean",
+    "source_level": "IffIntro/4",
+    "connective": "iff",
+    "difficulty": 4
+  },
+  "initial_state": {
+    "id": "iff_intro_04:prefix-0",
+    "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\n⊢ R → Q",
+    "context": [],
+    "language": "lean4"
+  },
+  "ordinary_expansions": [
+    {
+      "node": {
+        "state": {
+          "id": "iff_intro_04:prefix-0",
+          "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\n⊢ R → Q",
+          "context": [],
+          "language": "lean4"
+        }
+      },
+      "attempts": [
+        {
+          "candidate": {
+            "source": "intro",
+            "score": 1.0,
+            "origin": "conventional"
+          },
+          "status": "accepted",
+          "state": {
+            "id": "iff_intro_04:prefix-1",
+            "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ Q",
+            "context": [
+              "intro"
+            ],
+            "language": "lean4"
+          },
+          "proof": null,
+          "diagnostics": []
+        }
+      ],
+      "discarded": []
+    },
+    {
+      "node": {
+        "state": {
+          "id": "iff_intro_04:prefix-1",
+          "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ Q",
+          "context": [
+            "intro"
+          ],
+          "language": "lean4"
+        }
+      },
+      "attempts": [
+        {
+          "candidate": {
+            "source": "apply h2",
+            "score": 1.0,
+            "origin": "conventional"
+          },
+          "status": "accepted",
+          "state": {
+            "context": [
+              "intro",
+              "apply h2"
+            ],
+            "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ P",
+            "id": "iff_intro_04:e84d727b51db67cb",
+            "language": "lean4"
+          },
+          "proof": null,
+          "diagnostics": []
+        }
+      ],
+      "discarded": []
+    }
+  ],
+  "rollouts": [
+    {
+      "state_id": "iff_intro_04:e84d727b51db67cb",
+      "analogy_trace": {
+        "iterations": [
+          {
+            "iteration_index": 0,
+            "state_before": {
+              "context": [
+                "intro",
+                "apply h2"
+              ],
+              "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ P",
+              "id": "iff_intro_04:e84d727b51db67cb",
+              "language": "lean4"
+            },
+            "attempts": [
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1.mpr"
+                  },
+                  "predicted_state": "P : Prop\na✝ : R\n⊢ P"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1.mpr"
+                  },
+                  "diagnostics": [
+                    "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ R",
+                    "declaration uses `sorry`"
+                  ],
+                  "proof": null,
+                  "state": {
+                    "context": [
+                      "intro",
+                      "apply h2",
+                      "apply h1.mpr"
+                    ],
+                    "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ R",
+                    "id": "iff_intro_04:221205a35fd067b7",
+                    "language": "lean4"
+                  },
+                  "status": "accepted"
+                }
+              }
+            ],
+            "predicted_transition": "P : Prop\na✝ : R\n⊢ P",
+            "actual_transition": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ R",
+            "decision": {
+              "continue_loop": false,
+              "reason": "surprise_converged",
+              "state": {
+                "low_improvement_streak": 0,
+                "low_surprise_streak": 1,
+                "values": [
+                  0.09090395688838304
+                ]
+              }
+            },
+            "source": {
+              "analogy_id": "fixture-source-1",
+              "domain": "reversible bridge",
+              "source_before": "The traveler is on the east bank of a reversible bridge",
+              "source_after": "The traveler can reach the west bank by reverse traversal",
+              "source_roles": [
+                "east bank",
+                "west bank"
+              ],
+              "relation_chain": [
+                "east bank participates in the transition",
+                "west bank constrains the outcome"
+              ],
+              "transformation": {
+                "operation": "replace",
+                "input_arity": "one",
+                "output_arity": "one",
+                "permutation": "none",
+                "information_flow": [
+                  "preserve"
+                ],
+                "focus_before": "initial arrangement",
+                "focus_after": "required arrangement",
+                "domain_neutral_summary": "Reverse a reversible connection"
+              },
+              "rationale": "Reverse a reversible connection"
+            },
+            "alignment": {
+              "alignment_id": "fixture-alignment-1",
+              "source_analogy_id": "fixture-source-1",
+              "mapping": [
+                [
+                  "east bank",
+                  "active_subgoal"
+                ],
+                [
+                  "west bank",
+                  "hypothesis:h1"
+                ]
+              ],
+              "invariant": "Reverse a reversible connection",
+              "source_operation": "Reverse a reversible connection",
+              "proof_operation": "Reduce P to R using the reverse direction of h1",
+              "limitation": "Only Lean can validate the transferred operation",
+              "confidence": 0.5
+            },
+            "transfer": {
+              "transfer_id": "fixture-transfer-1",
+              "alignment_id": "fixture-alignment-1",
+              "active_subgoal": "P",
+              "premises": [
+                "h1"
+              ],
+              "reasoning_steps": [
+                "Reduce P to R using the reverse direction of h1"
+              ],
+              "predicted_next_subgoal": "R",
+              "completion_expected": false
+            }
+          }
+        ],
+        "stop_reason": "surprise_converged"
+      }
+    },
+    {
+      "state_id": "iff_intro_04:221205a35fd067b7",
+      "analogy_trace": {
+        "iterations": [
+          {
+            "iteration_index": 0,
+            "state_before": {
+              "context": [
+                "intro",
+                "apply h2",
+                "apply h1.mpr"
+              ],
+              "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ R",
+              "id": "iff_intro_04:221205a35fd067b7",
+              "language": "lean4"
+            },
+            "attempts": [
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1.mpr"
+                  },
+                  "predicted_state": "Q"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1.mpr"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the conclusion of `h1.mpr`\n  P\nwith the goal\n  R\n\nNote: The full type of `h1.mpr` is\n  R → P\n\nP Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ R"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "predicted_state": "Q"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the conclusion of `h2`\n  Q\nwith the goal\n  R\n\nNote: The full type of `h2` is\n  P → Q\n\nP Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ R"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact a✝"
+                  },
+                  "predicted_state": "Q"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact a✝"
+                  },
+                  "diagnostics": [
+                    "Unknown identifier `a`",
+                    "expected token"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": {
+                  "reason": "repeated_state",
+                  "result": {
+                    "candidate": {
+                      "origin": "analogical",
+                      "score": 0.25,
+                      "source": "apply h1.mp"
+                    },
+                    "diagnostics": [
+                      "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ P",
+                      "declaration uses `sorry`"
+                    ],
+                    "proof": null,
+                    "state": {
+                      "context": [
+                        "intro",
+                        "apply h2",
+                        "apply h1.mpr",
+                        "apply h1.mp"
+                      ],
+                      "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ P",
+                      "id": "iff_intro_04:e84d727b51db67cb",
+                      "language": "lean4"
+                    },
+                    "status": "accepted"
+                  }
+                },
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1.mp"
+                  },
+                  "predicted_state": "Q"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1.mp"
+                  },
+                  "diagnostics": [
+                    "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ P",
+                    "declaration uses `sorry`"
+                  ],
+                  "proof": null,
+                  "state": {
+                    "context": [
+                      "intro",
+                      "apply h2",
+                      "apply h1.mpr",
+                      "apply h1.mp"
+                    ],
+                    "expression": "P Q R : Prop\nh1 : P ↔ R\nh2 : P → Q\na✝ : R\n⊢ P",
+                    "id": "iff_intro_04:e84d727b51db67cb",
+                    "language": "lean4"
+                  },
+                  "status": "accepted"
+                }
+              }
+            ],
+            "predicted_transition": "Q",
+            "actual_transition": null,
+            "decision": {
+              "continue_loop": false,
+              "reason": "no_successor",
+              "state": {
+                "low_improvement_streak": 0,
+                "low_surprise_streak": 0,
+                "values": []
+              }
+            },
+            "source": {
+              "analogy_id": "fixture-source-2",
+              "domain": "reversible bridge",
+              "source_before": "The traveler is on the east bank of a reversible bridge",
+              "source_after": "The traveler can reach the west bank by reverse traversal",
+              "source_roles": [
+                "east bank",
+                "west bank"
+              ],
+              "relation_chain": [
+                "east bank participates in the transition",
+                "west bank constrains the outcome"
+              ],
+              "transformation": {
+                "operation": "replace",
+                "input_arity": "one",
+                "output_arity": "one",
+                "permutation": "none",
+                "information_flow": [
+                  "preserve"
+                ],
+                "focus_before": "initial arrangement",
+                "focus_after": "required arrangement",
+                "domain_neutral_summary": "Reverse a reversible connection"
+              },
+              "rationale": "Reverse a reversible connection"
+            },
+            "alignment": {
+              "alignment_id": "fixture-alignment-2",
+              "source_analogy_id": "fixture-source-2",
+              "mapping": [
+                [
+                  "east bank",
+                  "active_subgoal"
+                ],
+                [
+                  "west bank",
+                  "hypothesis:h1"
+                ]
+              ],
+              "invariant": "Reverse a reversible connection",
+              "source_operation": "Reverse a reversible connection",
+              "proof_operation": "The available R should close the active obligation",
+              "limitation": "Only Lean can validate the transferred operation",
+              "confidence": 0.5
+            },
+            "transfer": {
+              "transfer_id": "fixture-transfer-2",
+              "alignment_id": "fixture-alignment-2",
+              "active_subgoal": "R",
+              "premises": [
+                "h1"
+              ],
+              "reasoning_steps": [
+                "The available R should close the active obligation"
+              ],
+              "predicted_next_subgoal": "no remaining subgoals",
+              "completion_expected": true
+            }
+          }
+        ],
+        "stop_reason": "no_successor"
+      }
+    }
+  ],
+  "termination": "no_successor",
+  "provenance": {
+    "artifact_paths": [
+      "/Users/laurenmoos/analogy/runs-fast/repair-ablation-20261015/rescue/evaluate-epoch-0001/analogy_iterations.jsonl"
+    ],
+    "artifact_sha256": [
+      "198d10c9d54c76acb06fe35479f2c9d4709cc0828d90c8ff2089c275561884dc"
+    ],
+    "objective_fields": [
+      "problem target",
+      "state_before including accepted context",
+      "attempts including diagnostics and result successor",
+      "discard reasons",
+      "predicted_transition",
+      "actual_transition",
+      "decision"
+    ],
+    "prefix_states": "Pinned Lean replay of each recorded accepted prefix; final replay asserted equal to recorded state_before",
+    "generated_fields": "source, alignment and transfer are deterministic test-only values; objective outcomes are unchanged"
+  }
+}

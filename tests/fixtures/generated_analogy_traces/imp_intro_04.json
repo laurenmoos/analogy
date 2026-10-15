@@ -1,0 +1,265 @@
+{
+  "problem": {
+    "id": "imp_intro_04",
+    "title": "Chain Reasoning",
+    "binders": "(C A S : Prop) (h1 : C → A) (h2 : A → S)",
+    "target": "C → S",
+    "source_path": "Game/Levels/ImpIntro/L04.lean",
+    "source_level": "ImpIntro/4",
+    "connective": "implication",
+    "difficulty": 4
+  },
+  "initial_state": {
+    "id": "imp_intro_04:prefix-0",
+    "expression": "C A S : Prop\nh1 : C → A\nh2 : A → S\n⊢ C → S",
+    "context": [],
+    "language": "lean4"
+  },
+  "ordinary_expansions": [
+    {
+      "node": {
+        "state": {
+          "id": "imp_intro_04:prefix-0",
+          "expression": "C A S : Prop\nh1 : C → A\nh2 : A → S\n⊢ C → S",
+          "context": [],
+          "language": "lean4"
+        }
+      },
+      "attempts": [
+        {
+          "candidate": {
+            "source": "intro; apply h2; apply h1",
+            "score": 1.0,
+            "origin": "conventional"
+          },
+          "status": "accepted",
+          "state": {
+            "context": [
+              "intro; apply h2; apply h1"
+            ],
+            "expression": "C A S : Prop\nh1 : C → A\nh2 : A → S\na✝ : C\n⊢ C",
+            "id": "imp_intro_04:117ce6392e9a7d30",
+            "language": "lean4"
+          },
+          "proof": null,
+          "diagnostics": []
+        }
+      ],
+      "discarded": []
+    }
+  ],
+  "rollouts": [
+    {
+      "state_id": "imp_intro_04:117ce6392e9a7d30",
+      "analogy_trace": {
+        "iterations": [
+          {
+            "iteration_index": 0,
+            "state_before": {
+              "context": [
+                "intro; apply h2; apply h1"
+              ],
+              "expression": "C A S : Prop\nh1 : C → A\nh2 : A → S\na✝ : C\n⊢ C",
+              "id": "imp_intro_04:117ce6392e9a7d30",
+              "language": "lean4"
+            },
+            "attempts": [
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1"
+                  },
+                  "predicted_state": "⊢ S"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the conclusion of `h1`\n  A\nwith the goal\n  C\n\nNote: The full type of `h1` is\n  C → A\n\nC A S : Prop\nh1 : C → A\nh2 : A → S\na✝ : C\n⊢ C"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "predicted_state": "⊢ S"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the conclusion of `h2`\n  S\nwith the goal\n  C\n\nNote: The full type of `h2` is\n  A → S\n\nC A S : Prop\nh1 : C → A\nh2 : A → S\na✝ : C\n⊢ C"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact a✝"
+                  },
+                  "predicted_state": "⊢ S"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact a✝"
+                  },
+                  "diagnostics": [
+                    "Unknown identifier `a`",
+                    "expected token"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1"
+                  },
+                  "predicted_state": "⊢ S"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h1"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the conclusion of `h1`\n  A\nwith the goal\n  C\n\nNote: The full type of `h1` is\n  C → A\n\nC A S : Prop\nh1 : C → A\nh2 : A → S\na✝ : C\n⊢ C"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              }
+            ],
+            "predicted_transition": "⊢ S",
+            "actual_transition": null,
+            "decision": {
+              "continue_loop": false,
+              "reason": "no_successor",
+              "state": {
+                "low_improvement_streak": 0,
+                "low_surprise_streak": 0,
+                "values": []
+              }
+            },
+            "source": {
+              "analogy_id": "fixture-source-1",
+              "domain": "warehouse inventory",
+              "source_before": "A requested crate is already on the loading shelf",
+              "source_after": "The existing crate fulfills the dispatch request",
+              "source_roles": [
+                "requested crate",
+                "loading shelf"
+              ],
+              "relation_chain": [
+                "requested crate participates in the transition",
+                "loading shelf constrains the outcome"
+              ],
+              "transformation": {
+                "operation": "reuse",
+                "input_arity": "one",
+                "output_arity": "one",
+                "permutation": "none",
+                "information_flow": [
+                  "preserve"
+                ],
+                "focus_before": "initial arrangement",
+                "focus_after": "required arrangement",
+                "domain_neutral_summary": "Reuse an available matching resource"
+              },
+              "rationale": "Reuse an available matching resource"
+            },
+            "alignment": {
+              "alignment_id": "fixture-alignment-1",
+              "source_analogy_id": "fixture-source-1",
+              "mapping": [
+                [
+                  "requested crate",
+                  "active_subgoal"
+                ],
+                [
+                  "loading shelf",
+                  "hypothesis:h1"
+                ]
+              ],
+              "invariant": "Reuse an available matching resource",
+              "source_operation": "Reuse an available matching resource",
+              "proof_operation": "The active obligation is already present as a local premise",
+              "limitation": "Only Lean can validate the transferred operation",
+              "confidence": 0.5
+            },
+            "transfer": {
+              "transfer_id": "fixture-transfer-1",
+              "alignment_id": "fixture-alignment-1",
+              "active_subgoal": "C",
+              "premises": [
+                "h1"
+              ],
+              "reasoning_steps": [
+                "The active obligation is already present as a local premise"
+              ],
+              "predicted_next_subgoal": "no remaining subgoals",
+              "completion_expected": true
+            }
+          }
+        ],
+        "stop_reason": "no_successor"
+      }
+    }
+  ],
+  "termination": "no_successor",
+  "provenance": {
+    "artifact_paths": [
+      "/Users/laurenmoos/analogy/runs-fast/repair-ablation-20261015/rescue/2641bdf832c14fb6b278f94325735f7b/analogy_iterations.jsonl"
+    ],
+    "artifact_sha256": [
+      "5cf399b835c15e35d4efe5d631b131618683596082ca4105ce16f105212f44c3"
+    ],
+    "objective_fields": [
+      "problem target",
+      "state_before including accepted context",
+      "attempts including diagnostics and result successor",
+      "discard reasons",
+      "predicted_transition",
+      "actual_transition",
+      "decision"
+    ],
+    "prefix_states": "Pinned Lean replay of each recorded accepted prefix; final replay asserted equal to recorded state_before",
+    "generated_fields": "source, alignment and transfer are deterministic test-only values; objective outcomes are unchanged"
+  }
+}

@@ -1,0 +1,258 @@
+{
+  "problem": {
+    "id": "iff_intro_05",
+    "title": "Rewriting",
+    "binders": "(A C L P : Prop) (h1 : L ↔ P) (h2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → (P → C)) ↔ A ∧ C ∧ ¬P)",
+    "target": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → (L → C)) ↔ A ∧ C ∧ ¬L",
+    "source_path": "Game/Levels/IffIntro/L05.lean",
+    "source_level": "IffIntro/5",
+    "connective": "iff",
+    "difficulty": 5
+  },
+  "initial_state": {
+    "context": [],
+    "expression": "A C L P : Prop\nh1 : L ↔ P\nh2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\n⊢ ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L",
+    "id": "iff_intro_05:14e13d806ab0bbd4",
+    "language": "lean4"
+  },
+  "ordinary_expansions": [],
+  "rollouts": [
+    {
+      "state_id": "iff_intro_05:14e13d806ab0bbd4",
+      "analogy_trace": {
+        "iterations": [
+          {
+            "iteration_index": 0,
+            "state_before": {
+              "context": [],
+              "expression": "A C L P : Prop\nh1 : L ↔ P\nh2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\n⊢ ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L",
+              "id": "iff_intro_05:14e13d806ab0bbd4",
+              "language": "lean4"
+            },
+            "attempts": [
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "predicted_state": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the type of `h2`\n  ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\nwith the goal\n  ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L\n\nA C L P : Prop\nh1 : L ↔ P\nh2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\n⊢ ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "rw h1 at h2"
+                  },
+                  "predicted_state": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "rw h1 at h2"
+                  },
+                  "diagnostics": [
+                    "unexpected identifier; expected '['",
+                    "unsolved goals\nA C L P : Prop\nh1 : L ↔ P\nh2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\n⊢ ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact h2"
+                  },
+                  "predicted_state": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact h2"
+                  },
+                  "diagnostics": [
+                    "Type mismatch\n  h2\nhas type\n  ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\nbut is expected to have type\n  ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "predicted_state": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "apply h2"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the type of `h2`\n  ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\nwith the goal\n  ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L\n\nA C L P : Prop\nh1 : L ↔ P\nh2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\n⊢ ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              },
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 1.0,
+                    "source": "apply h2 at h1"
+                  },
+                  "predicted_state": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 1.0,
+                    "source": "apply h2 at h1"
+                  },
+                  "diagnostics": [
+                    "Tactic `apply` failed: could not unify the type of `h2`\n  ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\nwith the goal\n  ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L\n\nA C L P : Prop\nh1 : L ↔ P\nh2 : ¬((A → C ∨ ¬P) ∧ (P ∨ A → ¬C) → P → C) ↔ A ∧ C ∧ ¬P\n⊢ ¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L",
+                    "unexpected token 'at'; expected command"
+                  ],
+                  "proof": null,
+                  "state": null,
+                  "status": "error"
+                }
+              }
+            ],
+            "predicted_transition": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L",
+            "actual_transition": null,
+            "decision": {
+              "continue_loop": false,
+              "reason": "lean_budget",
+              "state": {
+                "low_improvement_streak": 0,
+                "low_surprise_streak": 0,
+                "values": []
+              }
+            },
+            "source": {
+              "analogy_id": "fixture-source-1",
+              "domain": "equipment substitution",
+              "source_before": "A machine uses an old component in several connected assemblies",
+              "source_after": "An interchangeable component fills the same assembly roles",
+              "source_roles": [
+                "original component",
+                "replacement component"
+              ],
+              "relation_chain": [
+                "original component participates in the transition",
+                "replacement component constrains the outcome"
+              ],
+              "transformation": {
+                "operation": "rewrite",
+                "input_arity": "one",
+                "output_arity": "one",
+                "permutation": "none",
+                "information_flow": [
+                  "preserve"
+                ],
+                "focus_before": "initial arrangement",
+                "focus_after": "required arrangement",
+                "domain_neutral_summary": "Substitute interchangeable parts while preserving connections"
+              },
+              "rationale": "Substitute interchangeable parts while preserving connections"
+            },
+            "alignment": {
+              "alignment_id": "fixture-alignment-1",
+              "source_analogy_id": "fixture-source-1",
+              "mapping": [
+                [
+                  "original component",
+                  "active_subgoal"
+                ],
+                [
+                  "replacement component",
+                  "hypothesis:h1"
+                ]
+              ],
+              "invariant": "Substitute interchangeable parts while preserving connections",
+              "source_operation": "Substitute interchangeable parts while preserving connections",
+              "proof_operation": "Replace corresponding occurrences of L and P using h1",
+              "limitation": "Only Lean can validate the transferred operation",
+              "confidence": 0.5
+            },
+            "transfer": {
+              "transfer_id": "fixture-transfer-1",
+              "alignment_id": "fixture-alignment-1",
+              "active_subgoal": "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → L → C) ↔ A ∧ C ∧ ¬L",
+              "premises": [
+                "h1"
+              ],
+              "reasoning_steps": [
+                "Replace corresponding occurrences of L and P using h1",
+                "The resulting structure matches h2"
+              ],
+              "predicted_next_subgoal": "matching structure",
+              "completion_expected": false
+            }
+          }
+        ],
+        "stop_reason": "lean_budget"
+      }
+    }
+  ],
+  "termination": "lean_budget",
+  "provenance": {
+    "artifact_paths": [
+      "/Users/laurenmoos/analogy/runs-fast/repair-ablation-20261015/rescue/evaluate-epoch-0001/analogy_iterations.jsonl"
+    ],
+    "artifact_sha256": [
+      "198d10c9d54c76acb06fe35479f2c9d4709cc0828d90c8ff2089c275561884dc"
+    ],
+    "objective_fields": [
+      "problem target",
+      "state_before including accepted context",
+      "attempts including diagnostics and result successor",
+      "discard reasons",
+      "predicted_transition",
+      "actual_transition",
+      "decision"
+    ],
+    "prefix_states": "Pinned Lean replay of each recorded accepted prefix; final replay asserted equal to recorded state_before",
+    "generated_fields": "source, alignment and transfer are deterministic test-only values; objective outcomes are unchanged"
+  }
+}

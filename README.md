@@ -127,6 +127,33 @@ views, Lean structure, raw generation attempts, card, action diagnostics,
 tactics, Lean outcomes, transition embeddings, surprise, stop decision,
 budgets, and elapsed time.
 
+Training and evaluation also finalize `readable_traces.md` in the run directory,
+after closing the JSONL records and writing `summary.json`. The Markdown groups
+proof paths by theorem, phase, and epoch. `THEOREM TARGET (fixed)` stays above
+the evolving Lean states; states start at zero and human analogy labels at one.
+Every tactic names its source state. Accepted tactics point to their verified
+successor, errors return to `[State n unchanged]`, repeated successors are shown
+as candidates followed by `[DISCARDED: repeated_state]`, and verified completion
+shows no remaining subgoals. Multiple open goals are numbered explicitly.
+
+Generated interventions nest `SOURCE ANALOGY` → `ALIGNMENT` →
+`TRANSFERRED PROOF REASONING` → `TACTIC` → `LEAN RESULT`; legacy cards are labeled
+separately. Ordinary search and conventional finishing attempts retain their
+own stage labels. Optional `proof_trace` metadata in `problems.jsonl` preserves
+the theorem, initial state, and ordinary expansions; a `proof_path_id` joins
+only the corresponding existing rollout rows, including repeated curriculum
+invocations of one theorem. Metrics still use the original episode fields.
+Replay prefixes without recorded intermediate states are identified explicitly.
+Older records without this metadata display an unavailable-trace notice.
+
+The renderer reads machine records without changing them, builds the complete
+Markdown first, then flushes and atomically replaces a temporary file in the
+same directory. A rendering or replacement failure warns and preserves any
+previous Markdown plus all JSONL and summary metrics. The five fixed snapshots
+in `tests/fixtures/generated_analogy_traces/` preserve October 15 Lean outcomes
+with deterministic generated-analogy prose; they test readability, not solver
+performance.
+
 The main `config.yaml` controls are `min_iterations` / `max_iterations`,
 `surprise_threshold` / `surprise_patience`, `min_surprise_improvement` /
 `improvement_patience`, per-iteration tactics, total model and Lean budgets,

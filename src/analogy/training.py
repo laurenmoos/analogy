@@ -8,6 +8,7 @@ import random
 import subprocess
 import time
 import uuid
+import warnings
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -90,6 +91,7 @@ class ProblemEpisode:
     ordinary_expansions: int
     verifier_calls: int
     failure: str | None = None
+    proof_trace: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +260,15 @@ class RescueRunWriter:
         with target.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(_jsonable(payload), sort_keys=True) + "\n")
             handle.flush()
+
+    def finalize_readable_traces(self) -> None:
+        """Finalize the optional human artifact after machine records and summary."""
+        from .trace_render import write_readable_traces
+
+        try:
+            write_readable_traces(self.path)
+        except Exception as error:
+            warnings.warn(f"Could not finalize readable traces: {error}", RuntimeWarning)
 
     def analogy_iteration_sink(
         self, *, epoch: int, phase: str, problem_id: str, rollout_id: str
@@ -633,6 +644,7 @@ def train_direct_rescue(
         tuple(all_metrics),
     )
     writer.write_json("summary.json", asdict(summary))
+    writer.finalize_readable_traces()
     return summary
 
 
@@ -769,6 +781,7 @@ def evaluate_direct_rescue(
         summaries.append(_summarize_condition(condition.name, episodes, conventional_solved))
     summary = EvaluationSummary(identifier, writer.path, tuple(summaries))
     writer.write_json("summary.json", asdict(summary))
+    writer.finalize_readable_traces()
     return summary
 
 
@@ -1027,6 +1040,12 @@ def _execute_problem(
             tuple(samples),
             len(result.ordinary_expansions),
             verifier_calls,
+            proof_trace={
+                "problem": asdict(problem),
+                "initial_state": asdict(start_state),
+                "ordinary_expansions": [asdict(item) for item in result.ordinary_expansions],
+                "termination": result.status.value,
+            },
         )
     except Exception as error:
         preserved = collector.rollouts
@@ -1328,9 +1347,12 @@ def _new_policy(config: AppConfig, generator: Any) -> DirectRescuePolicy:
 def _persist_episode(
     writer: RescueRunWriter, episode: ProblemEpisode, epoch: int, phase: str
 ) -> None:
+    proof_path_id = uuid.uuid4().hex
     for rollout in episode.rollouts:
         writer.append_jsonl(
-            "rollouts.jsonl", {"epoch": epoch, "phase": phase, **asdict(rollout)}
+            "rollouts.jsonl", {"epoch": epoch, "phase": phase,
+                               "problem_id": episode.problem_id,
+                               "proof_path_id": proof_path_id, **asdict(rollout)}
         )
         for generation_index, generation in enumerate(rollout.generations):
             writer.append_jsonl(
@@ -1364,6 +1386,8 @@ def _persist_episode(
             "ordinary_expansions": episode.ordinary_expansions,
             "verifier_calls": episode.verifier_calls,
             "failure": episode.failure,
+            **({"proof_trace": {**episode.proof_trace, "proof_path_id": proof_path_id}}
+               if episode.proof_trace is not None else {}),
         },
     )
 

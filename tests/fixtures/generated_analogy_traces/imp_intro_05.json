@@ -1,0 +1,262 @@
+{
+  "problem": {
+    "id": "imp_intro_05",
+    "title": "Riffin Snacks",
+    "binders": "(P Q R S T U : Prop) (p : P) (h1 : P → Q) (h2 : Q → R) (h3 : Q → T) (h4 : S → T) (h5 : T → U)",
+    "target": "U",
+    "source_path": "Game/Levels/ImpIntro/L05.lean",
+    "source_level": "ImpIntro/5",
+    "connective": "implication",
+    "difficulty": 5
+  },
+  "initial_state": {
+    "id": "imp_intro_05:prefix-0",
+    "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ U",
+    "context": [],
+    "language": "lean4"
+  },
+  "ordinary_expansions": [
+    {
+      "node": {
+        "state": {
+          "id": "imp_intro_05:prefix-0",
+          "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ U",
+          "context": [],
+          "language": "lean4"
+        }
+      },
+      "attempts": [
+        {
+          "candidate": {
+            "source": "apply h5",
+            "score": 1.0,
+            "origin": "conventional"
+          },
+          "status": "accepted",
+          "state": {
+            "id": "imp_intro_05:prefix-1",
+            "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ T",
+            "context": [
+              "apply h5"
+            ],
+            "language": "lean4"
+          },
+          "proof": null,
+          "diagnostics": []
+        }
+      ],
+      "discarded": []
+    },
+    {
+      "node": {
+        "state": {
+          "id": "imp_intro_05:prefix-1",
+          "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ T",
+          "context": [
+            "apply h5"
+          ],
+          "language": "lean4"
+        }
+      },
+      "attempts": [
+        {
+          "candidate": {
+            "source": "apply h3",
+            "score": 1.0,
+            "origin": "conventional"
+          },
+          "status": "accepted",
+          "state": {
+            "id": "imp_intro_05:prefix-2",
+            "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ Q",
+            "context": [
+              "apply h5",
+              "apply h3"
+            ],
+            "language": "lean4"
+          },
+          "proof": null,
+          "diagnostics": []
+        }
+      ],
+      "discarded": []
+    },
+    {
+      "node": {
+        "state": {
+          "id": "imp_intro_05:prefix-2",
+          "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ Q",
+          "context": [
+            "apply h5",
+            "apply h3"
+          ],
+          "language": "lean4"
+        }
+      },
+      "attempts": [
+        {
+          "candidate": {
+            "source": "apply h1",
+            "score": 1.0,
+            "origin": "conventional"
+          },
+          "status": "accepted",
+          "state": {
+            "context": [
+              "apply h5",
+              "apply h3",
+              "apply h1"
+            ],
+            "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ P",
+            "id": "imp_intro_05:0dee1d02ea1b139d",
+            "language": "lean4"
+          },
+          "proof": null,
+          "diagnostics": []
+        }
+      ],
+      "discarded": []
+    }
+  ],
+  "rollouts": [
+    {
+      "state_id": "imp_intro_05:0dee1d02ea1b139d",
+      "analogy_trace": {
+        "iterations": [
+          {
+            "iteration_index": 0,
+            "state_before": {
+              "context": [
+                "apply h5",
+                "apply h3",
+                "apply h1"
+              ],
+              "expression": "P Q R S T U : Prop\np : P\nh1 : P → Q\nh2 : Q → R\nh3 : Q → T\nh4 : S → T\nh5 : T → U\n⊢ P",
+              "id": "imp_intro_05:0dee1d02ea1b139d",
+              "language": "lean4"
+            },
+            "attempts": [
+              {
+                "discarded": null,
+                "prediction_distance": null,
+                "proposal": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact p"
+                  },
+                  "predicted_state": "P"
+                },
+                "result": {
+                  "candidate": {
+                    "origin": "analogical",
+                    "score": 0.25,
+                    "source": "exact p"
+                  },
+                  "diagnostics": [
+                    "unused variable `h2`\n\nNote: This linter can be disabled with `set_option linter.unusedVariables false`",
+                    "unused variable `h4`\n\nNote: This linter can be disabled with `set_option linter.unusedVariables false`"
+                  ],
+                  "proof": "theorem current_problem (P Q R S T U : Prop) (p : P) (h1 : P → Q) (h2 : Q → R) (h3 : Q → T) (h4 : S → T) (h5 : T → U) : U := by\n  apply h5\n  apply h3\n  apply h1\n  exact p\n",
+                  "state": null,
+                  "status": "complete"
+                }
+              }
+            ],
+            "predicted_transition": "P",
+            "actual_transition": null,
+            "decision": {
+              "continue_loop": false,
+              "reason": "complete",
+              "state": {
+                "low_improvement_streak": 0,
+                "low_surprise_streak": 0,
+                "values": []
+              }
+            },
+            "source": {
+              "analogy_id": "fixture-source-1",
+              "domain": "warehouse inventory",
+              "source_before": "A requested crate is already on the loading shelf",
+              "source_after": "The existing crate fulfills the dispatch request",
+              "source_roles": [
+                "requested crate",
+                "loading shelf"
+              ],
+              "relation_chain": [
+                "requested crate participates in the transition",
+                "loading shelf constrains the outcome"
+              ],
+              "transformation": {
+                "operation": "reuse",
+                "input_arity": "one",
+                "output_arity": "one",
+                "permutation": "none",
+                "information_flow": [
+                  "preserve"
+                ],
+                "focus_before": "initial arrangement",
+                "focus_after": "required arrangement",
+                "domain_neutral_summary": "Reuse an available matching resource"
+              },
+              "rationale": "Reuse an available matching resource"
+            },
+            "alignment": {
+              "alignment_id": "fixture-alignment-1",
+              "source_analogy_id": "fixture-source-1",
+              "mapping": [
+                [
+                  "requested crate",
+                  "active_subgoal"
+                ],
+                [
+                  "loading shelf",
+                  "hypothesis:p"
+                ]
+              ],
+              "invariant": "Reuse an available matching resource",
+              "source_operation": "Reuse an available matching resource",
+              "proof_operation": "The active obligation is already present as a local premise",
+              "limitation": "Only Lean can validate the transferred operation",
+              "confidence": 0.5
+            },
+            "transfer": {
+              "transfer_id": "fixture-transfer-1",
+              "alignment_id": "fixture-alignment-1",
+              "active_subgoal": "P",
+              "premises": [
+                "p"
+              ],
+              "reasoning_steps": [
+                "The active obligation is already present as a local premise"
+              ],
+              "predicted_next_subgoal": "no remaining subgoals",
+              "completion_expected": true
+            }
+          }
+        ],
+        "stop_reason": "complete"
+      }
+    }
+  ],
+  "termination": "complete",
+  "provenance": {
+    "artifact_paths": [
+      "/Users/laurenmoos/analogy/runs-fast/repair-ablation-20261015/rescue/2641bdf832c14fb6b278f94325735f7b/analogy_iterations.jsonl"
+    ],
+    "artifact_sha256": [
+      "5cf399b835c15e35d4efe5d631b131618683596082ca4105ce16f105212f44c3"
+    ],
+    "objective_fields": [
+      "problem target",
+      "state_before including accepted context",
+      "attempts including diagnostics and result successor",
+      "discard reasons",
+      "predicted_transition",
+      "actual_transition",
+      "decision"
+    ],
+    "prefix_states": "Pinned Lean replay of each recorded accepted prefix; final replay asserted equal to recorded state_before",
+    "generated_fields": "source, alignment and transfer are deterministic test-only values; objective outcomes are unchanged"
+  }
+}

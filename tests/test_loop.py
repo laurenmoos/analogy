@@ -265,6 +265,50 @@ def test_generic_rescue_may_verify_tactic_outside_ordinary_pool() -> None:
     assert len(result.rescue_rollouts) == 1
 
 
+def test_generic_rescue_can_start_when_ordinary_pool_is_empty() -> None:
+    generated = TacticCandidate("exact h", 1.0, CandidateOrigin.ANALOGICAL)
+    verifier = FakeVerifier(
+        {
+            ("start", "exact h"): TacticResult(
+                generated, TacticStatus.COMPLETE, proof="by exact h"
+            )
+        }
+    )
+    rescue = ProposingRolloutRescue("exact h")
+
+    result = make_search(
+        FakeTacticRanker({"start": ()}),
+        verifier,
+        curiosity_search=None,
+        rollout_rescue=rescue,
+    ).search(state("start"), state("goal"))
+
+    assert result.status is SearchStatus.COMPLETE
+    assert rescue.calls[0][1] == ()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    (
+        GenericRescueOutcome(successor=SearchNode(state("forged"), 1.0)),
+        GenericRescueOutcome(completed_proof="forged proof"),
+    ),
+)
+def test_generic_rescue_rejects_unverified_terminal_outcome(outcome) -> None:
+    ordinary = candidate("bad")
+    verifier = FakeVerifier(
+        {("start", "bad"): TacticResult(ordinary, TacticStatus.ERROR)}
+    )
+
+    with pytest.raises(ValueError, match="verified rollout"):
+        make_search(
+            FakeTacticRanker({"start": (ordinary,)}),
+            verifier,
+            curiosity_search=None,
+            rollout_rescue=FixedRolloutRescue(outcome),
+        ).search(state("start"), state("goal"))
+
+
 def test_disabled_generic_rescue_preserves_complete_search_result() -> None:
     exact = candidate("exact h", 0.9)
     verifier = FakeVerifier(

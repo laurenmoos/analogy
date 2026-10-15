@@ -9,8 +9,10 @@ from typing import Iterable, Protocol, Sequence
 
 from .daydream import CuriosityRunner, DaydreamRound
 from .rescue import (
+    GenericRescueOutcome,
     GenericRescueRunner,
     RescueRollout,
+    RescueTermination,
     TacticEvaluation,
 )
 from .records import (
@@ -211,7 +213,7 @@ class LocalRescueSearch:
             frontier.extend(ordinary.successors)
             decision = self._stuckness_policy.evaluate(ordinary)
             decisions.append(decision)
-            if not decision.is_stuck or not ordinary.candidate_pool:
+            if not decision.is_stuck:
                 continue
 
             if self._rollout_rescue is not None:
@@ -226,7 +228,10 @@ class LocalRescueSearch:
                     self._cancellation,
                 )
                 rescue_rollouts.extend(rescue.rollouts)
+                self._validate_generic_rescue_outcome(node, rescue)
             elif self._curiosity_search is not None:
+                if not ordinary.candidate_pool:
+                    continue
                 rescue = self._curiosity_search.search(
                     node.state,
                     goal,
@@ -248,6 +253,42 @@ class LocalRescueSearch:
                 frontier.push(rescue.successor)
 
         return SearchResult(SearchStatus.EXHAUSTED, None, tuple(expansions), tuple(decisions), tuple(rounds), tuple(rescue_rollouts))
+
+    @staticmethod
+    def _validate_generic_rescue_outcome(
+        node: SearchNode, outcome: GenericRescueOutcome
+    ) -> None:
+        rollouts = outcome.rollouts
+        if any(rollout.state_id != node.state.id for rollout in rollouts):
+            raise ValueError("generic rescue rollouts must belong to the rescued state")
+        if outcome.completed_proof is not None:
+            verified = any(
+                rollout.termination is RescueTermination.COMPLETE
+                and any(
+                    attempt.result.status is TacticStatus.COMPLETE
+                    and attempt.result.proof == outcome.completed_proof
+                    for attempt in rollout.attempts
+                )
+                for rollout in rollouts
+            )
+            if not verified:
+                raise ValueError("completed rescue outcome requires a verified rollout")
+        if outcome.successor is not None:
+            successor = outcome.successor
+            verified = any(
+                rollout.termination is RescueTermination.PROGRESS
+                and any(
+                    attempt.result.status is TacticStatus.ACCEPTED
+                    and attempt.discarded is None
+                    and attempt.result.state == successor.state
+                    and successor.parent_state_id == node.state.id
+                    and successor.tactic == attempt.proposal.candidate.source
+                    for attempt in rollout.attempts
+                )
+                for rollout in rollouts
+            )
+            if not verified:
+                raise ValueError("successor rescue outcome requires a verified rollout")
 
     def _candidate_pool(self, state: SymbolicState, goal: SymbolicState) -> tuple[TacticCandidate, ...]:
         seen: set[str] = set()

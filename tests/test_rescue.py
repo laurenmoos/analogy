@@ -474,6 +474,34 @@ def test_direct_runner_records_all_rejected_and_exact_budget_exhaustion() -> Non
     assert outcome.rollouts[0].termination is RescueTermination.BUDGET_EXHAUSTED
 
 
+def test_direct_runner_does_not_generate_after_verifier_budget_is_spent() -> None:
+    generator = SequenceDeltaGenerator(
+        (
+            '{"predicted_state":"stuck","tactics":["a"]}',
+            RuntimeError("second generation must not run"),
+        )
+    )
+    runner = direct_runner(
+        (), generator=generator, rollouts_per_state=2, max_rescue_verifier_calls=1
+    )
+    calls = []
+
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (),
+        (),
+        evaluator_for({"a": (TacticStatus.ERROR, None)}, calls),
+        NeverCancelledToken(),
+    )
+
+    assert calls == ["a"]
+    assert len(generator.calls) == 1
+    assert [item.termination for item in outcome.rollouts] == [
+        RescueTermination.REJECTED
+    ]
+
+
 def test_direct_runner_cancellation_preserves_prior_rollouts() -> None:
     runner = direct_runner(
         (

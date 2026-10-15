@@ -22,11 +22,13 @@ from analogy.training import (
     ProblemEpisode,
     RescueRunWriter,
     build_evaluation_conditions,
+    evaluate_direct_rescue,
     group_sibling_samples,
     load_training_checkpoint,
     save_training_checkpoint,
     split_problems,
     train_direct_rescue,
+    rollout_is_trainable,
 )
 
 
@@ -96,6 +98,24 @@ def test_training_samples_are_grouped_only_by_sibling_stuck_state() -> None:
     assert [[item.reward for item in group] for group in groups] == [[1.0, 3.0], [2.0]]
 
 
+@pytest.mark.parametrize(
+    ("termination", "expected"),
+    (
+        (RescueTermination.COMPLETE, True),
+        (RescueTermination.PROGRESS, True),
+        (RescueTermination.REJECTED, True),
+        (RescueTermination.EXHAUSTED, True),
+        (RescueTermination.BUDGET_EXHAUSTED, True),
+        (RescueTermination.CANCELLED, False),
+        (RescueTermination.GENERATION_ERROR, False),
+    ),
+)
+def test_trainable_rollouts_include_valid_zero_reward_outcomes(
+    termination, expected
+) -> None:
+    assert rollout_is_trainable(termination) is expected
+
+
 def test_run_writer_is_non_overwriting_and_flushes_jsonl(tmp_path: Path) -> None:
     writer = RescueRunWriter.create(tmp_path, "fixed-run", {"seed": 7})
     writer.append_jsonl("rollouts.jsonl", {"id": 1})
@@ -104,6 +124,32 @@ def test_run_writer_is_non_overwriting_and_flushes_jsonl(tmp_path: Path) -> None
     assert [json.loads(line)["id"] for line in (writer.path / "rollouts.jsonl").read_text().splitlines()] == [1, 2]
     with pytest.raises(FileExistsError):
         RescueRunWriter.create(tmp_path, "fixed-run", {"seed": 7})
+
+
+def test_evaluation_validates_checkpoint_before_creating_run_directory(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (ROOT / "config.yaml")
+        .read_text()
+        .replace("output_dir: runs", f"output_dir: {tmp_path / 'runs'}")
+        .replace(
+            "corpus: src/analogy/lean_gym/corpus/problems.json",
+            f"corpus: {ROOT / 'src/analogy/lean_gym/corpus/problems.json'}",
+        )
+        .replace("rl:\n  enabled: false", "rl:\n  enabled: true"),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    checkpoint = tmp_path / "bad.pt"
+    torch.save({"config_hash": "not-this-config"}, checkpoint)
+    generator = type("Generator", (), {"hidden_size": 2})()
+
+    with pytest.raises(ValueError, match="config hash"):
+        evaluate_direct_rescue(config, generator, object(), checkpoint)
+
+    assert not (config.run.output_dir / "rescue" / "evaluate-bad").exists()
 
 
 def test_checkpoint_round_trip_restores_rng_optimizer_and_policy(tmp_path: Path) -> None:

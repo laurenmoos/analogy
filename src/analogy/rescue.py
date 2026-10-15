@@ -460,6 +460,8 @@ class DirectRescueRunner:
                 return GenericRescueOutcome(
                     rollouts=tuple(rollouts), cancelled=True
                 )
+            if verifier_calls >= self._max_rescue_verifier_calls:
+                break
             action_seed = derive_rescue_seed(
                 self._base_seed, state.id, index, "action"
             )

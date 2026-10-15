@@ -137,6 +137,16 @@ def group_sibling_samples(
     return tuple(tuple(grouped[state_id]) for state_id in order)
 
 
+def rollout_is_trainable(termination: RescueTermination) -> bool:
+    """Return whether a rollout represents a valid sampled policy action."""
+    if not isinstance(termination, RescueTermination):
+        raise ValueError("termination must be a RescueTermination")
+    return termination not in {
+        RescueTermination.CANCELLED,
+        RescueTermination.GENERATION_ERROR,
+    }
+
+
 class RescueRunWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -351,9 +361,6 @@ def evaluate_direct_rescue(
         validation_connectives=config.rl.validation_connectives,
         test_connectives=config.rl.test_connectives,
     )
-    writer = RescueRunWriter.create(
-        config.run.output_dir / "rescue", identifier, _run_metadata(config, generator, problem_split)
-    )
     learned = _new_policy(config, generator)
     payload = _torch_load(checkpoint)
     if payload.get("config_hash") != _config_hash(config):
@@ -361,6 +368,11 @@ def evaluate_direct_rescue(
     if payload.get("split") != asdict(problem_split):
         raise ValueError("checkpoint split does not match evaluation split")
     learned.load_state_dict(payload["policy"])
+    writer = RescueRunWriter.create(
+        config.run.output_dir / "rescue",
+        identifier,
+        _run_metadata(config, generator, problem_split),
+    )
     summaries: list[ConditionSummary] = []
     for condition in build_evaluation_conditions(config):
         if condition.name == "conventional":
@@ -412,6 +424,7 @@ def _execute_problem(
     policy: torch.nn.Module | None,
 ) -> ProblemEpisode:
     del phase
+    collector = RolloutCollector()
     try:
         adapter = LeanGymAdapter(problem, verifier)
         ranker = QwenTacticRanker(
@@ -420,7 +433,6 @@ def _execute_problem(
             seed=config.run.seed,
             failed_tactics_for=adapter.failed_tactics_for,
         )
-        collector = RolloutCollector()
         rescue = None
         if policy is not None:
             rescue = DirectRescueRunner(
@@ -462,11 +474,7 @@ def _execute_problem(
             reward = verifier_reward(rollout, weights).total
             record = with_reward(rollout, reward)
             rewarded.append(record)
-            if rollout.termination in {
-                RescueTermination.COMPLETE,
-                RescueTermination.PROGRESS,
-                RescueTermination.REJECTED,
-            }:
+            if rollout_is_trainable(rollout.termination):
                 samples.append(TrainingSample(record, action, reward))
         verifier_calls = sum(
             len(expansion.attempts) for expansion in result.ordinary_expansions
@@ -480,8 +488,15 @@ def _execute_problem(
             verifier_calls,
         )
     except Exception as error:
+        preserved = collector.rollouts
         return ProblemEpisode(
-            problem.id, False, (), (), 0, 0, f"{type(error).__name__}: {error}"
+            problem.id,
+            False,
+            preserved,
+            (),
+            0,
+            sum(len(rollout.attempts) for rollout in preserved),
+            f"{type(error).__name__}: {error}",
         )
 
 
@@ -601,6 +616,7 @@ __all__ = [
     "evaluate_direct_rescue",
     "group_sibling_samples",
     "load_training_checkpoint",
+    "rollout_is_trainable",
     "save_training_checkpoint",
     "split_problems",
     "train_direct_rescue",

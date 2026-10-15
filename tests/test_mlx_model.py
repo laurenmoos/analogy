@@ -26,13 +26,20 @@ class FakeMX:
             value = value.detach().cpu().tolist()
         return torch.tensor(value, dtype=torch.float32)
 
+    float32 = torch.float32
+    linalg = SimpleNamespace(norm=torch.linalg.vector_norm)
+
     @staticmethod
     def concatenate(values, axis):
         return torch.cat(values, dim=axis)
 
     @staticmethod
-    def eval(value):
-        return value
+    def eval(*values):
+        return values[-1]
+
+    @staticmethod
+    def log_softmax(value, axis):
+        return torch.log_softmax(value, dim=axis)
 
     @staticmethod
     def synchronize():
@@ -60,6 +67,50 @@ class FakeModel:
         self.args = SimpleNamespace(hidden_size=2)
 
 
+class FixedFinalLayer:
+    def __init__(self, values=(3.0, 4.0)) -> None:
+        self.values = values
+
+    def __call__(self, hidden, mask=None, cache=None):
+        changed = hidden.clone()
+        changed[:, -1, :] = torch.tensor(self.values)
+        return changed
+
+
+class EmbeddingCore:
+    def __init__(self, values=(3.0, 4.0)) -> None:
+        self.layers = [IdentityLayer(), FixedFinalLayer(values)]
+        self.norm = IdentityLayer()
+
+    @staticmethod
+    def embed_tokens(inputs):
+        return torch.ones((inputs.shape[0], inputs.shape[1], 2))
+
+
+class EmbeddingModel:
+    def __init__(self, values=(3.0, 4.0)) -> None:
+        self.model = EmbeddingCore(values)
+        self.args = SimpleNamespace(hidden_size=2)
+
+
+class ScoringModel:
+    def __init__(self) -> None:
+        self.model = SimpleNamespace(layers=[IdentityLayer()])
+        self.args = SimpleNamespace(hidden_size=2)
+        self.calls = []
+
+    def __call__(self, inputs):
+        self.calls.append(inputs.detach().clone())
+        batch, width = inputs.shape
+        logits = torch.zeros((batch, width, 10))
+        logits[0, 1, 3] = 5.0
+        logits[1, 1, 4] = 1.0
+        logits[1, 2, 5] = 1.0
+        logits[1, 3, 6] = 1.0
+        logits[0, -1, 0] = 20.0
+        return logits
+
+
 class FakeTokenizer:
     def __init__(self) -> None:
         self.calls = []
@@ -68,11 +119,20 @@ class FakeTokenizer:
         self.calls.append((messages, kwargs))
         return "rendered prompt"
 
+    @staticmethod
+    def encode(text, add_special_tokens=False):
+        return {
+            "proof view": [7, 8],
+            "rendered prompt": [1, 2],
+            "weak": [3],
+            "strong": [4, 5, 6],
+        }[text]
+
 
 class Runtime:
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.mx = FakeMX()
-        self.model = FakeModel()
+        self.model = model or FakeModel()
         self.tokenizer = FakeTokenizer()
         self.generate_error = None
         self.generate_calls = []
@@ -112,6 +172,7 @@ class Runtime:
             generate_fn=self.generate,
             make_sampler=self.make_sampler,
             config=config,
+            create_attention_mask=lambda hidden, cache: "causal-mask",
         )
 
 
@@ -219,3 +280,43 @@ def test_delta_generation_rejects_invalid_action(delta, layer, message):
         generator.generate_with_delta(
             messages(), delta=delta, layer=layer, seed=0
         )
+
+
+def test_embed_text_returns_normalized_final_token_with_provenance():
+    generator = Runtime(EmbeddingModel()).generator()
+
+    embedding = generator.embed_text("proof view", layer=-1)
+
+    assert embedding.values == pytest.approx((0.6, 0.8))
+    assert embedding.model_revision == "mlx-community/Qwen3-8B-4bit"
+    assert embedding.layer == 1
+    assert embedding.token_index == 1
+    assert len(embedding.text_hash) == 64
+
+
+def test_embed_text_rejects_blank_input():
+    generator = Runtime(EmbeddingModel()).generator()
+
+    with pytest.raises(ModelConfigurationError, match="nonblank"):
+        generator.embed_text("  ", layer=0)
+
+
+@pytest.mark.parametrize("values", ((0.0, 0.0), (float("nan"), 1.0)))
+def test_embed_text_rejects_zero_or_nonfinite_vectors(values):
+    generator = Runtime(EmbeddingModel(values)).generator()
+
+    with pytest.raises(ModelConfigurationError, match="finite and nonzero"):
+        generator.embed_text("proof view", layer=-1)
+
+
+def test_score_completions_is_one_forward_and_ignores_prompt_and_padding():
+    model = ScoringModel()
+    generator = Runtime(model).generator()
+
+    scores = generator.score_completions(messages(), ("weak", "strong"))
+
+    assert len(model.calls) == 1
+    assert model.calls[0].tolist() == [[1, 2, 3, 0, 0], [1, 2, 4, 5, 6]]
+    assert [item.text for item in scores] == ["weak", "strong"]
+    assert scores[0].mean_log_likelihood > scores[1].mean_log_likelihood
+    assert [item.token_count for item in scores] == [1, 3]

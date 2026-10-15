@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import time
 from typing import Any, Callable
 
 from .config import ModelConfig
-from .model import ModelConfigurationError
-from .records import Message
+from .model import CompletionScore, ModelConfigurationError
+from .records import Embedding, Message
 
 
 class _DeltaLayer:
@@ -39,6 +40,7 @@ class MLXQwenGenerator:
         mx: Any,
         generate_fn: Callable[..., str],
         make_sampler: Callable[..., Any],
+        create_attention_mask: Callable[[Any, Any], Any],
         config: ModelConfig,
     ) -> None:
         self.model = model
@@ -46,6 +48,7 @@ class MLXQwenGenerator:
         self.mx = mx
         self._generate_fn = generate_fn
         self._make_sampler = make_sampler
+        self._create_attention_mask = create_attention_mask
         self.max_new_tokens = config.max_new_tokens
         self.timeout_seconds = config.timeout_seconds
         self.do_sample = config.do_sample
@@ -63,6 +66,7 @@ class MLXQwenGenerator:
         try:
             import mlx.core as mx
             from mlx_lm import generate, load
+            from mlx_lm.models.base import create_attention_mask
             from mlx_lm.sample_utils import make_sampler
         except ImportError as error:
             raise ModelConfigurationError(
@@ -75,6 +79,7 @@ class MLXQwenGenerator:
             mx=mx,
             generate_fn=generate,
             make_sampler=make_sampler,
+            create_attention_mask=create_attention_mask,
             config=config,
         )
 
@@ -99,6 +104,130 @@ class MLXQwenGenerator:
             return self._run_generation(messages, seed=seed)
         finally:
             layers[resolved] = original
+
+    def embed_text(self, text: str, *, layer: int) -> Embedding:
+        if not isinstance(text, str) or not text.strip():
+            raise ModelConfigurationError("embedding text must be nonblank")
+        token_ids = tuple(
+            int(item)
+            for item in self.tokenizer.encode(text, add_special_tokens=False)
+        )
+        if not token_ids:
+            raise ModelConfigurationError("embedding tokenization must be nonempty")
+        layers = self._layers()
+        resolved = _resolve_layer(layer, len(layers))
+        inputs = self.mx.array([token_ids])
+        core = self.model.model
+        embed_tokens = getattr(core, "embed_tokens", None)
+        if embed_tokens is None:
+            raise ModelConfigurationError("MLX model does not expose token embeddings")
+        hidden = embed_tokens(inputs)
+        mask = self._create_attention_mask(hidden, None)
+        for decoder_layer in layers[: resolved + 1]:
+            hidden = decoder_layer(hidden, mask, None)
+        vector = hidden[0, -1]
+        vector = (
+            vector.astype(self.mx.float32)
+            if hasattr(vector, "astype")
+            else vector.float()
+        )
+        norm = self.mx.linalg.norm(vector)
+        self.mx.eval(vector, norm)
+        norm_value = float(norm.item())
+        if not math.isfinite(norm_value) or norm_value <= 0.0:
+            raise ModelConfigurationError("embedding must be finite and nonzero")
+        normalized = vector / norm
+        self.mx.eval(normalized)
+        values = tuple(float(item) for item in normalized.tolist())
+        if not values or not all(math.isfinite(item) for item in values):
+            raise ModelConfigurationError("embedding must be finite and nonzero")
+        return Embedding(
+            f"{self.model_revision}:layer={resolved}:final-nonpadding",
+            values,
+            model_revision=self.model_revision,
+            layer=resolved,
+            token_index=len(token_ids) - 1,
+            text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    def score_completions(
+        self,
+        messages: tuple[Message, ...],
+        completions: tuple[str, ...],
+    ) -> tuple[CompletionScore, ...]:
+        if not completions or any(not item.strip() for item in completions):
+            raise ModelConfigurationError("scoring completions must be nonempty")
+        prompt = self.tokenizer.apply_chat_template(
+            [{"role": item.role, "content": item.content} for item in messages],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        prompt_ids = tuple(
+            int(item)
+            for item in self.tokenizer.encode(prompt, add_special_tokens=False)
+        )
+        if not prompt_ids:
+            raise ModelConfigurationError("scoring prompt tokenization must be nonempty")
+        encoded: list[tuple[str, tuple[int, ...]]] = []
+        for completion in completions:
+            completion_ids = tuple(
+                int(item)
+                for item in self.tokenizer.encode(
+                    completion, add_special_tokens=False
+                )
+            )
+            if not completion_ids:
+                raise ModelConfigurationError(
+                    "completion tokenization must be nonempty"
+                )
+            encoded.append((completion, completion_ids))
+        pad_id = getattr(self.tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(self.tokenizer, "eos_token_id", None)
+        if pad_id is None:
+            pad_id = 0
+        width = max(len(prompt_ids) + len(ids) for _, ids in encoded)
+        rows = []
+        for _, completion_ids in encoded:
+            sequence = prompt_ids + completion_ids
+            rows.append(sequence + (int(pad_id),) * (width - len(sequence)))
+        started = time.monotonic()
+        logits = self.model(self.mx.array(rows))
+        logits = (
+            logits.astype(self.mx.float32)
+            if hasattr(logits, "astype")
+            else logits.float()
+        )
+        log_probabilities = self.mx.log_softmax(logits, axis=-1)
+        self.mx.eval(log_probabilities)
+        synchronize = getattr(self.mx, "synchronize", None)
+        if synchronize is not None:
+            synchronize()
+        if time.monotonic() - started >= self.timeout_seconds:
+            raise TimeoutError(
+                f"completion scoring exceeded {self.timeout_seconds:g} seconds"
+            )
+        scores = []
+        for row, (completion, completion_ids) in enumerate(encoded):
+            token_scores = tuple(
+                float(
+                    log_probabilities[
+                        row, len(prompt_ids) + offset - 1, token_id
+                    ].item()
+                )
+                for offset, token_id in enumerate(completion_ids)
+            )
+            total = sum(token_scores)
+            scores.append(
+                CompletionScore(
+                    completion,
+                    total,
+                    total / len(token_scores),
+                    len(token_scores),
+                )
+            )
+        return tuple(scores)
 
     def _run_generation(
         self, messages: tuple[Message, ...], *, seed: int

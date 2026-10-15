@@ -120,7 +120,9 @@ class AnalogyGenerator:
         self.base_seed = base_seed
         self.max_repair_calls = max_repair_calls
 
-    def generate(self, context, action, *, iteration_index: int) -> GeneratedHop:
+    def generate(
+        self, context, action, *, iteration_index: int, max_attempts: int | None = None
+    ) -> GeneratedHop:
         parent_id = context.stream.hops[-1].hop_id if context.stream.hops else None
         return _generate_strict(
             generator=self.generator,
@@ -132,6 +134,7 @@ class AnalogyGenerator:
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10,
             max_repair_calls=self.max_repair_calls,
+            max_attempts=max_attempts,
             parser=lambda raw: parse_analogy_hop(
                 raw, hop_id=f"hop-{iteration_index}", parent_id=parent_id
             ),
@@ -153,7 +156,9 @@ class AnalogyTacticGenerator:
         self.base_seed = base_seed
         self.max_repair_calls = max_repair_calls
 
-    def generate(self, context, action, *, iteration_index: int) -> GeneratedTacticPlan:
+    def generate(
+        self, context, action, *, iteration_index: int, max_attempts: int | None = None
+    ) -> GeneratedTacticPlan:
         return _generate_strict(
             generator=self.generator,
             messages=(
@@ -164,18 +169,28 @@ class AnalogyTacticGenerator:
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10 + 5,
             max_repair_calls=self.max_repair_calls,
+            max_attempts=max_attempts,
             parser=lambda raw: parse_analogy_tactic_plan(raw, context.analogy.stream),
             result_type=GeneratedTacticPlan,
         )
 
 
 def _generate_strict(
-    *, generator, messages, action, hidden_layer, seed, max_repair_calls,
+    *, generator, messages, action, hidden_layer, seed, max_repair_calls, max_attempts,
     parser, result_type,
 ):
+    if max_attempts is not None and (
+        isinstance(max_attempts, bool)
+        or not isinstance(max_attempts, int)
+        or max_attempts <= 0
+    ):
+        raise ValueError("max_attempts must be a positive integer or None")
     attempts: list[GenerationAttempt] = []
     active_messages = messages
-    for repair_index in range(max_repair_calls + 1):
+    attempt_limit = max_repair_calls + 1
+    if max_attempts is not None:
+        attempt_limit = min(attempt_limit, max_attempts)
+    for repair_index in range(attempt_limit):
         active_seed = seed + repair_index
         try:
             raw = generator.generate_with_delta(

@@ -6,11 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 
 from .records import Message
-from .records import CandidateOrigin, TacticCandidate, TacticStatus
-from .rescue import (
-    GenericRescueOutcome, PolicyActionRecord, ProofRescueContext, RescueAttempt,
-    RescueProposal, RescueRollout, RescueTermination, TacticEvaluation,
-)
+from .rescue import ProofRescueContext, RescueRollout
 
 
 class AnalogyOutputError(ValueError):
@@ -61,6 +57,10 @@ class AnalogyStream:
             expected = None if index == 0 else self.hops[index - 1].hop_id
             if hop.parent_id != expected:
                 raise ValueError("analogy hops must form one parent-linked chain")
+
+    def append(self, hop: AnalogyHop) -> AnalogyStream:
+        """Return a new stream with one correctly linked refinement hop."""
+        return AnalogyStream(self.hops + (hop,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,110 +184,12 @@ def discounted_stream_samples(
 
 
 class AnalogyStreamRunner:
-    """Bounded corpus-free analogy generation followed by Lean-only decoding."""
+    """Compatibility constructor for the closed-loop implementation."""
 
-    def __init__(
-        self, *, encoder: object, policy: object, generator: object,
-        max_hops: int, tactics_per_rollout: int, max_model_calls: int,
-        max_rescue_verifier_calls: int, base_seed: int, hidden_layer: int,
-    ) -> None:
-        if min(max_hops, tactics_per_rollout, max_model_calls, max_rescue_verifier_calls) <= 0:
-            raise ValueError("stream budgets must be positive")
-        self.encoder, self.policy, self.generator = encoder, policy, generator
-        self.max_hops, self.tactics_per_rollout = max_hops, tactics_per_rollout
-        self.max_model_calls = max_model_calls
-        self.max_rescue_verifier_calls = max_rescue_verifier_calls
-        self.base_seed, self.hidden_layer = base_seed, hidden_layer
-        self.live_actions: tuple[object, ...] = ()
+    def __new__(cls, *args, **kwargs):
+        from .analogy_loop import AnalogyLoopRunner
 
-    def search(self, state, goal, tactic_pool, ordinary_attempts, evaluator, cancellation):
-        del tactic_pool
-        context = ProofRescueContext(
-            state, goal, state.context,
-            tuple(item.candidate.source for item in ordinary_attempts),
-        )
-        representation = self.encoder.encode(context)
-        hops: list[AnalogyHop] = []
-        actions: list[object] = []
-        calls = 0
-        for index in range(self.max_hops):
-            if cancellation.is_cancelled():
-                return GenericRescueOutcome(cancelled=True)
-            action = self._sample(representation, index)
-            actions.append(action)
-            raw = self.generator.generate_with_delta(
-                render_analogy_hop_prompt(context, AnalogyStream(tuple(hops))),
-                delta=action.delta.detach(), layer=self.hidden_layer,
-                seed=self.base_seed + index,
-            )
-            calls += 1
-            try:
-                hop = parse_analogy_hop(
-                    raw, hop_id=f"hop-{index}",
-                    parent_id=hops[-1].hop_id if hops else None,
-                )
-            except AnalogyOutputError:
-                return self._failed(state, hops, actions, RescueTermination.INVALID_OUTPUT)
-            hops.append(hop)
-            if hop.stop and index >= 0:
-                break
-        stream = AnalogyStream(tuple(hops))
-        if calls >= self.max_model_calls:
-            return self._failed(state, hops, actions, RescueTermination.BUDGET_EXHAUSTED)
-        raw_plan = self.generator.generate_with_delta(
-            render_analogy_tactic_prompt(context, stream),
-            delta=actions[-1].delta.detach(), layer=self.hidden_layer,
-            seed=self.base_seed + self.max_hops,
-        )
-        try:
-            plan = parse_analogy_tactic_plan(raw_plan, stream)
-        except AnalogyOutputError:
-            return self._failed(state, hops, actions, RescueTermination.INVALID_OUTPUT)
-        proposals = tuple(
-            RescueProposal(TacticCandidate(t, 1.0 / min(len(plan.tactics), self.tactics_per_rollout), CandidateOrigin.ANALOGICAL), plan.predicted_state)
-            for t in plan.tactics[:self.tactics_per_rollout]
-        )
-        attempts = []
-        termination = RescueTermination.EXHAUSTED
-        completed = None
-        successor = None
-        for proposal in proposals[:self.max_rescue_verifier_calls]:
-            evaluation = evaluator(proposal.candidate)
-            attempts.append(RescueAttempt(proposal, evaluation.result, evaluation.discarded))
-            if evaluation.completed_proof is not None:
-                termination, completed = RescueTermination.COMPLETE, evaluation.completed_proof
-                break
-            if evaluation.successor is not None:
-                termination, successor = RescueTermination.PROGRESS, evaluation.successor
-                break
-        if attempts and all(item.result.status is TacticStatus.ERROR for item in attempts):
-            termination = RescueTermination.REJECTED
-        rollout = self._rollout(state, stream, actions, proposals, tuple(attempts), termination)
-        self.live_actions = tuple(actions)
-        return GenericRescueOutcome(completed, successor, (rollout,))
-
-    def _sample(self, representation, index):
-        import torch
-        parameter = next(self.policy.parameters())
-        generator = torch.Generator(device=parameter.device).manual_seed(self.base_seed + index)
-        return self.policy.sample(representation, generator)
-
-    def _rollout(self, state, stream, actions, proposals, attempts, termination):
-        action = actions[0]
-        record = PolicyActionRecord(
-            self.base_seed, float(action.delta.detach().norm()),
-            float(action.log_probability.detach()), float(action.entropy.detach()),
-        )
-        return RescueRollout(
-            f"{state.id}:analogy", state.id, record, tuple(proposals), tuple(attempts),
-            termination, analogy_stream=stream,
-        )
-
-    def _failed(self, state, hops, actions, termination):
-        stream = AnalogyStream(tuple(hops))
-        self.live_actions = tuple(actions)
-        rollout = self._rollout(state, stream, actions, (), (), termination)
-        return GenericRescueOutcome(rollouts=(rollout,))
+        return AnalogyLoopRunner(*args, **kwargs)
 
 
 class StreamRescuePolicy:

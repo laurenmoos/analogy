@@ -469,6 +469,7 @@ def test_cancelled_generic_rescue_preserves_completed_rollout_trace() -> None:
     rejected = TacticCandidate("also bad", 1.0, CandidateOrigin.ANALOGICAL)
     failed = TacticResult(rejected, TacticStatus.ERROR)
     proposal = RescueProposal(rejected, "still stuck")
+    analogy_trace = {"stop_reason": "cancelled", "iterations": ()}
     rollout = RescueRollout(
         "r",
         "start",
@@ -476,6 +477,7 @@ def test_cancelled_generic_rescue_preserves_completed_rollout_trace() -> None:
         (proposal,),
         (RescueAttempt(proposal, failed),),
         RescueTermination.REJECTED,
+        analogy_trace=analogy_trace,
     )
     rescue = FixedRolloutRescue(
         GenericRescueOutcome(rollouts=(rollout,), cancelled=True)
@@ -493,6 +495,7 @@ def test_cancelled_generic_rescue_preserves_completed_rollout_trace() -> None:
 
     assert result.status is SearchStatus.CANCELLED
     assert result.rescue_rollouts == (rollout,)
+    assert result.rescue_rollouts[0].analogy_trace is analogy_trace
 
 
 def test_ordinary_novel_successor_returns_to_frontier_without_curiosity() -> None:

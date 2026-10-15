@@ -35,6 +35,7 @@ def iteration_row(
     index: int = 0,
     status: str = "accepted",
     actual: str | None = "h : P ↔ Q\n⊢ Q → P",
+    discarded_reason: str | None = None,
 ) -> dict[str, object]:
     state = None if status == "error" else {
         "id": "next",
@@ -93,7 +94,11 @@ def iteration_row(
                     "proof": "by exact h.mp" if status == "complete" else None,
                     "diagnostics": ["type mismatch"] if status == "error" else [],
                 },
-                "discarded": None,
+                "discarded": (
+                    None
+                    if discarded_reason is None
+                    else {"reason": discarded_reason, "result": {"status": status}}
+                ),
                 "prediction_distance": None,
             }
         ],
@@ -143,13 +148,19 @@ def test_load_normalizes_accepted_rejected_and_completed_analogy_rows(
         iteration_row(index=0, status="accepted"),
         iteration_row(index=1, status="error", actual=None),
         iteration_row(index=2, status="complete", actual=None),
-        iteration_row(index=3, phase="conventional", status="error", actual=None),
+        iteration_row(
+            index=3,
+            status="accepted",
+            actual=None,
+            discarded_reason="repeated_state",
+        ),
+        iteration_row(index=4, phase="conventional", status="error", actual=None),
     ]
     source, corpus = write_source(tmp_path / "source", rows)
 
     loaded = load_audit_iterations(source, corpus)
 
-    assert [item.iteration_index for item in loaded] == [0, 1, 2]
+    assert [item.iteration_index for item in loaded] == [0, 1, 2, 3]
     assert all(isinstance(item, AuditIteration) for item in loaded)
     assert loaded[0].target == "(P ↔ Q) → (P → Q)"
     assert loaded[0].actual_transition == "h : P ↔ Q\n⊢ Q → P"
@@ -158,6 +169,7 @@ def test_load_normalizes_accepted_rejected_and_completed_analogy_rows(
     assert loaded[1].lean_diagnostics == ("type mismatch",)
     assert loaded[2].lean_outcomes == ("complete",)
     assert loaded[2].actual_transition is None
+    assert loaded[3].discard_reasons == ("repeated_state",)
     assert json.loads(loaded[0].analogy_card) == rows[0]["hop"]
 
 

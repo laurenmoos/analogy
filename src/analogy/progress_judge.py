@@ -39,6 +39,7 @@ class AuditIteration:
     tactics: tuple[str, ...]
     lean_outcomes: tuple[str, ...]
     lean_diagnostics: tuple[str, ...]
+    discard_reasons: tuple[str, ...]
     actual_transition: str | None
     surprise: float | None
     stop_decision: str
@@ -62,7 +63,12 @@ class AuditIteration:
             or self.iteration_index < 0
         ):
             raise ValueError("iteration_index must be a non-negative integer")
-        for name in ("tactics", "lean_outcomes", "lean_diagnostics"):
+        for name in (
+            "tactics",
+            "lean_outcomes",
+            "lean_diagnostics",
+            "discard_reasons",
+        ):
             values = getattr(self, name)
             if isinstance(values, (str, bytes)):
                 raise ValueError(f"{name} must be a sequence of strings")
@@ -213,6 +219,16 @@ def _judge_messages(iteration: AuditIteration) -> tuple[Message, ...]:
     prompt = (
         "Diagnose this completed analogy-loop iteration after the experiment. "
         "You are an observer only: do not assign reward or claim proof correctness.\n"
+        "Interpret Lean status as objective evidence: `complete` is objective proof completion; "
+        "`accepted` means a valid tactic with the actual successor as the new remaining goal after the tactic; "
+        "`error` means rejection. Diagnostics attached to complete or accepted results may be linter warnings "
+        "or proof-state echoes, not failures. The state before is a residual goal after an accepted tactic prefix, "
+        "so judge the current iteration rather than demanding it solve the original target alone.\n"
+        "Apply these stage constraints: when any Lean status is `complete`, stage must be `working` and "
+        "progress_score must be 1. When there is an accepted successor, stage must be `working` or "
+        "`proof_progress`, never `lean_execution` or `tactic_translation`; changing the goal is the normal "
+        "meaning of tactic application. Use `proof_progress` only when the valid successor stalls, repeats, "
+        "or moves away from completion.\n"
         f"Theorem target:\n{iteration.target}\n"
         f"State before:\n{iteration.state_before}\n"
         f"Analogy card:\n{iteration.analogy_card}\n"
@@ -220,6 +236,7 @@ def _judge_messages(iteration: AuditIteration) -> tuple[Message, ...]:
         f"Proposed tactics: {json.dumps(iteration.tactics)}\n"
         f"Lean outcomes: {json.dumps(iteration.lean_outcomes)}\n"
         f"Lean diagnostics: {json.dumps(iteration.lean_diagnostics)}\n"
+        f"Search discard reasons: {json.dumps(iteration.discard_reasons)}\n"
         f"Actual successor:\n{successor}\n"
         f"Embedding surprise: {iteration.surprise}\n"
         f"Loop decision: {iteration.stop_decision}\n"

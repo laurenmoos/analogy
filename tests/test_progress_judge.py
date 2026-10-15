@@ -36,7 +36,11 @@ def payload(**overrides: object) -> str:
     return json.dumps(value)
 
 
-def iteration(*, actual: str | None = "h : P ↔ Q\n⊢ P → Q") -> AuditIteration:
+def iteration(
+    *,
+    actual: str | None = "h : P ↔ Q\n⊢ P → Q",
+    discard_reasons: tuple[str, ...] = (),
+) -> AuditIteration:
     return AuditIteration(
         run_id="run-7",
         problem_id="iff_intro_03",
@@ -50,6 +54,7 @@ def iteration(*, actual: str | None = "h : P ↔ Q\n⊢ P → Q") -> AuditIterat
         tactics=("exact h.mp", "apply h.mp"),
         lean_outcomes=("error: type mismatch", "accepted"),
         lean_diagnostics=("application type mismatch",),
+        discard_reasons=discard_reasons,
         actual_transition=actual,
         surprise=0.2,
         stop_decision="continue",
@@ -86,6 +91,11 @@ def test_prompt_contains_process_evidence_for_accepted_and_rejected_iterations()
         "application type mismatch",
         "accepted",
         "Actual successor",
+        "`complete` is objective proof completion",
+        "new remaining goal after the tactic",
+        "status is `complete`, stage must be `working`",
+        "accepted successor",
+        "stage must be `working` or `proof_progress`",
     ):
         assert fragment in prompt
     assert "reference proof" not in prompt.lower()
@@ -93,12 +103,13 @@ def test_prompt_contains_process_evidence_for_accepted_and_rejected_iterations()
     rejected_generator = SequenceGenerator((payload(stage="lean_execution"),))
     rejected = LLMProcessJudge(
         rejected_generator, base_seed=11, max_repair_calls=1
-    ).evaluate(iteration(actual=None))
+    ).evaluate(iteration(actual=None, discard_reasons=("repeated_state",)))
 
     assert rejected.judgment is not None
     rejected_prompt = rejected_generator.calls[0][0][-1].content
     assert "No accepted successor" in rejected_prompt
     assert "application type mismatch" in rejected_prompt
+    assert "repeated_state" in rejected_prompt
 
 
 def test_malformed_output_is_repaired_once_with_deterministic_operation_seeds() -> None:

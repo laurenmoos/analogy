@@ -238,6 +238,7 @@ def _normalize_iteration(
         raise ValueError("attempts must be an array")
     outcomes: list[str] = []
     diagnostics: list[str] = []
+    discard_reasons: list[str] = []
     for attempt_index, attempt_value in enumerate(attempts):
         attempt = _object(attempt_value, f"attempts[{attempt_index}]")
         result = _object(attempt["result"], f"attempts[{attempt_index}].result")
@@ -250,6 +251,17 @@ def _normalize_iteration(
                 f"attempts[{attempt_index}].diagnostics must be a string array"
             )
         diagnostics.extend(raw_diagnostics)
+        discarded = attempt.get("discarded")
+        if discarded is not None:
+            discarded_object = _object(
+                discarded, f"attempts[{attempt_index}].discarded"
+            )
+            discard_reasons.append(
+                _text(
+                    discarded_object["reason"],
+                    f"attempts[{attempt_index}].discarded.reason",
+                )
+            )
     tactics = tactic_plan["tactics"]
     if not isinstance(tactics, list) or not all(isinstance(item, str) for item in tactics):
         raise ValueError("tactic_plan.tactics must be a string array")
@@ -278,6 +290,7 @@ def _normalize_iteration(
         tactics=tuple(tactics),
         lean_outcomes=tuple(outcomes),
         lean_diagnostics=tuple(diagnostics),
+        discard_reasons=tuple(discard_reasons),
         actual_transition=actual,
         surprise=surprise,
         stop_decision=_text(reason, "decision.reason"),

@@ -176,7 +176,7 @@ def test_evaluate_rescue_dispatches_checkpoint(
     assert "evaluate_rescue:" in capsys.readouterr().out
 
 
-def test_rescue_stages_reject_analogy_enabled(tmp_path: Path, capsys) -> None:
+def test_rescue_stages_accept_analogy_enabled(tmp_path: Path, monkeypatch, capsys) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         (ROOT / "config.yaml")
@@ -187,5 +187,15 @@ def test_rescue_stages_reject_analogy_enabled(tmp_path: Path, capsys) -> None:
         encoding="utf-8",
     )
 
-    assert cli.main(["--config", str(config_path)]) == 2
-    assert "analogy.enabled=false" in capsys.readouterr().err
+    monkeypatch.setattr(cli.QwenGenerator, "from_config", lambda config: object())
+    monkeypatch.setattr(cli, "LeanSubprocessVerifier", lambda root: object())
+    monkeypatch.setattr(
+        cli,
+        "train_direct_rescue",
+        lambda config, generator, verifier: SimpleNamespace(
+            epochs_completed=1, best_checkpoint=tmp_path / "best.pt"
+        ),
+    )
+
+    assert cli.main(["--config", str(config_path)]) == 0
+    assert "train_rescue: 1 epochs" in capsys.readouterr().out

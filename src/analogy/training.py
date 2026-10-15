@@ -8,13 +8,22 @@ import random
 import subprocess
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from collections import Counter
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 import torch
 
+from .analogy_generation import (
+    AnalogyGenerator,
+    AnalogyTacticGenerator,
+    GeneratedHop,
+    render_tactic_prompt,
+)
+from .analogy_loop import AnalogyLoopRunner
+from .analogy_stream import AnalogyHop, AnalogyTacticPlan
 from .config import AppConfig
 from .lean_gym.corpus import load_problems
 from .lean_gym.models import Problem
@@ -28,9 +37,23 @@ from .loop import (
     WhitespaceTacticCanonicalizer,
 )
 from .model import QwenProofEncoder, QwenTacticRanker
-from .records import SearchStatus, SymbolicState
-from .replay import JsonlStuckStateStore, StuckStateRecord, proof_state_fingerprint
-from .rescue import DirectRescueRunner, RescueRollout, RescueTermination, RolloutCollector
+from .proof_views import build_proof_views, compare_transitions
+from .records import Message, SearchStatus, SymbolicState
+from .replay import (
+    JsonlStuckStateStore,
+    StuckStateRecord,
+    proof_state_fingerprint,
+    reconstruct_stuck_state,
+)
+from .rescue import (
+    DirectRescueRunner,
+    GenerationAttempt,
+    GenerationStatus,
+    ProofRepresentation,
+    RescueRollout,
+    RescueTermination,
+    RolloutCollector,
+)
 from .rl import (
     DirectRescuePolicy,
     PolicyAction,
@@ -38,10 +61,12 @@ from .rl import (
     RewardWeights,
     TrainingMetrics,
     TrainingSample,
+    discounted_iteration_samples,
     reinforce_step,
     verifier_reward,
     with_reward,
 )
+from .surprise import SurpriseConfig, SurpriseController
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +104,30 @@ class EvaluationCondition:
     max_expansions: int
     max_rescue_verifier_calls: int
     base_seed: int
+    max_model_calls: int
+    max_lean_calls: int
+    tactics_per_iteration: int
+    wall_clock_seconds: float
+
+    @property
+    def budget(self) -> tuple[int, int, int, int, int, int, int, float]:
+        """Immutable budget identity used by matched-condition checks."""
+        return (
+            self.ordinary_width,
+            self.max_expansions,
+            self.max_rescue_verifier_calls,
+            self.max_model_calls,
+            self.max_lean_calls,
+            self.tactics_per_iteration,
+            self.base_seed,
+            self.wall_clock_seconds,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnalogyAssignment:
+    source: StuckStateRecord
+    target: StuckStateRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +138,17 @@ class ConditionSummary:
     verifier_calls: int
     ordinary_expansions: int
     rescue_rollouts: int
+    solved_ids: tuple[str, ...] = ()
+    newly_solved_ids: tuple[str, ...] = ()
+    regressed_ids: tuple[str, ...] = ()
+    completion_per_lean_call: float = 0.0
+    valid_generation_rate: float = 0.0
+    repaired_generation_rate: float = 0.0
+    mean_iteration_count: float = 0.0
+    stop_reason_histogram: tuple[tuple[str, int], ...] = ()
+    mean_surprise_trajectory: tuple[float, ...] = ()
+    saturation_rate: float = 0.0
+    failures: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +212,7 @@ def rollout_is_trainable(termination: RescueTermination) -> bool:
 class RescueRunWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._analogy_iteration_keys: set[tuple[int, str, str, str, int]] = set()
 
     @classmethod
     def create(
@@ -181,21 +242,43 @@ class RescueRunWriter:
 
     def analogy_iteration_sink(
         self, *, epoch: int, phase: str, problem_id: str, rollout_id: str
-    ) -> Callable[[Any], None]:
+    ) -> Callable[[str, Any], None]:
         """Return a sink that flushes each completed loop iteration immediately."""
-        def append(iteration: Any) -> None:
-            self.append_jsonl(
-                "analogy_iterations.jsonl",
-                {
-                    "epoch": epoch,
-                    "phase": phase,
-                    "problem_id": problem_id,
-                    "rollout_id": rollout_id,
-                    **asdict(iteration),
-                },
+        def append(actual_rollout_id: str, iteration: Any) -> None:
+            del actual_rollout_id
+            self.append_analogy_iteration(
+                iteration,
+                epoch=epoch,
+                phase=phase,
+                problem_id=problem_id,
+                rollout_id=rollout_id,
             )
 
         return append
+
+    def append_analogy_iteration(
+        self,
+        iteration: Any,
+        *,
+        epoch: int,
+        phase: str,
+        problem_id: str,
+        rollout_id: str,
+    ) -> None:
+        key = (epoch, phase, problem_id, rollout_id, iteration.iteration_index)
+        if key in self._analogy_iteration_keys:
+            return
+        self._analogy_iteration_keys.add(key)
+        self.append_jsonl(
+            "analogy_iterations.jsonl",
+            {
+                "epoch": epoch,
+                "phase": phase,
+                "problem_id": problem_id,
+                "rollout_id": rollout_id,
+                **asdict(iteration),
+            },
+        )
 
     def write_json(self, name: str, payload: Any) -> None:
         target = self.path / name
@@ -263,18 +346,56 @@ def load_training_checkpoint(
 
 
 def build_evaluation_conditions(config: AppConfig) -> tuple[EvaluationCondition, ...]:
+    lean_budget = min(
+        config.rl.max_rescue_verifier_calls, config.analogy.max_lean_calls
+    )
     common = {
         "ordinary_width": config.search.top_k,
         "max_expansions": config.search.max_steps,
-        "max_rescue_verifier_calls": config.rl.max_rescue_verifier_calls,
+        "max_rescue_verifier_calls": lean_budget,
         "base_seed": config.run.seed,
+        "max_model_calls": config.analogy.max_model_calls,
+        "max_lean_calls": lean_budget,
+        "tactics_per_iteration": config.analogy.tactics_per_iteration,
+        "wall_clock_seconds": (
+            config.model.timeout_seconds * config.analogy.max_model_calls
+        ),
     }
-    return (
+    conditions = (
         EvaluationCondition("conventional", "none", **common),
-        EvaluationCondition("unperturbed", "zero", **common),
-        EvaluationCondition("random", "random", **common),
-        EvaluationCondition("learned", "learned", **common),
+        EvaluationCondition("learned_direct", "learned_direct", **common),
     )
+    if not config.analogy.enabled:
+        return conditions
+    return conditions + (
+        EvaluationCondition("analogy_loop", "analogy_loop", **common),
+        EvaluationCondition("shuffled_analogy", "shuffled_analogy", **common),
+    )
+
+
+def shuffle_analogy_assignments(
+    records: Sequence[StuckStateRecord], *, seed: int
+) -> tuple[AnalogyAssignment, ...]:
+    """Derange sources within each split/connective compatibility bucket."""
+    normalized = tuple(records)
+    if not all(isinstance(item, StuckStateRecord) for item in normalized):
+        raise ValueError("records must contain only StuckStateRecord values")
+    groups: dict[tuple[str, str], list[StuckStateRecord]] = {}
+    for item in normalized:
+        groups.setdefault((item.split, item.problem.connective), []).append(item)
+    assignments: list[AnalogyAssignment] = []
+    rng = random.Random(seed)
+    for key in sorted(groups):
+        targets = sorted(groups[key], key=lambda item: item.problem.id)
+        if len(targets) < 2:
+            raise ValueError("shuffled analogy requires two compatible records")
+        shift = 1 + rng.randrange(len(targets) - 1)
+        sources = targets[shift:] + targets[:shift]
+        assignments.extend(
+            AnalogyAssignment(source, target)
+            for source, target in zip(sources, targets)
+        )
+    return tuple(assignments)
 
 
 ProblemRunner = Callable[[Problem, str, torch.nn.Module], ProblemEpisode]
@@ -290,16 +411,48 @@ def train_direct_rescue(
     optimizer: torch.optim.Optimizer | None = None,
     problem_runner: ProblemRunner | None = None,
     run_id: str | None = None,
+    replay_records: Sequence[StuckStateRecord] | None = None,
 ) -> TrainingSummary:
-    if not config.rl.enabled or config.analogy.enabled:
-        raise ValueError("rescue training requires rl.enabled=true and analogy.enabled=false")
-    selected = tuple(problems) if problems is not None else load_problems(config.benchmark.corpus)
+    if not config.rl.enabled:
+        raise ValueError("rescue training requires rl.enabled=true")
+    if replay_records is not None and problem_runner is not None:
+        raise ValueError("replay training cannot use a custom problem runner")
+    normalized_replay = tuple(replay_records or ())
+    if normalized_replay and not all(
+        isinstance(item, StuckStateRecord) for item in normalized_replay
+    ):
+        raise ValueError("replay_records must contain StuckStateRecord values")
+    if problems is not None:
+        selected = tuple(problems)
+    elif normalized_replay:
+        selected = tuple(
+            {item.problem.id: item.problem for item in normalized_replay}.values()
+        )
+    else:
+        selected = load_problems(config.benchmark.corpus)
     problem_split = split_problems(
         selected,
         train_connectives=config.rl.train_connectives,
         validation_connectives=config.rl.validation_connectives,
         test_connectives=config.rl.test_connectives,
     )
+    if normalized_replay:
+        expected_split = {
+            item.id: split_name
+            for split_name, items in (
+                ("train", problem_split.train),
+                ("validation", problem_split.validation),
+                ("test", problem_split.test),
+            )
+            for item in items
+        }
+        for record in normalized_replay:
+            configured = expected_split[record.problem.id]
+            if record.split != configured:
+                raise ValueError(
+                    f"replay record {record.problem.id!r} is labeled "
+                    f"{record.split!r} but belongs to configured {configured} split"
+                )
     random.seed(config.run.seed)
     torch.manual_seed(config.run.seed)
     active_policy = policy or _new_policy(config, generator)
@@ -322,19 +475,55 @@ def train_direct_rescue(
     writer = RescueRunWriter.create(
         config.run.output_dir / "rescue", identifier, _run_metadata(config, generator, problem_split)
     )
-    run_problem = problem_runner or _default_problem_runner(
-        config,
-        generator,
-        verifier,
-        JsonlStuckStateStore(writer.path / "stuck_states.jsonl"),
-    )
+    stuck_store = JsonlStuckStateStore(writer.path / "stuck_states.jsonl")
     all_metrics: list[TrainingMetrics] = []
     best_score = -1
     best_checkpoint: Path | None = None
 
+    def execute(item: Problem | StuckStateRecord, phase: str, epoch: int):
+        if isinstance(item, StuckStateRecord):
+            reconstructed = reconstruct_stuck_state(item, verifier)
+            return _execute_problem(
+                config,
+                generator,
+                verifier,
+                item.problem,
+                phase,
+                active_policy,
+                initial_state=reconstructed,
+                iteration_sink=_live_iteration_sink(
+                    writer, epoch=epoch, phase=phase, problem_id=item.problem.id
+                ),
+            )
+        if problem_runner is not None:
+            return problem_runner(item, phase, active_policy)
+        return _execute_problem(
+            config,
+            generator,
+            verifier,
+            item,
+            phase,
+            active_policy,
+            stuck_store,
+            iteration_sink=_live_iteration_sink(
+                writer, epoch=epoch, phase=phase, problem_id=item.id
+            ),
+        )
+
+    train_items: Sequence[Problem | StuckStateRecord] = (
+        tuple(item for item in normalized_replay if item.split == "train")
+        if normalized_replay else problem_split.train
+    )
+    validation_items: Sequence[Problem | StuckStateRecord] = (
+        tuple(item for item in normalized_replay if item.split == "validation")
+        if normalized_replay else problem_split.validation
+    )
+    if normalized_replay and (not train_items or not validation_items):
+        raise ValueError("replay training requires train and validation records")
+
     for epoch in range(start_epoch + 1, config.rl.epochs + 1):
-        for item in problem_split.train:
-            episode = run_problem(item, "train", active_policy)
+        for item in train_items:
+            episode = execute(item, "train", epoch)
             _persist_episode(writer, episode, epoch, "train")
             for siblings in group_sibling_samples(episode.training_samples):
                 metrics = reinforce_step(
@@ -352,8 +541,7 @@ def train_direct_rescue(
                 )
 
         validation_episodes = tuple(
-            run_problem(item, "validation", active_policy)
-            for item in problem_split.validation
+            execute(item, "validation", epoch) for item in validation_items
         )
         for episode in validation_episodes:
             _persist_episode(writer, episode, epoch, "validation")
@@ -402,8 +590,8 @@ def evaluate_direct_rescue(
     verifier: Any,
     checkpoint: Path,
 ) -> EvaluationSummary:
-    if not config.rl.enabled or config.analogy.enabled:
-        raise ValueError("rescue evaluation requires rl.enabled=true and analogy.enabled=false")
+    if not config.rl.enabled:
+        raise ValueError("rescue evaluation requires rl.enabled=true")
     checkpoint = Path(checkpoint)
     identifier = f"evaluate-{checkpoint.stem}"
     problems = load_problems(config.benchmark.corpus)
@@ -428,37 +616,160 @@ def evaluate_direct_rescue(
         _run_metadata(config, generator, problem_split),
     )
     summaries: list[ConditionSummary] = []
+    conventional_solved: set[str] = set()
+    analogy_hops_by_problem: dict[str, tuple[AnalogyHop, ...]] = {}
+    analogy_records_by_problem: dict[str, StuckStateRecord] = {}
     for condition in build_evaluation_conditions(config):
         if condition.name == "conventional":
             condition_policy = None
-        elif condition.name == "unperturbed":
-            condition_policy = _ZeroPolicy(generator.hidden_size)
-        elif condition.name == "random":
-            torch.manual_seed(config.run.seed)
-            condition_policy = _new_policy(config, generator)
         else:
             condition_policy = learned
+        shuffled_sources: dict[str, tuple[AnalogyHop, ...]] = {}
+        if condition.name == "shuffled_analogy" and config.analogy.enabled:
+            assignments = shuffle_analogy_assignments(
+                tuple(analogy_records_by_problem.values()), seed=config.run.seed
+            )
+            assigned = {
+                item.target.problem.id: item.source.problem.id
+                for item in assignments
+            }
+            sources_by_connective: dict[str, list[str]] = {}
+            for identifier, record in analogy_records_by_problem.items():
+                sources_by_connective.setdefault(
+                    record.problem.connective, []
+                ).append(identifier)
+            for item in problem_split.test:
+                source_id = assigned.get(item.id)
+                if source_id is None:
+                    eligible = sorted(
+                        identifier
+                        for identifier in sources_by_connective.get(item.connective, ())
+                        if identifier != item.id
+                    )
+                    if not eligible:
+                        raise ValueError(
+                            "shuffled analogy evaluation lacks a compatible test trace"
+                        )
+                    source_id = eligible[0]
+                shuffled_sources[item.id] = analogy_hops_by_problem[source_id]
         episodes = tuple(
             _execute_problem(
-                config, generator, verifier, item, condition.name, condition_policy
+                config,
+                generator,
+                verifier,
+                item,
+                condition.name,
+                condition_policy,
+                analogy_hops=shuffled_sources.get(item.id),
+                iteration_sink=_live_iteration_sink(
+                    writer, epoch=0, phase=condition.name, problem_id=item.id
+                ),
             )
             for item in problem_split.test
         )
+        if condition.name == "analogy_loop":
+            for episode in episodes:
+                hops = tuple(
+                    iteration.hop
+                    for rollout in episode.rollouts
+                    if rollout.analogy_trace is not None
+                    for iteration in rollout.analogy_trace.iterations
+                )
+                if hops:
+                    analogy_hops_by_problem[episode.problem_id] = hops
+                    first = next(
+                        iteration
+                        for rollout in episode.rollouts
+                        if rollout.analogy_trace is not None
+                        for iteration in rollout.analogy_trace.iterations
+                    )
+                    source_problem = next(
+                        item for item in problem_split.test
+                        if item.id == episode.problem_id
+                    )
+                    analogy_records_by_problem[episode.problem_id] = StuckStateRecord(
+                        source_problem,
+                        "test",
+                        first.state_before.context,
+                        first.state_before.expression,
+                        proof_state_fingerprint(first.state_before.expression),
+                        (),
+                        tuple(
+                            attempt.proposal.candidate.source
+                            for attempt in first.attempts
+                        ),
+                    )
         for episode in episodes:
             _persist_episode(writer, episode, 0, condition.name)
-        summaries.append(
-            ConditionSummary(
-                condition.name,
-                len(episodes),
-                sum(item.completed for item in episodes),
-                sum(item.verifier_calls for item in episodes),
-                sum(item.ordinary_expansions for item in episodes),
-                sum(len(item.rollouts) for item in episodes),
-            )
-        )
+        solved_ids = {item.problem_id for item in episodes if item.completed}
+        if condition.name == "conventional":
+            conventional_solved = solved_ids
+        summaries.append(_summarize_condition(condition.name, episodes, conventional_solved))
     summary = EvaluationSummary(identifier, writer.path, tuple(summaries))
     writer.write_json("summary.json", asdict(summary))
     return summary
+
+
+def _summarize_condition(
+    name: str,
+    episodes: Sequence[ProblemEpisode],
+    conventional_solved: set[str],
+) -> ConditionSummary:
+    rollouts = tuple(rollout for episode in episodes for rollout in episode.rollouts)
+    traces = tuple(
+        rollout.analogy_trace for rollout in rollouts if rollout.analogy_trace is not None
+    )
+    generations = tuple(
+        generation for rollout in rollouts for generation in rollout.generations
+    )
+    solved_ids = tuple(sorted(item.problem_id for item in episodes if item.completed))
+    solved_set = set(solved_ids)
+    verifier_calls = sum(item.verifier_calls for item in episodes)
+    stop_counts = Counter(trace.stop_reason.value for trace in traces)
+    max_length = max((len(trace.iterations) for trace in traces), default=0)
+    mean_surprise_values: list[float] = []
+    for index in range(max_length):
+        values = [
+            trace.iterations[index].surprise
+            for trace in traces
+            if len(trace.iterations) > index
+            and trace.iterations[index].surprise is not None
+        ]
+        if values:
+            mean_surprise_values.append(sum(values) / len(values))
+    valid = sum(item.status.value == "valid" for item in generations)
+    repaired = sum(item.status.value == "valid" and item.repair for item in generations)
+    generation_count = len(generations)
+    saturated = sum(
+        trace.stop_reason.value in {"surprise_converged", "improvement_stalled"}
+        for trace in traces
+    )
+    return ConditionSummary(
+        name=name,
+        attempted=len(episodes),
+        solved=len(solved_ids),
+        verifier_calls=verifier_calls,
+        ordinary_expansions=sum(item.ordinary_expansions for item in episodes),
+        rescue_rollouts=len(rollouts),
+        solved_ids=solved_ids,
+        newly_solved_ids=tuple(sorted(solved_set - conventional_solved)),
+        regressed_ids=tuple(sorted(conventional_solved - solved_set)),
+        completion_per_lean_call=(len(solved_ids) / verifier_calls if verifier_calls else 0.0),
+        valid_generation_rate=(valid / generation_count if generation_count else 0.0),
+        repaired_generation_rate=(repaired / generation_count if generation_count else 0.0),
+        mean_iteration_count=(
+            sum(len(trace.iterations) for trace in traces) / len(traces)
+            if traces else 0.0
+        ),
+        stop_reason_histogram=tuple(sorted(stop_counts.items())),
+        mean_surprise_trajectory=tuple(mean_surprise_values),
+        saturation_rate=(saturated / len(traces) if traces else 0.0),
+        failures=tuple(
+            (item.problem_id, item.failure)
+            for item in episodes
+            if item.failure is not None
+        ),
+    )
 
 
 def _default_problem_runner(
@@ -480,10 +791,21 @@ def _execute_problem(
     phase: str,
     policy: torch.nn.Module | None,
     stuck_store: JsonlStuckStateStore | None = None,
+    analogy_hops: tuple[AnalogyHop, ...] | None = None,
+    initial_state: SymbolicState | None = None,
+    iteration_sink: Callable[[str, Any], None] | None = None,
 ) -> ProblemEpisode:
     collector = RolloutCollector()
+    cancellation = _DeadlineCancellation(
+        config.model.timeout_seconds * config.analogy.max_model_calls
+    )
     try:
         adapter = LeanGymAdapter(problem, verifier)
+        start_state = (
+            adapter.initial_state()
+            if initial_state is None
+            else adapter.register_replay_state(initial_state)
+        )
         ranker = QwenTacticRanker(
             generator,
             top_k=config.search.top_k,
@@ -492,17 +814,46 @@ def _execute_problem(
         )
         rescue = None
         if policy is not None:
-            rescue = DirectRescueRunner(
-                encoder=QwenProofEncoder(generator, layer=config.model.hidden_layer),
-                policy=policy,
-                generator=generator,
-                rollouts_per_state=config.rl.rollouts_per_state,
-                tactics_per_rollout=config.rl.tactics_per_rollout,
-                max_rescue_verifier_calls=config.rl.max_rescue_verifier_calls,
-                base_seed=config.run.seed,
-                hidden_layer=config.model.hidden_layer,
-                collector=collector,
-            )
+            use_analogy = config.analogy.enabled and phase not in {
+                "learned_direct", "conventional"
+            }
+            if use_analogy:
+                rescue = _new_analogy_runner(
+                    config,
+                    generator,
+                    adapter,
+                    policy,
+                    analogy_hops=analogy_hops,
+                    iteration_sink=iteration_sink,
+                )
+            else:
+                rescue = DirectRescueRunner(
+                    encoder=QwenProofEncoder(generator, layer=config.model.hidden_layer),
+                    policy=policy,
+                    generator=generator,
+                    rollouts_per_state=config.rl.rollouts_per_state,
+                    tactics_per_rollout=(
+                        config.analogy.tactics_per_iteration
+                        if config.analogy.enabled
+                        else config.rl.tactics_per_rollout
+                    ),
+                    max_rescue_verifier_calls=(
+                        min(
+                            config.rl.max_rescue_verifier_calls,
+                            config.analogy.max_lean_calls,
+                        )
+                        if config.analogy.enabled
+                        else config.rl.max_rescue_verifier_calls
+                    ),
+                    base_seed=config.run.seed,
+                    hidden_layer=config.model.hidden_layer,
+                    collector=collector,
+                    max_model_calls=(
+                        config.analogy.max_model_calls
+                        if config.analogy.enabled
+                        else None
+                    ),
+                )
         search = LocalRescueSearch(
             tactic_ranker=ranker,
             verifier=adapter,
@@ -512,7 +863,7 @@ def _execute_problem(
             state_fingerprinter=StateIdFingerprinter(),
             tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
             progress_policy=AcceptNovelState(),
-            cancellation=NeverCancelled(),
+            cancellation=cancellation,
             ordinary_width=config.search.top_k,
             max_expansions=config.search.max_steps,
             stuck_state_sink=(
@@ -522,7 +873,7 @@ def _execute_problem(
             ),
         )
         result = search.search(
-            adapter.initial_state(),
+            start_state,
             SymbolicState(f"{problem.id}:goal", problem.target, "lean4"),
         )
         weights = RewardWeights(
@@ -535,15 +886,39 @@ def _execute_problem(
         )
         rewarded: list[RescueRollout] = []
         samples: list[TrainingSample] = []
-        for rollout, action in collector.drain():
-            reward = verifier_reward(rollout, weights).total
-            record = with_reward(rollout, reward)
-            rewarded.append(record)
-            if rollout_is_trainable(rollout.termination):
-                samples.append(TrainingSample(record, action, reward))
+        if isinstance(rescue, AnalogyLoopRunner):
+            for rollout, actions in rescue.drain_trajectories():
+                reward = verifier_reward(rollout, weights).total
+                record = with_reward(rollout, reward)
+                rewarded.append(record)
+                if actions and rollout_is_trainable(rollout.termination):
+                    samples.extend(
+                        discounted_iteration_samples(
+                            rollout.analogy_trace,
+                            actions,
+                            record,
+                            verified_reward=reward,
+                            discount=config.analogy.discount,
+                            iteration_cost=config.analogy.iteration_cost,
+                        )
+                    )
+        else:
+            for rollout, action in collector.drain():
+                reward = verifier_reward(rollout, weights).total
+                record = with_reward(rollout, reward)
+                rewarded.append(record)
+                if rollout_is_trainable(rollout.termination):
+                    samples.append(TrainingSample(record, action, reward))
         verifier_calls = sum(
             len(expansion.attempts) for expansion in result.ordinary_expansions
-        ) + sum(len(rollout.attempts) for rollout in rewarded)
+        ) + sum(
+            (
+                rollout.analogy_trace.lean_calls
+                if rollout.analogy_trace is not None
+                else len(rollout.attempts)
+            )
+            for rollout in rewarded
+        )
         return ProblemEpisode(
             problem.id,
             result.status is SearchStatus.COMPLETE,
@@ -565,6 +940,141 @@ def _execute_problem(
         )
 
 
+def _new_analogy_runner(
+    config: AppConfig,
+    generator: Any,
+    adapter: LeanGymAdapter,
+    policy: torch.nn.Module,
+    *,
+    analogy_hops: tuple[AnalogyHop, ...] | None = None,
+    iteration_sink: Callable[[str, Any], None] | None = None,
+) -> AnalogyLoopRunner:
+    """Compose the readable loop from the same frozen model and policy head."""
+    representations: dict[int, ProofRepresentation] = {}
+
+    def build_views(context):
+        views = build_proof_views(
+            context,
+            adapter.proof_structure_for(context.state),
+            generator,
+            config.model.hidden_layer,
+        )
+        representations[id(views)] = ProofRepresentation(
+            context,
+            views.language.provenance.text_hash,
+            views.structure.provenance.text_hash,
+            views.language.embedding,
+            views.structure.embedding,
+        )
+        return views
+
+    def sample_action(views, iteration_index):
+        parameter = next(policy.parameters())
+        torch_generator = torch.Generator(device=parameter.device).manual_seed(
+            config.run.seed + iteration_index
+        )
+        return policy.sample(representations[id(views)], torch_generator)
+
+    if analogy_hops is None:
+        analogy_generator = AnalogyGenerator(
+            generator,
+            hidden_layer=config.model.hidden_layer,
+            base_seed=config.run.seed,
+            max_repair_calls=1,
+        )
+    else:
+        analogy_generator = _ShuffledAnalogyGenerator(
+            analogy_hops, base_seed=config.run.seed
+        )
+    tactic_generator = AnalogyTacticGenerator(
+        generator,
+        hidden_layer=config.model.hidden_layer,
+        base_seed=config.run.seed,
+        max_repair_calls=1,
+    )
+
+    def rerank_tactics(context, plan):
+        scores = generator.score_completions(
+            (
+                Message(
+                    "system",
+                    "Rank candidate Lean tactics for the current proof state.",
+                ),
+                Message("user", render_tactic_prompt(context)),
+            ),
+            plan.tactics,
+        )
+        ranked = tuple(
+            score.text
+            for score in sorted(
+                scores, key=lambda item: item.mean_log_likelihood, reverse=True
+            )
+        )
+        return AnalogyTacticPlan(
+            plan.predicted_state, ranked, plan.motivating_hop_id
+        )
+    controller = SurpriseController(
+        SurpriseConfig(
+            config.analogy.min_iterations,
+            config.analogy.max_iterations,
+            config.analogy.surprise_threshold,
+            config.analogy.surprise_patience,
+            config.analogy.min_surprise_improvement,
+            config.analogy.improvement_patience,
+        )
+    )
+    return AnalogyLoopRunner(
+        proof_view_builder=build_views,
+        action_sampler=sample_action,
+        analogy_generator=analogy_generator,
+        tactic_generator=tactic_generator,
+        transition_comparator=lambda before, predicted, actual: compare_transitions(
+            before,
+            predicted,
+            actual,
+            generator,
+            config.analogy.transition_embedding_layer,
+        ),
+        controller=controller,
+        tactics_per_iteration=config.analogy.tactics_per_iteration,
+        max_model_calls=config.analogy.max_model_calls,
+        max_lean_calls=min(
+            config.analogy.max_lean_calls,
+            config.rl.max_rescue_verifier_calls,
+        ),
+        proof_view_lean_cost=1,
+        tactic_reranker=(rerank_tactics if config.analogy.rerank_tactics else None),
+        iteration_sink=iteration_sink,
+    )
+
+
+class _ShuffledAnalogyGenerator:
+    """Replay cards from another test theorem while preserving target decoding."""
+
+    def __init__(self, hops: tuple[AnalogyHop, ...], *, base_seed: int) -> None:
+        if not hops:
+            raise ValueError("shuffled analogy source must contain at least one hop")
+        self.hops = hops
+        self.base_seed = base_seed
+
+    def generate(
+        self, context, action, *, iteration_index: int, max_attempts: int | None = None
+    ) -> GeneratedHop:
+        del action, max_attempts
+        source = self.hops[iteration_index % len(self.hops)]
+        parent_id = context.stream.hops[-1].hop_id if context.stream.hops else None
+        hop = replace(source, hop_id=f"hop-{iteration_index}", parent_id=parent_id)
+        raw = json.dumps(asdict(source), sort_keys=True)
+        return GeneratedHop(
+            hop,
+            (
+                GenerationAttempt(
+                    self.base_seed + iteration_index * 10,
+                    raw,
+                    GenerationStatus.VALID,
+                ),
+            ),
+        )
 class _TrainingStuckStateSink:
     def __init__(
         self, problem: Problem, split: str, store: JsonlStuckStateStore
@@ -586,6 +1096,14 @@ class _TrainingStuckStateSink:
                 tuple(item.candidate.source for item in outcome.attempts),
             )
         )
+
+
+class _DeadlineCancellation:
+    def __init__(self, seconds: float) -> None:
+        self.deadline = time.monotonic() + float(seconds)
+
+    def is_cancelled(self) -> bool:
+        return time.monotonic() >= self.deadline
 
 
 class _ZeroPolicy(torch.nn.Module):
@@ -631,15 +1149,12 @@ def _persist_episode(
         trace = rollout.analogy_trace
         if trace is not None:
             for iteration in trace.iterations:
-                writer.append_jsonl(
-                    "analogy_iterations.jsonl",
-                    {
-                        "epoch": epoch,
-                        "phase": phase,
-                        "problem_id": episode.problem_id,
-                        "rollout_id": rollout.rollout_id,
-                        **asdict(iteration),
-                    },
+                writer.append_analogy_iteration(
+                    iteration,
+                    epoch=epoch,
+                    phase=phase,
+                    problem_id=episode.problem_id,
+                    rollout_id=rollout.rollout_id,
                 )
     writer.append_jsonl(
         "problems.jsonl",
@@ -653,6 +1168,21 @@ def _persist_episode(
             "failure": episode.failure,
         },
     )
+
+
+def _live_iteration_sink(
+    writer: RescueRunWriter, *, epoch: int, phase: str, problem_id: str
+) -> Callable[[str, Any], None]:
+    def append(rollout_id: str, iteration: Any) -> None:
+        writer.append_analogy_iteration(
+            iteration,
+            epoch=epoch,
+            phase=phase,
+            problem_id=problem_id,
+            rollout_id=rollout_id,
+        )
+
+    return append
 
 
 def _run_metadata(
@@ -718,6 +1248,7 @@ def _jsonable(value: Any) -> Any:
 
 
 __all__ = [
+    "AnalogyAssignment",
     "ConditionSummary",
     "EvaluationCondition",
     "EvaluationSummary",
@@ -731,6 +1262,7 @@ __all__ = [
     "load_training_checkpoint",
     "rollout_is_trainable",
     "save_training_checkpoint",
+    "shuffle_analogy_assignments",
     "split_problems",
     "train_direct_rescue",
 ]

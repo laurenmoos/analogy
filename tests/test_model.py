@@ -64,6 +64,43 @@ def test_embed_text_records_frozen_embedding_provenance() -> None:
     assert len(embedding.text_hash) == 64
 
 
+def test_score_completions_returns_mean_token_log_likelihood() -> None:
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return "prompt"
+
+        def encode(self, text, add_special_tokens=False):
+            return {"prompt": [1, 2], "weak": [3], "strong": [4]}[text]
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(()))
+            self.config = SimpleNamespace(hidden_size=2)
+
+        def forward(self, input_ids, attention_mask, use_cache=False):
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 6))
+            logits[:, 1, 4] = 3.0
+            return SimpleNamespace(logits=logits)
+
+    generator = QwenGenerator(
+        tokenizer=Tokenizer(),
+        model=Model(),
+        torch_module=torch,
+        device="cpu",
+        max_new_tokens=8,
+        timeout_seconds=5.0,
+    )
+
+    scores = generator.score_completions(
+        (Message("user", "rank"),), ("weak", "strong")
+    )
+
+    assert [item.text for item in scores] == ["weak", "strong"]
+    assert scores[1].mean_log_likelihood > scores[0].mean_log_likelihood
+    assert all(item.token_count == 1 for item in scores)
+
+
 def test_parse_tactic_sequence_accepts_nonempty_json_string_array() -> None:
     assert parse_tactic_sequence('["intro h", "exact h"]') == (
         "intro h",

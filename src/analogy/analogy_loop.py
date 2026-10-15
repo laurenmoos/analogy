@@ -63,10 +63,10 @@ class LoopResources:
             self.max_lean_calls,
         )
 
-    def use_lean(self) -> LoopResources:
+    def use_lean(self, count: int = 1) -> LoopResources:
         return LoopResources(
             self.model_calls,
-            self.lean_calls + 1,
+            self.lean_calls + count,
             self.max_model_calls,
             self.max_lean_calls,
         )
@@ -102,6 +102,8 @@ class AnalogyIteration:
 class AnalogyLoopTrace:
     iterations: tuple[AnalogyIteration, ...]
     stop_reason: StopReason
+    model_calls: int = 0
+    lean_calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +129,11 @@ class AnalogyLoopRunner:
         tactics_per_iteration: int,
         max_model_calls: int,
         max_lean_calls: int,
-        iteration_sink: Callable[[AnalogyIteration], None] | None = None,
+        iteration_sink: Callable[[str, AnalogyIteration], None] | None = None,
+        tactic_reranker: Callable[
+            [TacticGenerationContext, AnalogyTacticPlan], AnalogyTacticPlan
+        ] | None = None,
+        proof_view_lean_cost: int = 0,
     ) -> None:
         for value, name in (
             (tactics_per_iteration, "tactics_per_iteration"),
@@ -146,7 +152,22 @@ class AnalogyLoopRunner:
         self.max_model_calls = max_model_calls
         self.max_lean_calls = max_lean_calls
         self.iteration_sink = iteration_sink
+        self.tactic_reranker = tactic_reranker
+        if (
+            isinstance(proof_view_lean_cost, bool)
+            or not isinstance(proof_view_lean_cost, int)
+            or proof_view_lean_cost < 0
+        ):
+            raise ValueError("proof_view_lean_cost must be a non-negative integer")
+        self.proof_view_lean_cost = proof_view_lean_cost
         self.live_actions: tuple[Any, ...] = ()
+        self._live_trajectories: list[tuple[RescueRollout, tuple[Any, ...]]] = []
+
+    def drain_trajectories(self) -> tuple[tuple[RescueRollout, tuple[Any, ...]], ...]:
+        """Return completed rollout/action pairs while retaining gradient graphs."""
+        drained = tuple(self._live_trajectories)
+        self._live_trajectories.clear()
+        return drained
 
     def search(
         self, state, goal, tactic_pool, ordinary_attempts, evaluator, cancellation
@@ -168,6 +189,7 @@ class AnalogyLoopRunner:
         resources = LoopResources(0, 0, self.max_model_calls, self.max_lean_calls)
         controller_state = SurpriseState()
         stop_reason = StopReason.NO_SUCCESSOR
+        rollout_id = f"{state.id}:analogy-loop"
 
         for iteration_index in range(self.controller.config.max_iterations):
             # Boundary 1: do not begin a new card after cancellation or exhaustion.
@@ -175,11 +197,15 @@ class AnalogyLoopRunner:
             if preflight is not None:
                 stop_reason = preflight
                 break
+            if resources.remaining_lean_calls <= self.proof_view_lean_cost:
+                stop_reason = StopReason.LEAN_BUDGET
+                break
 
             iteration_started = time.monotonic()
 
             context = ProofRescueContext(current, goal, accepted_tactics, failed_tactics)
             views = self.proof_view_builder(context)
+            resources = resources.use_lean(self.proof_view_lean_cost)
             action = self.action_sampler(views, iteration_index)
             actions.append(action)
             analogy_context = AnalogyGenerationContext(
@@ -226,12 +252,22 @@ class AnalogyLoopRunner:
             generations.extend(generated_plan.attempts)
             resources = resources.use_model(len(generated_plan.attempts))
 
+            tactic_plan = generated_plan.plan
+            if self.tactic_reranker is not None:
+                stop_reason = self._boundary_reason(
+                    resources, cancellation, model=True
+                )
+                if stop_reason is not None:
+                    break
+                tactic_plan = self.tactic_reranker(tactic_context, tactic_plan)
+                resources = resources.use_model(1)
+
             # Boundary 3: Lean is only called while both control and budget permit.
             stop_reason = self._boundary_reason(resources, cancellation, lean=True)
             if stop_reason is not None:
                 break
             verified, resources = self._verify_plan(
-                generated_plan.plan, evaluator, cancellation, resources
+                current, tactic_plan, evaluator, cancellation, resources
             )
             proposals.extend(verified.proposals)
             attempts.extend(verified.attempts)
@@ -249,7 +285,7 @@ class AnalogyLoopRunner:
             ):
                 comparison = self.transition_comparator(
                     current.expression,
-                    generated_plan.plan.predicted_state,
+                    tactic_plan.predicted_state,
                     verified.successor.state.expression,
                 )
 
@@ -273,11 +309,11 @@ class AnalogyLoopRunner:
                 generated_hop.hop,
                 generated_hop.attempts,
                 _action_record(action),
-                generated_plan.plan,
+                tactic_plan,
                 generated_plan.attempts,
                 verified.proposals,
                 verified.attempts,
-                generated_plan.plan.predicted_state,
+                tactic_plan.predicted_state,
                 None if verified.successor is None else verified.successor.state.expression,
                 comparison,
                 surprise_delta,
@@ -288,7 +324,7 @@ class AnalogyLoopRunner:
             )
             iterations.append(iteration)
             if self.iteration_sink is not None:
-                self.iteration_sink(iteration)
+                self.iteration_sink(rollout_id, iteration)
             summaries.append(_summarize(iteration))
             stop_reason = decision.reason
             if not decision.continue_loop:
@@ -298,7 +334,9 @@ class AnalogyLoopRunner:
             accepted_tactics += (verified.attempts[-1].proposal.candidate.source,)
 
         self.live_actions = tuple(actions)
-        trace = AnalogyLoopTrace(tuple(iterations), stop_reason)
+        trace = AnalogyLoopTrace(
+            tuple(iterations), stop_reason, resources.model_calls, resources.lean_calls
+        )
         rollout = self._rollout(
             state,
             actions,
@@ -311,12 +349,14 @@ class AnalogyLoopRunner:
             latest_successor,
             stop_reason,
         )
+        completed_actions = tuple(actions[: len(iterations)])
+        self._live_trajectories.append((rollout, completed_actions))
         if stop_reason is StopReason.CANCELLED:
             return GenericRescueOutcome(rollouts=(rollout,), cancelled=True)
         returned_successor = None if completed_proof is not None else latest_successor
         return GenericRescueOutcome(completed_proof, returned_successor, (rollout,))
 
-    def _verify_plan(self, plan, evaluator, cancellation, resources):
+    def _verify_plan(self, current, plan, evaluator, cancellation, resources):
         tactics = plan.tactics[: self.tactics_per_iteration]
         score = 1.0 / len(tactics)
         proposals = tuple(
@@ -336,7 +376,12 @@ class AnalogyLoopRunner:
                 break
             if resources.remaining_lean_calls <= 0:
                 break
-            evaluation: TacticEvaluation = evaluator(proposal.candidate)
+            evaluate_at = getattr(evaluator, "evaluate_at", None)
+            evaluation: TacticEvaluation = (
+                evaluate_at(current, proposal.candidate)
+                if evaluate_at is not None
+                else evaluator(proposal.candidate)
+            )
             resources = resources.use_lean()
             attempts.append(
                 RescueAttempt(proposal, evaluation.result, evaluation.discarded)

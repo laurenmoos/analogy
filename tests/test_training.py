@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,13 @@ import torch
 
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
-from analogy.records import CandidateOrigin, TacticCandidate, TacticResult, TacticStatus
+from analogy.records import (
+    CandidateOrigin,
+    SymbolicState,
+    TacticCandidate,
+    TacticResult,
+    TacticStatus,
+)
 from analogy.rescue import (
     GenerationAttempt,
     GenerationStatus,
@@ -31,7 +38,9 @@ from analogy.training import (
     split_problems,
     train_direct_rescue,
     rollout_is_trainable,
+    shuffle_analogy_assignments,
 )
+from analogy.replay import StuckStateRecord, proof_state_fingerprint
 
 
 ROOT = Path(__file__).parents[1]
@@ -225,15 +234,41 @@ def test_checkpoint_rejects_policy_schema_mismatch(tmp_path: Path) -> None:
 
 def test_matched_conditions_share_budgets_and_seed_family(tmp_path: Path) -> None:
     config = load_config(ROOT / "config.yaml")
+    config = replace(config, analogy=replace(config.analogy, enabled=True))
 
     conditions = build_evaluation_conditions(config)
 
-    assert [item.name for item in conditions] == ["conventional", "unperturbed", "random", "learned"]
+    assert {item.name for item in conditions} == {
+        "conventional", "learned_direct", "analogy_loop", "shuffled_analogy"
+    }
     assert {item.ordinary_width for item in conditions} == {config.search.top_k}
     assert {item.max_rescue_verifier_calls for item in conditions} == {config.rl.max_rescue_verifier_calls}
-    random_condition = next(item for item in conditions if item.name == "random")
-    learned_condition = next(item for item in conditions if item.name == "learned")
-    assert random_condition.base_seed == learned_condition.base_seed
+    rescue = [item for item in conditions if item.name != "conventional"]
+    assert len({item.budget for item in rescue}) == 1
+
+
+def test_disabled_analogy_omits_analogy_evaluation_conditions() -> None:
+    config = load_config(ROOT / "config.yaml")
+
+    conditions = build_evaluation_conditions(config)
+
+    assert [item.name for item in conditions] == ["conventional", "learned_direct"]
+
+
+def test_shuffled_analogies_change_assignment_without_crossing_split() -> None:
+    def record(identifier: str) -> StuckStateRecord:
+        proof_state = f"⊢ {identifier}"
+        return StuckStateRecord(
+            problem(identifier, "iff"), "test", (), proof_state,
+            proof_state_fingerprint(proof_state), ("simp",), ("simp",),
+        )
+
+    records = (record("test-a"), record("test-b"))
+    shuffled = shuffle_analogy_assignments(records, seed=7)
+
+    assert {item.target.problem.id for item in shuffled} == {"test-a", "test-b"}
+    assert all(item.source.problem.id != item.target.problem.id for item in shuffled)
+    assert all(item.source.split == item.target.split == "test" for item in shuffled)
 
 
 def test_training_updates_train_only_and_persists_untrainable_rollouts(tmp_path: Path) -> None:
@@ -287,3 +322,92 @@ def test_training_updates_train_only_and_persists_untrainable_rollouts(tmp_path:
     assert "test" not in {identifier for identifier, _ in phases}
     lines = (summary.run_directory / "rollouts.jsonl").read_text().splitlines()
     assert len(lines) == 2
+
+
+def test_replay_training_reconstructs_and_starts_from_recorded_states(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (ROOT / "config.yaml")
+        .read_text()
+        .replace("output_dir: runs", f"output_dir: {tmp_path / 'runs'}")
+        .replace("epochs: 10", "epochs: 1")
+        .replace("rl:\n  enabled: false", "rl:\n  enabled: true"),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+
+    def replay_record(identifier, connective, split):
+        proof_state = f"h : P\n⊢ P -- {identifier}"
+        return StuckStateRecord(
+            problem(identifier, connective),
+            split,
+            ("intro h",),
+            proof_state,
+            proof_state_fingerprint(proof_state),
+            ("exact h",),
+            ("simp",),
+        )
+
+    records = (
+        replay_record("train-replay", "implication", "train"),
+        replay_record("validation-replay", "not", "validation"),
+    )
+    reconstructed = []
+    executed = []
+
+    def reconstruct(item, verifier):
+        del verifier
+        state = SymbolicState(item.problem.id, item.proof_state, "lean4", item.accepted_tactics)
+        reconstructed.append(item.problem.id)
+        return state
+
+    def execute(config, generator, verifier, problem, phase, policy, **kwargs):
+        del config, generator, verifier, policy
+        executed.append((problem.id, phase, kwargs["initial_state"].id))
+        return ProblemEpisode(problem.id, False, (), (), 0, 0)
+
+    monkeypatch.setattr("analogy.training.reconstruct_stuck_state", reconstruct)
+    monkeypatch.setattr("analogy.training._execute_problem", execute)
+    policy = torch.nn.Linear(1, 1)
+
+    train_direct_rescue(
+        config,
+        object(),
+        object(),
+        policy=policy,
+        optimizer=torch.optim.SGD(policy.parameters(), lr=0.1),
+        replay_records=records,
+        run_id="replay-run",
+    )
+
+    assert reconstructed == ["train-replay", "validation-replay"]
+    assert executed == [
+        ("train-replay", "train", "train-replay"),
+        ("validation-replay", "validation", "validation-replay"),
+    ]
+
+
+def test_replay_training_rejects_record_that_crosses_connective_split(
+    tmp_path: Path,
+) -> None:
+    config = load_config(ROOT / "config.yaml")
+    proof_state = "⊢ P ↔ P"
+    leaked = StuckStateRecord(
+        problem("held-out", "iff"),
+        "train",
+        (),
+        proof_state,
+        proof_state_fingerprint(proof_state),
+        ("rfl",),
+        ("simp",),
+    )
+
+    with pytest.raises(ValueError, match="configured test split"):
+        train_direct_rescue(
+            replace(config, rl=replace(config.rl, enabled=True)),
+            object(),
+            object(),
+            replay_records=(leaked,),
+        )

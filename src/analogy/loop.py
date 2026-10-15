@@ -231,14 +231,18 @@ class LocalRescueSearch:
                 self._stuck_state_sink.capture(node.state, goal, ordinary, decision)
 
             if self._rollout_rescue is not None:
+                evaluator = lambda selected: self._evaluate_for_rescue(
+                    node, goal, visited, selected
+                )
+                evaluator.evaluate_at = lambda current, selected: self._evaluate_for_rescue(  # type: ignore[attr-defined]
+                    SearchNode(current, node.score), goal, visited, selected
+                )
                 rescue = self._rollout_rescue.search(
                     node.state,
                     goal,
                     ordinary.candidate_pool,
                     ordinary.attempts,
-                    lambda selected: self._evaluate_for_rescue(
-                        node, goal, visited, selected
-                    ),
+                    evaluator,
                     self._cancellation,
                 )
                 rescue_rollouts.extend(rescue.rollouts)
@@ -295,7 +299,6 @@ class LocalRescueSearch:
                     attempt.result.status is TacticStatus.ACCEPTED
                     and attempt.discarded is None
                     and attempt.result.state == successor.state
-                    and successor.parent_state_id == node.state.id
                     and successor.tactic == attempt.proposal.candidate.source
                     for attempt in rollout.attempts
                 )

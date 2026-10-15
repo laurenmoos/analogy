@@ -332,6 +332,24 @@ class LeanGymAdapter:
     def failed_tactics_for(self, state_id: str) -> tuple[str, ...]:
         return tuple(self._failed.get(state_id, ()))
 
+    def proof_structure_for(self, state: SymbolicState) -> ProofStructure:
+        """Extract the name-insensitive Lean shape for a registered search state."""
+        try:
+            prefix = self._prefixes[state.id]
+        except KeyError as error:
+            raise ValueError(f"unknown Lean search state: {state.id}") from error
+        extractor = getattr(self.verifier, "proof_structure_after", None)
+        if extractor is None:
+            raise ProofViewError("configured verifier cannot extract proof structure")
+        return extractor(self.problem, prefix)
+
+    def register_replay_state(self, state: SymbolicState) -> SymbolicState:
+        """Register a separately reconstructed, verified state with this adapter."""
+        if not isinstance(state, SymbolicState):
+            raise ValueError("replay state must be a SymbolicState")
+        self._prefixes[state.id] = tuple(state.context)
+        return state
+
     def run_tactic(
         self,
         state: SymbolicState,

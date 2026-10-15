@@ -45,9 +45,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     if config.experiment.stage in {"train_rescue", "evaluate_rescue"}:
-        if not config.rl.enabled or config.analogy.enabled:
+        if not config.rl.enabled:
             print(
-                "Rescue stages require rl.enabled=true and analogy.enabled=false",
+                "Rescue stages require rl.enabled=true",
                 file=sys.stderr,
             )
             return 2

@@ -146,7 +146,7 @@ def loop_runner(
     *, predicted=("p1", "p2", "p3"), surprises=(0.8, 0.1, 0.09),
     stops=(), min_iterations=1, max_iterations=8, threshold=0.2, patience=2,
     max_model_calls=20, max_lean_calls=20,
-    iteration_sink=None,
+    iteration_sink=None, tactic_reranker=None,
 ):
     return AnalogyLoopRunner(
         proof_view_builder=Views(),
@@ -168,6 +168,7 @@ def loop_runner(
         max_model_calls=max_model_calls,
         max_lean_calls=max_lean_calls,
         iteration_sink=iteration_sink,
+        tactic_reranker=tactic_reranker,
     )
 
 
@@ -197,6 +198,48 @@ def test_loop_conditions_tactics_and_stops_after_surprise_patience():
     } <= row.keys()
 
 
+def test_later_tactics_are_verified_from_the_latest_successor():
+    runner = loop_runner()
+    base = SequentialEvaluator()
+    seen_states = []
+
+    def evaluator(candidate):
+        raise AssertionError("closed loop must use the state-aware evaluator")
+
+    def evaluate_at(current, candidate):
+        seen_states.append(current.id)
+        return base(candidate)
+
+    evaluator.evaluate_at = evaluate_at
+    runner.search(
+        state("stuck"), state("goal"), (), (), evaluator, NeverCancelled()
+    )
+
+    assert seen_states == ["stuck", "s1", "s2"]
+
+
+def test_optional_reranker_changes_verification_order_and_uses_model_budget():
+    seen = []
+
+    def rerank(context, plan):
+        seen.append((context.active_hop_id, plan.tactics))
+        return replace(plan, tactics=("second", "first"))
+
+    runner = loop_runner(
+        predicted=("p1",), max_iterations=1, tactic_reranker=rerank
+    )
+    evaluator = SequentialEvaluator()
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), evaluator, NeverCancelled()
+    )
+
+    trace = outcome.rollouts[0].analogy_trace
+    assert seen == [("hop-0", ("step_1",))]
+    assert trace.iterations[0].tactic_plan.tactics == ("second", "first")
+    assert evaluator.calls == ["second"]
+    assert trace.model_calls == 3
+
+
 def test_loop_flushes_one_complete_jsonl_row_per_iteration(tmp_path):
     writer = RescueRunWriter.create(tmp_path, "trace", {"seed": 7})
     sink = writer.analogy_iteration_sink(
@@ -215,6 +258,23 @@ def test_loop_flushes_one_complete_jsonl_row_per_iteration(tmp_path):
     assert [row["iteration_index"] for row in rows] == [0, 1, 2]
     assert all(row["hop_generation_attempts"] and row["attempts"] for row in rows)
     assert all("views" in row and "decision" in row and "elapsed_seconds" in row for row in rows)
+
+
+def test_live_sink_receives_each_search_root_rollout_id():
+    seen = []
+
+    def sink(rollout_id, iteration):
+        seen.append((rollout_id, iteration.iteration_index))
+
+    runner = loop_runner(
+        predicted=("p1",), max_iterations=1, iteration_sink=sink
+    )
+    for root in ("first", "second"):
+        runner.search(
+            state(root), state("goal"), (), (), SequentialEvaluator(), NeverCancelled()
+        )
+
+    assert seen == [("first:analogy-loop", 0), ("second:analogy-loop", 0)]
 
 
 @pytest.mark.parametrize("cancel_on_call", [1, 2, 3, 4])

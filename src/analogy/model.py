@@ -7,7 +7,7 @@ import hashlib
 import math
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -59,6 +59,14 @@ class ModelConfigurationError(ValueError):
 
 class TacticRankingError(RuntimeError):
     """Raised when the conventional model cannot produce a candidate pool."""
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionScore:
+    text: str
+    total_log_likelihood: float
+    mean_log_likelihood: float
+    token_count: int
 
 
 class TextGenerator(Protocol):
@@ -232,6 +240,97 @@ class QwenGenerator:
             return self._run_generation(model_inputs, seed=seed)
         finally:
             handle.remove()
+
+    def score_completions(
+        self, messages: tuple[Message, ...], completions: tuple[str, ...]
+    ) -> tuple[CompletionScore, ...]:
+        """Score candidate continuations with the same frozen language model."""
+        if not completions or any(not item.strip() for item in completions):
+            raise ModelConfigurationError("scoring completions must be nonempty")
+        rendered = self._tokenizer.apply_chat_template(
+            [{"role": item.role, "content": item.content} for item in messages],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        prompt_ids = tuple(
+            int(item)
+            for item in self._tokenizer.encode(rendered, add_special_tokens=False)
+        )
+        if not prompt_ids:
+            raise ModelConfigurationError("scoring prompt tokenization must be nonempty")
+        encoded_completions: list[tuple[str, tuple[int, ...]]] = []
+        for completion in completions:
+            completion_ids = tuple(
+                int(item)
+                for item in self._tokenizer.encode(
+                    completion, add_special_tokens=False
+                )
+            )
+            if not completion_ids:
+                raise ModelConfigurationError(
+                    "completion tokenization must be nonempty"
+                )
+            encoded_completions.append((completion, completion_ids))
+        pad_token_id = getattr(self._tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = getattr(self._tokenizer, "eos_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = 0
+        width = max(
+            len(prompt_ids) + len(completion_ids)
+            for _, completion_ids in encoded_completions
+        )
+        rows = []
+        masks = []
+        for _, completion_ids in encoded_completions:
+            sequence = prompt_ids + completion_ids
+            padding = width - len(sequence)
+            rows.append(sequence + (int(pad_token_id),) * padding)
+            masks.append((1,) * len(sequence) + (0,) * padding)
+        input_ids = self._torch.tensor(
+            rows, dtype=self._torch.long, device=self._device
+        )
+        attention_mask = self._torch.tensor(
+            masks, dtype=self._torch.long, device=self._device
+        )
+        started = time.monotonic()
+        with self._torch.inference_mode():
+            output = self._model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+        if time.monotonic() - started >= self.timeout_seconds:
+            raise TimeoutError(
+                f"completion scoring exceeded {self.timeout_seconds:g} seconds"
+            )
+        logits = getattr(output, "logits", None)
+        if logits is None or logits.ndim != 3:
+            raise ModelConfigurationError(
+                "completion scorer requires rank-3 logits"
+            )
+        log_probabilities = self._torch.log_softmax(logits.float(), dim=-1)
+        scored: list[CompletionScore] = []
+        for row, (completion, completion_ids) in enumerate(encoded_completions):
+            token_scores = tuple(
+                float(
+                    log_probabilities[
+                        row, len(prompt_ids) + offset - 1, token_id
+                    ].item()
+                )
+                for offset, token_id in enumerate(completion_ids)
+            )
+            total = sum(token_scores)
+            scored.append(
+                CompletionScore(
+                    completion,
+                    total,
+                    total / len(token_scores),
+                    len(token_scores),
+                )
+            )
+        return tuple(scored)
 
     def _prepare_generation(self, messages: tuple[Message, ...]) -> Any:
         rendered = [{"role": item.role, "content": item.content} for item in messages]
@@ -816,6 +915,7 @@ def run_baseline(
 
 
 __all__ = [
+    "CompletionScore",
     "ModelConfigurationError",
     "ModelOutputError",
     "QwenGenerator",

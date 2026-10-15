@@ -1,6 +1,7 @@
 """Analogical tactic discovery with Lean verification."""
 
 from .config import AppConfig, ConfigError, load_config
+from .analogy_loop import AnalogyIteration, AnalogyLoopRunner, AnalogyLoopTrace
 from .daydream import (
     ConstrainedTacticChooser,
     CuriosityOutcome,
@@ -74,9 +75,12 @@ from .records import (
     VerificationStatus,
     VerifiedProgram,
 )
+from .proof_views import ProofStructure, ProofViews, TransitionComparison
+from .surprise import StopReason, SurpriseConfig, SurpriseController
 
 __all__ = [
-    "AcceptNovelState", "AnalogicalTransfer", "AppConfig", "CancellationToken",
+    "AcceptNovelState", "AnalogyIteration", "AnalogyLoopRunner", "AnalogyLoopTrace",
+    "AnalogicalTransfer", "AppConfig", "CancellationToken",
     "CandidateOrigin", "ConfigError", "ConstrainedTacticChooser",
     "GenericRescueOutcome", "GenericRescueRunner",
     "CuriosityOutcome", "CuriosityRunner", "CuriositySearch", "DaydreamRound",
@@ -86,15 +90,17 @@ __all__ = [
     "OperatorRelation", "OperatorTransformation", "PertinenceAssessment",
     "PertinenceGate", "PopulationOrigin", "ProgramCandidate", "ProgressPolicy",
     "PolicyActionRecord", "ProofRepresentation", "ProofRescueContext",
+    "ProofStructure", "ProofViews",
     "PseudoOperator", "RelationCanonicalizer", "RelationProposal",
     "RelationRefiner", "RelationSampler", "SearchNode", "SearchResult",
     "RescueAttempt", "RescueOutputError", "RescueProposal", "RescueRollout",
     "RescueTermination",
-    "SearchStatus", "StateFingerprinter", "StateIdFingerprinter", "StuckReason",
+    "SearchStatus", "StateFingerprinter", "StateIdFingerprinter", "StopReason",
+    "SurpriseConfig", "SurpriseController", "StuckReason",
     "StucknessDecision", "StucknessPolicy", "SymbolicState", "TacticCandidate",
     "TacticCanonicalizer", "TacticEvaluation", "TacticRanker", "TacticResult",
     "TacticStatus", "VerificationEvidence", "VerificationStatus",
-    "VerifiedProgram", "WhitespaceRelationCanonicalizer",
+    "TransitionComparison", "VerifiedProgram", "WhitespaceRelationCanonicalizer",
     "WhitespaceTacticCanonicalizer", "load_config", "parse_rescue_proposals",
     "proof_prompt_hash", "render_direct_rescue_prompt", "render_proof_embeddings",
 ]

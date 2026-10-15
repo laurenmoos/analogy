@@ -104,6 +104,40 @@ The corpus-free analogy path emits readable cards—domain, situation, relation 
 
 > Match the proof’s reasoning up to the stuck point; treat the analogy’s next move as a testable guess for the proof’s next move.
 
+The current rescue loop is deliberately literal and editable:
+
+```text
+proof state + Lean shape + prior verified iterations
+→ generate one analogy card
+→ generate tactics conditioned on the complete card stream
+→ let Lean verify the first real successor
+→ compare predicted and actual proof transitions
+→ refine while that transition remains usefully surprising
+```
+
+For example, a card can map a blocked river splitting around a rock to a proof
+state whose implication cannot advance directly. It predicts two remaining
+channels, proposes `constructor`, observes Lean's actual two-goal successor, and
+records the embedding distance between those predicted and actual transitions.
+The next card sees that complete record rather than starting a fresh metaphor.
+
+The loop lives in [`src/analogy/analogy_loop.py`](src/analogy/analogy_loop.py).
+Every iteration can be flushed to `analogy_iterations.jsonl`, including proof
+views, Lean structure, raw generation attempts, card, action diagnostics,
+tactics, Lean outcomes, transition embeddings, surprise, stop decision,
+budgets, and elapsed time.
+
+The main `config.yaml` controls are `min_iterations` / `max_iterations`,
+`surprise_threshold` / `surprise_patience`, `min_surprise_improvement` /
+`improvement_patience`, per-iteration tactics, total model and Lean budgets,
+transition embedding layer, reward `discount`, and `iteration_cost`. A model
+stop is advisory; cancellation and hard budgets win.
+
+Matched evaluation reports `conventional`, `learned_direct`, `analogy_loop`,
+and `shuffled_analogy` under the same search seed and verifier budgets. The
+shuffle helper only permutes compatible records within one split and
+connective, and refuses singleton groups.
+
 See the [quality and stream design](docs/superpowers/specs/2026-10-14-rescue-quality-and-analogy-stream-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-rescue-quality-and-analogy-stream.md).
 
 Run the complete preservation suite with:

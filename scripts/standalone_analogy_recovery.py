@@ -1203,30 +1203,49 @@ class QwenModel:
         )
 
 
+TRANSFORMATION_SCHEMA_VERSION = "transformation-record-v1"
+DIAGNOSTIC_POOLING_RULE = "final-nonpadding-l2-float32-v1"
+
+
 @dataclass(frozen=True, slots=True)
-class IndexedTransition:
+class IndexedTransformation:
     transition: Transition
-    transformation: str
-    embedding: Embedding
+    record: TransformationRecord
+    diagnostic_embedding: Embedding | None
     cache_key: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.transition, Transition):
-            raise ExperimentError("indexed transition requires a Transition")
-        _nonblank(self.transformation, "indexed_transition.transformation")
-        if not isinstance(self.embedding, Embedding):
-            raise ExperimentError("indexed transition requires an Embedding")
-        _nonblank(self.cache_key, "indexed_transition.cache_key")
+            raise ExperimentError("indexed transformation requires a Transition")
+        if not isinstance(self.record, TransformationRecord):
+            raise ExperimentError("indexed transformation requires a TransformationRecord")
+        if self.diagnostic_embedding is not None and not isinstance(
+            self.diagnostic_embedding, Embedding
+        ):
+            raise ExperimentError("diagnostic embedding must be an Embedding or None")
+        _nonblank(self.cache_key, "indexed_transformation.cache_key")
+
+    @property
+    def transformation(self) -> str:
+        """Compatibility view used by the legacy ranker until Task 4 removes it."""
+        return self.record.domain_neutral_summary
+
+    @property
+    def embedding(self) -> Embedding:
+        """Compatibility view used only by the legacy cosine ablation."""
+        if self.diagnostic_embedding is None:
+            raise ExperimentError("diagnostic embedding was not captured")
+        return self.diagnostic_embedding
 
 
 @dataclass(frozen=True, slots=True)
 class RetrievalHit:
-    item: IndexedTransition
+    item: IndexedTransformation
     similarity: float | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.item, IndexedTransition):
-            raise ExperimentError("retrieval hit requires an IndexedTransition")
+        if not isinstance(self.item, IndexedTransformation):
+            raise ExperimentError("retrieval hit requires an IndexedTransformation")
         if self.similarity is not None and not math.isfinite(float(self.similarity)):
             raise ExperimentError("retrieval similarity must be finite or None")
 
@@ -1276,6 +1295,9 @@ def transformation_cache_key(
     model_revision: str,
     layer: int,
     prompt_version: str,
+    *,
+    schema_version: str = TRANSFORMATION_SCHEMA_VERSION,
+    pooling_rule: str = DIAGNOSTIC_POOLING_RULE,
 ) -> str:
     payload = {
         "transition": {
@@ -1288,37 +1310,56 @@ def transformation_cache_key(
         "model_revision": model_revision,
         "layer": layer,
         "prompt_version": prompt_version,
-        "pooling": "final-nonpadding-l2-float32-v1",
+        "schema_version": schema_version,
+        "pooling": pooling_rule,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256_text(encoded)
 
 
-def _cached_index_item(path: Path, transition: Transition, expected_key: str) -> IndexedTransition:
+def _record_from_payload(value: Any) -> TransformationRecord:
+    if not isinstance(value, Mapping):
+        raise ModelOutputError("cached transformation record must be an object")
+    return parse_transformation_record(json.dumps(value, ensure_ascii=False))
+
+
+def _embedding_from_payload(value: Any) -> Embedding | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {
+        "values", "layer", "token_index", "model_revision", "text_hash"
+    }:
+        raise ModelOutputError("cached diagnostic embedding is invalid")
+    embedding = Embedding(
+        tuple(value["values"]),
+        value["layer"],
+        value["token_index"],
+        value["model_revision"],
+        value["text_hash"],
+    )
+    norm = math.sqrt(sum(item * item for item in embedding.values))
+    if not math.isclose(norm, 1.0, rel_tol=1e-5, abs_tol=1e-6):
+        raise ModelOutputError("cached diagnostic embedding is not normalized")
+    return embedding
+
+
+def _cached_index_item(
+    path: Path, transition: Transition, expected_key: str
+) -> IndexedTransformation:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ExperimentError(f"invalid transition cache {path}: {error}") from error
     if not isinstance(raw, dict) or raw.get("cache_key") != expected_key or raw.get("transition_id") != transition.id:
         raise ExperimentError(f"transition cache identity mismatch: {path}")
-    embedding_raw = raw.get("embedding")
-    if not isinstance(embedding_raw, dict):
-        raise ExperimentError(f"transition cache embedding is invalid: {path}")
     try:
-        embedding = Embedding(
-            tuple(embedding_raw["values"]),
-            embedding_raw["layer"],
-            embedding_raw["token_index"],
-            embedding_raw["model_revision"],
-            embedding_raw["text_hash"],
-        )
-        transformation = _nonblank(raw["transformation"], "cached transformation")
-    except (KeyError, TypeError, ValueError) as error:
-        raise ExperimentError(f"transition cache content is invalid: {path}") from error
-    norm = math.sqrt(sum(value * value for value in embedding.values))
-    if not math.isclose(norm, 1.0, rel_tol=1e-5, abs_tol=1e-6):
-        raise ExperimentError(f"transition cache vector is not normalized: {path}")
-    return IndexedTransition(transition, transformation, embedding, expected_key)
+        if raw.get("schema_version") != TRANSFORMATION_SCHEMA_VERSION:
+            raise ModelOutputError("cached transformation schema version is invalid")
+        record = _record_from_payload(raw["record"])
+        embedding = _embedding_from_payload(raw.get("diagnostic_embedding"))
+    except (KeyError, ExperimentError, TypeError, ValueError) as error:
+        raise ExperimentError(f"transition cache content is invalid: {path}: {error}") from error
+    return IndexedTransformation(transition, record, embedding, expected_key)
 
 
 def _model_generate(
@@ -1351,50 +1392,89 @@ def _model_generate(
     return model.generate(messages, seed=seed, **kwargs)
 
 
-def build_index(
+def build_transformation_index(
     transitions: Iterable[Transition],
     model: TextModel,
     cache_dir: Path | None,
-    layer: int,
-) -> tuple[IndexedTransition, ...]:
+    hidden_layer: int,
+    *,
+    capture_diagnostic_embeddings: bool = False,
+) -> tuple[tuple[IndexedTransformation, ...], Mapping[str, int]]:
     if cache_dir is not None:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    indexed: list[IndexedTransition] = []
+    indexed: list[IndexedTransformation] = []
+    exclusions: dict[str, int] = {}
+    seen_records: set[str] = set()
+
+    def exclude(category: str) -> None:
+        exclusions[category] = exclusions.get(category, 0) + 1
+
     for transition in transitions:
         key = transformation_cache_key(
             transition,
             model.model_revision,
-            layer,
+            hidden_layer,
             TRANSFORMATION_PROMPT_VERSION,
         )
         cache_path = None if cache_dir is None else Path(cache_dir) / f"{key}.json"
         if cache_path is not None and cache_path.exists():
-            indexed.append(_cached_index_item(cache_path, transition, key))
-            continue
-        generated = _model_generate(
-            model,
-            transformation_prompt(transition),
-            seed=derived_seed(0, transition.id, TRANSFORMATION_PROMPT_VERSION),
-            operation="transformation",
-            difficulty=1,
-            expected_json="object",
+            try:
+                item = _cached_index_item(cache_path, transition, key)
+                if capture_diagnostic_embeddings and item.diagnostic_embedding is None:
+                    embedding = model.embed(item.record.domain_neutral_summary, hidden_layer)
+                    item = replace(item, diagnostic_embedding=embedding)
+            except ModelOutputError:
+                exclude("invalid_embedding")
+                continue
+            except ExperimentError as error:
+                category = "invalid_embedding" if "embedding" in str(error).casefold() else "invalid_schema"
+                exclude(category)
+                continue
+        else:
+            try:
+                generated = _model_generate(
+                    model,
+                    render_transformation_prompt(transition),
+                    seed=derived_seed(0, transition.id, TRANSFORMATION_PROMPT_VERSION),
+                    operation="transformation",
+                    difficulty=1,
+                    expected_json="object",
+                )
+            except Exception:
+                exclude("model_failure")
+                continue
+            try:
+                record = parse_transformation_record(generated)
+            except ModelOutputError:
+                exclude("invalid_schema")
+                continue
+            embedding = None
+            if capture_diagnostic_embeddings:
+                try:
+                    embedding = model.embed(record.domain_neutral_summary, hidden_layer)
+                except Exception:
+                    exclude("invalid_embedding")
+                    continue
+            item = IndexedTransformation(transition, record, embedding, key)
+
+        record_key = json.dumps(
+            _jsonable(item.record), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-        transformation_record = parse_transformation_record(generated)
-        transformation = transformation_record.domain_neutral_summary
-        embedding = model.embed(transformation, layer)
-        item = IndexedTransition(transition, transformation, embedding, key)
+        if record_key in seen_records:
+            exclude("duplicate_record")
+            continue
+        seen_records.add(record_key)
         if cache_path is not None:
             payload = {
                 "cache_key": key,
                 "transition_id": transition.id,
-                "transformation": transformation,
-                "embedding": {
-                    "values": list(embedding.values),
-                    "layer": embedding.layer,
-                    "token_index": embedding.token_index,
-                    "model_revision": embedding.model_revision,
-                    "text_hash": embedding.text_hash,
-                },
+                "schema_version": TRANSFORMATION_SCHEMA_VERSION,
+                "record": _jsonable(item.record),
+                "diagnostic_embedding": (
+                    None
+                    if item.diagnostic_embedding is None
+                    else _jsonable(item.diagnostic_embedding)
+                ),
             }
             temporary = cache_path.with_name(f".{cache_path.name}.{uuid.uuid4().hex}.tmp")
             temporary.write_text(
@@ -1403,10 +1483,29 @@ def build_index(
             )
             temporary.replace(cache_path)
         indexed.append(item)
-    return tuple(indexed)
+    return tuple(indexed), MappingProxyType(dict(sorted(exclusions.items())))
 
 
-def _validated_retrieval(index: tuple[IndexedTransition, ...], count: int) -> None:
+def build_index(
+    transitions: Iterable[Transition],
+    model: TextModel,
+    cache_dir: Path | None,
+    layer: int,
+) -> tuple[IndexedTransformation, ...]:
+    """Compatibility wrapper for the legacy cosine ranker removed in Task 4."""
+    index, exclusions = build_transformation_index(
+        transitions,
+        model,
+        cache_dir,
+        layer,
+        capture_diagnostic_embeddings=True,
+    )
+    if exclusions:
+        raise ExperimentError(f"transition index exclusions: {dict(exclusions)}")
+    return index
+
+
+def _validated_retrieval(index: tuple[IndexedTransformation, ...], count: int) -> None:
     if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
         raise ExperimentError("retrieval count must be a positive integer")
     if not index:
@@ -1417,7 +1516,7 @@ def _validated_retrieval(index: tuple[IndexedTransition, ...], count: int) -> No
 
 def cosine_retrieve(
     query: Embedding | tuple[float, ...],
-    index: tuple[IndexedTransition, ...],
+    index: tuple[IndexedTransformation, ...],
     count: int,
 ) -> tuple[RetrievalHit, ...]:
     _validated_retrieval(index, count)
@@ -1440,7 +1539,7 @@ def cosine_retrieve(
 
 
 def random_retrieve(
-    index: tuple[IndexedTransition, ...],
+    index: tuple[IndexedTransformation, ...],
     count: int,
     seed: int,
 ) -> tuple[RetrievalHit, ...]:
@@ -1482,7 +1581,7 @@ def rank_for_condition(
     state: str,
     candidates: tuple[str, ...],
     proof_need: ProofNeed | None,
-    index: tuple[IndexedTransition, ...],
+    index: tuple[IndexedTransformation, ...],
     model: TextModel,
     retrieval_count: int,
     seed: int,
@@ -2533,7 +2632,7 @@ class ConditionRanker:
     def __init__(
         self,
         model: TextModel,
-        index: tuple[IndexedTransition, ...],
+        index: tuple[IndexedTransformation, ...],
         retrieval_count: int,
         layer: int,
     ) -> None:
@@ -2576,6 +2675,7 @@ def _run_config_payload(
     complete: bool,
     model_revision: str | None = None,
     operational_failures: Sequence[Mapping[str, Any]] = (),
+    transformation_index: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "run_complete": complete,
@@ -2620,6 +2720,14 @@ def _run_config_payload(
             },
         },
         "retrieval_count": config.retrieval_count,
+        "transformation_index": dict(
+            transformation_index
+            or {
+                "input_count": len(config.transitions),
+                "valid_count": None,
+                "exclusions": {},
+            }
+        ),
         "search_limits": _jsonable(config.search_limits),
         "prompt_versions": dict(PROMPT_VERSIONS),
         "operation_seed_scheme": "sha256(base_seed, problem_id, state_sha256, operation)-u64-v1",
@@ -2640,6 +2748,11 @@ def run_experiment(
     model = model_factory(config)
     verifier = verifier_factory(config)
     trials: list[TrialResult] = []
+    index_stats: dict[str, Any] = {
+        "input_count": len(config.transitions),
+        "valid_count": 0,
+        "exclusions": {},
+    }
     condition_order = [Condition.NONE] + [
         condition for condition in config.conditions if condition is not Condition.NONE
     ]
@@ -2654,11 +2767,21 @@ def run_experiment(
         if callable(set_generation_sink):
             set_generation_sink(generation_sink.write)
         needs_index = any(condition is not Condition.NONE for condition in config.conditions)
-        index = (
-            build_index(config.transitions, model, config.cache_dir, config.hidden_layer)
-            if needs_index
-            else ()
-        )
+        if needs_index:
+            index, exclusions = build_transformation_index(
+                config.transitions,
+                model,
+                config.cache_dir,
+                config.hidden_layer,
+                capture_diagnostic_embeddings=True,
+            )
+            index_stats = {
+                "input_count": len(config.transitions),
+                "valid_count": len(index),
+                "exclusions": dict(exclusions),
+            }
+        else:
+            index = ()
         pool_store = CandidatePoolStore(model)
         ranker = ConditionRanker(model, index, config.retrieval_count, config.hidden_layer)
         for item in index:
@@ -2669,15 +2792,20 @@ def run_experiment(
                     "before": item.transition.before,
                     "after": item.transition.after,
                     "provenance": dict(item.transition.provenance),
-                    "transformation": item.transformation,
+                    "record": _jsonable(item.record),
                     "cache_key": item.cache_key,
-                    "embedding": {
-                        "model_revision": item.embedding.model_revision,
-                        "layer": item.embedding.layer,
-                        "token_index": item.embedding.token_index,
-                        "dimension": item.embedding.dimension,
-                        "text_hash": item.embedding.text_hash,
-                    },
+                    "diagnostic_embedding": (
+                        None
+                        if item.diagnostic_embedding is None
+                        else {
+                            "used_for_retrieval": False,
+                            "model_revision": item.diagnostic_embedding.model_revision,
+                            "layer": item.diagnostic_embedding.layer,
+                            "token_index": item.diagnostic_embedding.token_index,
+                            "dimension": item.diagnostic_embedding.dimension,
+                            "text_hash": item.diagnostic_embedding.text_hash,
+                        }
+                    ),
                 }
             )
         for seed in config.seeds:
@@ -2725,6 +2853,7 @@ def run_experiment(
     if actual != expected or len(trials) != len(expected):
         raise ExperimentError("run did not produce exactly one result per requested trial")
     summary = summarize_trials(trials)
+    summary["transformation_index"] = index_stats
     _atomic_json(output / "summary.json", summary)
     failures = summary["operational_failures"]
     complete = bool(summary["run_complete"])
@@ -2735,6 +2864,7 @@ def run_experiment(
             complete=complete,
             model_revision=model.model_revision,
             operational_failures=failures,
+            transformation_index=index_stats,
         ),
     )
     if not complete:

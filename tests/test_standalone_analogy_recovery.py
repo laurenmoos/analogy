@@ -470,7 +470,10 @@ def indexed_fixture(module):
     for identifier, vector in (("x", (1.0, 0.0)), ("y", (0.8, 0.6)), ("z", (0.0, 1.0))):
         transition = module.Transition(identifier, "poetry", "before", f"after {identifier}", {})
         embedding = module.Embedding(vector, 0, 0, "rev", module.sha256_text(identifier))
-        items.append(module.IndexedTransition(transition, f"change {identifier}", embedding, f"key-{identifier}"))
+        payload = valid_transformation_payload()
+        payload["domain_neutral_summary"] = f"Change {identifier} while preserving structure."
+        record = module.parse_transformation_record(json.dumps(payload))
+        items.append(module.IndexedTransformation(transition, record, embedding, f"key-{identifier}"))
     return tuple(items)
 
 
@@ -499,9 +502,78 @@ def test_cache_key_changes_with_prompt_model_layer_or_source() -> None:
     assert base != module.transformation_cache_key(transition, "rev-a", -2, "transformation-v1")
     assert base != module.transformation_cache_key(transition, "rev-a", -1, "transformation-v2")
     assert base != module.transformation_cache_key(changed, "rev-a", -1, "transformation-v1")
+    assert base != module.transformation_cache_key(
+        transition,
+        "rev-a",
+        -1,
+        "transformation-v1",
+        schema_version="transformation-record-v2",
+    )
+    assert base != module.transformation_cache_key(
+        transition,
+        "rev-a",
+        -1,
+        "transformation-v1",
+        pooling_rule="mean-pooling-v1",
+    )
 
 
-def test_build_index_rejects_non_normalized_cached_vector(tmp_path: Path) -> None:
+def test_transformation_cache_round_trips_strict_record(tmp_path: Path) -> None:
+    module = load_script()
+    transition = module.Transition("t", "physics", "before", "after", {"source_id": "s"})
+    model = SpyModel()
+
+    index, exclusions = module.build_transformation_index(
+        (transition,), model, tmp_path, hidden_layer=-1
+    )
+    cached, cached_exclusions = module.build_transformation_index(
+        (transition,), model, tmp_path, hidden_layer=-1
+    )
+
+    assert index[0].record.operation is module.OperationClass.SELECT
+    assert cached == index
+    assert exclusions == cached_exclusions == {}
+    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(model.generation_calls) == 1
+    assert model.embedding_calls == []
+
+
+def test_invalid_transformation_is_excluded_not_indexed(tmp_path: Path) -> None:
+    module = load_script()
+
+    class InvalidTransformationModel(SpyModel):
+        def generate(self, messages, *, seed: int):
+            if "transformation-v1" in messages[0].content:
+                return '{"operation":"bad"}'
+            return super().generate(messages, seed=seed)
+
+    index, exclusions = module.build_transformation_index(
+        (module.Transition("t", "poetry", "a", "b", {"source_id": "s"}),),
+        InvalidTransformationModel(),
+        tmp_path,
+        hidden_layer=-1,
+    )
+
+    assert index == ()
+    assert exclusions == {"invalid_schema": 1}
+
+
+def test_duplicate_transformation_records_are_excluded(tmp_path: Path) -> None:
+    module = load_script()
+    transitions = (
+        module.Transition("a", "poetry", "one", "two", {}),
+        module.Transition("b", "physics", "three", "four", {}),
+    )
+
+    index, exclusions = module.build_transformation_index(
+        transitions, SpyModel(), tmp_path, hidden_layer=-1
+    )
+
+    assert len(index) == 1
+    assert exclusions == {"duplicate_record": 1}
+
+
+def test_build_index_excludes_non_normalized_cached_vector(tmp_path: Path) -> None:
     module = load_script()
     model = SpyModel()
     transition = module.Transition("x", "poetry", "before", "after", {})
@@ -517,8 +589,9 @@ def test_build_index_rejects_non_normalized_cached_vector(tmp_path: Path) -> Non
             {
                 "cache_key": key,
                 "transition_id": "x",
-                "transformation": "one element becomes available",
-                "embedding": {
+                "schema_version": module.TRANSFORMATION_SCHEMA_VERSION,
+                "record": valid_transformation_payload(),
+                "diagnostic_embedding": {
                     "values": [3.0, 4.0],
                     "layer": -1,
                     "token_index": 0,
@@ -530,8 +603,12 @@ def test_build_index_rejects_non_normalized_cached_vector(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    with pytest.raises(module.ExperimentError, match="normalized"):
-        module.build_index((transition,), model, tmp_path, -1)
+    index, exclusions = module.build_transformation_index(
+        (transition,), model, tmp_path, -1, capture_diagnostic_embeddings=True
+    )
+
+    assert index == ()
+    assert exclusions == {"invalid_embedding": 1}
 
 
 class SpyModel:
@@ -913,6 +990,18 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
         assert rows
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     assert summary["run_complete"] is True
+    assert summary["transformation_index"] == {
+        "input_count": 2,
+        "valid_count": 1,
+        "exclusions": {"duplicate_record": 1},
+    }
+    saved_config = json.loads((output / "config.json").read_text(encoding="utf-8"))
+    assert saved_config["transformation_index"] == summary["transformation_index"]
+    transition_row = json.loads(
+        (output / "transitions.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert transition_row["record"]["operation"] == "select"
+    assert transition_row["diagnostic_embedding"]["used_for_retrieval"] is False
     trial_rows = [json.loads(line) for line in (output / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
     sentinel = next(row for row in trial_rows if row["problem_id"] == "sentinel" and row["condition"] == "none")
     ordinary = next(row for row in trial_rows if row["problem_id"] == "ordinary" and row["condition"] == "none")

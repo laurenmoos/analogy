@@ -4,18 +4,21 @@ import math
 from dataclasses import FrozenInstanceError
 
 import pytest
+import torch
 
 from analogy.records import (
     CandidateOrigin,
     DiscardReason,
     DiscardedSuccessor,
     SearchNode,
+    Embedding,
     SymbolicState,
     TacticCandidate,
     TacticResult,
     TacticStatus,
 )
 from analogy.rescue import (
+    DirectRescueRunner,
     GenericRescueOutcome,
     PolicyActionRecord,
     ProofRescueContext,
@@ -24,9 +27,13 @@ from analogy.rescue import (
     RescueProposal,
     RescueRollout,
     RescueTermination,
+    RolloutCollector,
+    TacticEvaluation,
+    derive_rescue_seed,
     parse_rescue_proposals,
     render_direct_rescue_prompt,
 )
+from analogy.rl import PolicyAction
 
 
 def state(identifier: str, expression: str | None = None) -> SymbolicState:
@@ -237,3 +244,252 @@ def test_generic_outcome_forbids_conflicting_or_cancelled_results() -> None:
         GenericRescueOutcome("by simp", node)
     with pytest.raises(ValueError, match="cancelled"):
         GenericRescueOutcome(successor=node, cancelled=True)
+
+
+def proof_representation():
+    from analogy.rescue import ProofRepresentation
+
+    proof_context = ProofRescueContext(state("stuck"), state("goal"), (), ())
+    return ProofRepresentation(
+        proof_context,
+        "language",
+        "structure",
+        Embedding("model", (1.0, 0.0)),
+        Embedding("model", (0.0, 1.0)),
+    )
+
+
+class FakeEncoder:
+    def __init__(self):
+        self.calls = []
+
+    def encode(self, rescue_context):
+        self.calls.append(rescue_context)
+        return proof_representation()
+
+
+class FakePolicy(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.tensor(0.0))
+        self.seeds = []
+
+    def sample(self, representation, generator):
+        self.seeds.append(generator.initial_seed())
+        scalar = self.anchor * 0.0
+        return PolicyAction(torch.zeros(2), scalar, scalar)
+
+
+class SequenceDeltaGenerator:
+    def __init__(self, outputs):
+        self.outputs = iter(outputs)
+        self.calls = []
+
+    def generate_with_delta(self, messages, *, delta, layer, seed):
+        self.calls.append((messages, delta, layer, seed))
+        output = next(self.outputs)
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+
+class NeverCancelledToken:
+    def is_cancelled(self):
+        return False
+
+
+class ToggleCancelledToken:
+    def __init__(self, values):
+        self.values = iter(values)
+        self.last = False
+
+    def is_cancelled(self):
+        self.last = next(self.values, self.last)
+        return self.last
+
+
+def ordinary(source):
+    return TacticCandidate(source, 1.0, CandidateOrigin.ORDINARY)
+
+
+def direct_runner(outputs, **overrides):
+    values = {
+        "encoder": FakeEncoder(),
+        "policy": FakePolicy(),
+        "generator": SequenceDeltaGenerator(outputs),
+        "rollouts_per_state": len(outputs),
+        "tactics_per_rollout": 3,
+        "max_rescue_verifier_calls": 8,
+        "base_seed": 11,
+        "hidden_layer": -1,
+    }
+    values.update(overrides)
+    return DirectRescueRunner(**values)
+
+
+def evaluator_for(mapping, calls):
+    def evaluate(selected):
+        calls.append(selected.source)
+        status, payload = mapping[selected.source]
+        result = TacticResult(
+            selected,
+            status,
+            state=payload if status is TacticStatus.ACCEPTED else None,
+            proof=payload if status is TacticStatus.COMPLETE else None,
+        )
+        if status is TacticStatus.ACCEPTED:
+            return TacticEvaluation(result, successor=SearchNode(payload, selected.score))
+        if status is TacticStatus.COMPLETE:
+            return TacticEvaluation(result, completed_proof=payload)
+        return TacticEvaluation(result)
+
+    return evaluate
+
+
+def test_derived_rescue_seed_is_stable_bounded_and_operation_specific() -> None:
+    first = derive_rescue_seed(7, "state", 2, "action")
+    assert first == derive_rescue_seed(7, "state", 2, "action")
+    assert 0 <= first < 2**63
+    assert first != derive_rescue_seed(7, "state", 2, "generation")
+
+
+def test_rollout_collector_retains_live_actions_until_drained() -> None:
+    collector = RolloutCollector()
+    live = PolicyAction(torch.zeros(2), torch.tensor(0.0), torch.tensor(0.0))
+    record = RescueRollout(
+        "r", "s", action(), (), (), RescueTermination.EXHAUSTED
+    )
+    collector.add(record, live)
+
+    assert collector.rollouts == (record,)
+    assert collector.live_actions == (live,)
+    assert collector.drain() == ((record, live),)
+    assert collector.rollouts == (record,)
+    assert collector.live_actions == ()
+
+
+def test_direct_runner_generates_new_tactic_and_returns_verified_progress() -> None:
+    runner = direct_runner(
+        ('{"predicted_state":"h exposed","tactics":["cases h","simp"]}',)
+    )
+    calls = []
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (ordinary("exact h"),),
+        (TacticResult(ordinary("exact h"), TacticStatus.ERROR),),
+        evaluator_for(
+            {
+                "cases h": (TacticStatus.ACCEPTED, state("split")),
+                "simp": (TacticStatus.ERROR, None),
+            },
+            calls,
+        ),
+        NeverCancelledToken(),
+    )
+
+    assert outcome.successor.state.id == "split"
+    assert outcome.rollouts[0].attempts[0].proposal.candidate.source == "cases h"
+    assert outcome.rollouts[0].termination is RescueTermination.PROGRESS
+    assert calls == ["cases h"]
+
+
+def test_direct_runner_filters_ordinary_and_cross_rollout_duplicates() -> None:
+    runner = direct_runner(
+        (
+            '{"predicted_state":"same","tactics":["ordinary","new"]}',
+            '{"predicted_state":"same","tactics":["new","other"]}',
+        )
+    )
+    calls = []
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (ordinary("ordinary"),),
+        (TacticResult(ordinary("ordinary"), TacticStatus.ERROR),),
+        evaluator_for(
+            {
+                "new": (TacticStatus.ERROR, None),
+                "other": (TacticStatus.ERROR, None),
+            },
+            calls,
+        ),
+        NeverCancelledToken(),
+    )
+
+    assert calls == ["new", "other"]
+    assert [item.termination for item in outcome.rollouts] == [
+        RescueTermination.REJECTED,
+        RescueTermination.REJECTED,
+    ]
+
+
+def test_direct_runner_isolates_malformed_generation_and_can_complete_later() -> None:
+    runner = direct_runner(
+        (
+            "not json",
+            '{"predicted_state":"done","tactics":["exact h"]}',
+        )
+    )
+    calls = []
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (),
+        (),
+        evaluator_for({"exact h": (TacticStatus.COMPLETE, "by exact h")}, calls),
+        NeverCancelledToken(),
+    )
+
+    assert outcome.completed_proof == "by exact h"
+    assert [item.termination for item in outcome.rollouts] == [
+        RescueTermination.GENERATION_ERROR,
+        RescueTermination.COMPLETE,
+    ]
+
+
+def test_direct_runner_records_all_rejected_and_exact_budget_exhaustion() -> None:
+    runner = direct_runner(
+        ('{"predicted_state":"stuck","tactics":["a","b","c"]}',),
+        max_rescue_verifier_calls=2,
+    )
+    calls = []
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (),
+        (),
+        evaluator_for(
+            {
+                "a": (TacticStatus.ERROR, None),
+                "b": (TacticStatus.ERROR, None),
+                "c": (TacticStatus.ERROR, None),
+            },
+            calls,
+        ),
+        NeverCancelledToken(),
+    )
+
+    assert calls == ["a", "b"]
+    assert outcome.rollouts[0].termination is RescueTermination.BUDGET_EXHAUSTED
+
+
+def test_direct_runner_cancellation_preserves_prior_rollouts() -> None:
+    runner = direct_runner(
+        (
+            '{"predicted_state":"stuck","tactics":["a"]}',
+            '{"predicted_state":"stuck","tactics":["b"]}',
+        )
+    )
+    calls = []
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (),
+        (),
+        evaluator_for({"a": (TacticStatus.ERROR, None)}, calls),
+        ToggleCancelledToken((False, False, False, True)),
+    )
+
+    assert outcome.cancelled
+    assert len(outcome.rollouts) >= 1

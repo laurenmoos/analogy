@@ -6,13 +6,14 @@ import json
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from .records import (
     CancellationToken,
     CandidateOrigin,
     DiscardedSuccessor,
     Embedding,
+    Message,
     SearchNode,
     SymbolicState,
     TacticCandidate,
@@ -339,3 +340,274 @@ def render_proof_embeddings(context: ProofRescueContext) -> tuple[str, str]:
 def proof_prompt_hash(text: str) -> str:
     _require_text(text, "text")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def derive_rescue_seed(
+    base_seed: int, state_id: str, rollout_index: int, operation: str
+) -> int:
+    if isinstance(base_seed, bool) or not isinstance(base_seed, int):
+        raise ValueError("base_seed must be an integer")
+    _require_text(state_id, "state_id")
+    if (
+        isinstance(rollout_index, bool)
+        or not isinstance(rollout_index, int)
+        or rollout_index < 0
+    ):
+        raise ValueError("rollout_index must be a non-negative integer")
+    _require_text(operation, "operation")
+    payload = f"analogy-rescue-seed-v1\x1f{base_seed}\x1f{state_id}\x1f{rollout_index}\x1f{operation}"
+    digest = hashlib.sha256(payload.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % (2**63)
+
+
+class RolloutCollector:
+    """Keep persistent rollout records and short-lived live policy actions."""
+
+    def __init__(self) -> None:
+        self._rollouts: list[RescueRollout] = []
+        self._live: list[tuple[RescueRollout, Any]] = []
+
+    @property
+    def rollouts(self) -> tuple[RescueRollout, ...]:
+        return tuple(self._rollouts)
+
+    @property
+    def live_actions(self) -> tuple[Any, ...]:
+        return tuple(action for _, action in self._live)
+
+    def add(self, rollout: RescueRollout, action: Any) -> None:
+        if not isinstance(rollout, RescueRollout):
+            raise ValueError("rollout must be a RescueRollout")
+        self._rollouts.append(rollout)
+        self._live.append((rollout, action))
+
+    def drain(self) -> tuple[tuple[RescueRollout, Any], ...]:
+        drained = tuple(self._live)
+        self._live.clear()
+        return drained
+
+
+class DirectRescueRunner:
+    """Run bounded one-action rescue rollouts for a single stuck proof state."""
+
+    def __init__(
+        self,
+        *,
+        encoder: Any,
+        policy: Any,
+        generator: Any,
+        rollouts_per_state: int,
+        tactics_per_rollout: int,
+        max_rescue_verifier_calls: int,
+        base_seed: int,
+        hidden_layer: int,
+        collector: RolloutCollector | None = None,
+    ) -> None:
+        for value, name in (
+            (rollouts_per_state, "rollouts_per_state"),
+            (tactics_per_rollout, "tactics_per_rollout"),
+            (max_rescue_verifier_calls, "max_rescue_verifier_calls"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if isinstance(base_seed, bool) or not isinstance(base_seed, int):
+            raise ValueError("base_seed must be an integer")
+        if isinstance(hidden_layer, bool) or not isinstance(hidden_layer, int):
+            raise ValueError("hidden_layer must be an integer")
+        self._encoder = encoder
+        self._policy = policy
+        self._generator = generator
+        self._rollouts_per_state = rollouts_per_state
+        self._tactics_per_rollout = tactics_per_rollout
+        self._max_rescue_verifier_calls = max_rescue_verifier_calls
+        self._base_seed = base_seed
+        self._hidden_layer = hidden_layer
+        self.collector = collector or RolloutCollector()
+
+    def search(
+        self,
+        state: SymbolicState,
+        goal: SymbolicState,
+        tactic_pool: tuple[TacticCandidate, ...],
+        ordinary_attempts: tuple[TacticResult, ...],
+        evaluator: Callable[[TacticCandidate], TacticEvaluation],
+        cancellation: CancellationToken,
+    ) -> GenericRescueOutcome:
+        del tactic_pool
+        if cancellation.is_cancelled():
+            return GenericRescueOutcome(cancelled=True)
+        context = ProofRescueContext(
+            state=state,
+            goal=goal,
+            accepted_tactics=state.context,
+            failed_tactics=tuple(item.candidate.source for item in ordinary_attempts),
+        )
+        representation = self._encoder.encode(context)
+        prompt = render_direct_rescue_prompt(context)
+        messages = (
+            Message(
+                "system",
+                "Predict the immediate next proof state and propose bounded Lean 4 rescue tactics.",
+            ),
+            Message("user", prompt),
+        )
+        attempted = {_canonical_tactic(item.candidate.source) for item in ordinary_attempts}
+        rollouts: list[RescueRollout] = []
+        verifier_calls = 0
+
+        for index in range(self._rollouts_per_state):
+            if cancellation.is_cancelled():
+                return GenericRescueOutcome(
+                    rollouts=tuple(rollouts), cancelled=True
+                )
+            action_seed = derive_rescue_seed(
+                self._base_seed, state.id, index, "action"
+            )
+            generation_seed = derive_rescue_seed(
+                self._base_seed, state.id, index, "generation"
+            )
+            action = self._sample_action(representation, action_seed)
+            action_record = PolicyActionRecord(
+                seed=action_seed,
+                delta_norm=float(
+                    action.delta.detach().float().norm().cpu().item()
+                ),
+                log_probability=float(
+                    action.log_probability.detach().float().cpu().item()
+                ),
+                entropy=float(action.entropy.detach().float().cpu().item()),
+            )
+            rollout_id = f"{state.id}:direct:{index}"
+            try:
+                generated = self._generator.generate_with_delta(
+                    messages,
+                    delta=action.delta.detach(),
+                    layer=self._hidden_layer,
+                    seed=generation_seed,
+                )
+                parsed = parse_rescue_proposals(
+                    generated, self._tactics_per_rollout
+                )
+            except Exception:
+                rollout = RescueRollout(
+                    rollout_id,
+                    state.id,
+                    action_record,
+                    (),
+                    (),
+                    RescueTermination.GENERATION_ERROR,
+                )
+                self._record(rollouts, rollout, action)
+                continue
+
+            fresh_sources: list[tuple[str, str]] = []
+            for proposal in parsed:
+                key = _canonical_tactic(proposal.candidate.source)
+                if key in attempted:
+                    continue
+                attempted.add(key)
+                fresh_sources.append((proposal.candidate.source, proposal.predicted_state))
+            proposals = tuple(
+                RescueProposal(
+                    TacticCandidate(
+                        source,
+                        1.0 / len(fresh_sources),
+                        CandidateOrigin.ANALOGICAL,
+                    ),
+                    predicted,
+                )
+                for source, predicted in fresh_sources
+            ) if fresh_sources else ()
+            attempts: list[RescueAttempt] = []
+            termination = RescueTermination.EXHAUSTED
+
+            for proposal in proposals:
+                if cancellation.is_cancelled():
+                    rollout = RescueRollout(
+                        rollout_id,
+                        state.id,
+                        action_record,
+                        proposals,
+                        tuple(attempts),
+                        RescueTermination.CANCELLED,
+                    )
+                    self._record(rollouts, rollout, action)
+                    return GenericRescueOutcome(
+                        rollouts=tuple(rollouts), cancelled=True
+                    )
+                if verifier_calls >= self._max_rescue_verifier_calls:
+                    termination = RescueTermination.BUDGET_EXHAUSTED
+                    break
+                evaluation = evaluator(proposal.candidate)
+                verifier_calls += 1
+                rescue_attempt = RescueAttempt(
+                    proposal, evaluation.result, evaluation.discarded
+                )
+                attempts.append(rescue_attempt)
+                if evaluation.completed_proof is not None:
+                    rollout = RescueRollout(
+                        rollout_id,
+                        state.id,
+                        action_record,
+                        proposals,
+                        tuple(attempts),
+                        RescueTermination.COMPLETE,
+                    )
+                    self._record(rollouts, rollout, action)
+                    return GenericRescueOutcome(
+                        completed_proof=evaluation.completed_proof,
+                        rollouts=tuple(rollouts),
+                    )
+                if evaluation.successor is not None:
+                    rollout = RescueRollout(
+                        rollout_id,
+                        state.id,
+                        action_record,
+                        proposals,
+                        tuple(attempts),
+                        RescueTermination.PROGRESS,
+                    )
+                    self._record(rollouts, rollout, action)
+                    return GenericRescueOutcome(
+                        successor=evaluation.successor,
+                        rollouts=tuple(rollouts),
+                    )
+
+            if verifier_calls >= self._max_rescue_verifier_calls and len(attempts) < len(proposals):
+                termination = RescueTermination.BUDGET_EXHAUSTED
+            elif attempts and all(
+                item.result.status is TacticStatus.ERROR for item in attempts
+            ):
+                termination = RescueTermination.REJECTED
+            rollout = RescueRollout(
+                rollout_id,
+                state.id,
+                action_record,
+                proposals,
+                tuple(attempts),
+                termination,
+            )
+            self._record(rollouts, rollout, action)
+            if termination is RescueTermination.BUDGET_EXHAUSTED:
+                break
+
+        return GenericRescueOutcome(rollouts=tuple(rollouts))
+
+    def _sample_action(self, representation: ProofRepresentation, seed: int) -> Any:
+        try:
+            import torch
+        except ImportError as error:
+            raise RuntimeError("Torch is required for direct rescue") from error
+        parameter = next(self._policy.parameters())
+        generator = torch.Generator(device=parameter.device).manual_seed(seed)
+        return self._policy.sample(representation, generator)
+
+    def _record(
+        self, rollouts: list[RescueRollout], rollout: RescueRollout, action: Any
+    ) -> None:
+        rollouts.append(rollout)
+        self.collector.add(rollout, action)
+
+
+def _canonical_tactic(source: str) -> str:
+    return " ".join(source.split())

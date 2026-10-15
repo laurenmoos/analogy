@@ -47,6 +47,9 @@ rl:
   completion_reward: 1.0
   progress_reward: 0.1
   rejection_reward: -0.1
+  invalid_output_reward: -0.05
+  empty_output_reward: -0.02
+  hop_cost: 0.01
   max_rescue_verifier_calls: 8
   epochs: 2
   checkpoint_interval: 1
@@ -81,6 +84,9 @@ def test_load_config_resolves_paths_from_config_file(tmp_path: Path) -> None:
     assert config.model.top_p == 0.9
     assert config.rl.rollouts_per_state == 4
     assert config.rl.completion_reward == 1.0
+    assert config.rl.invalid_output_reward == -0.05
+    assert config.rl.empty_output_reward == -0.02
+    assert config.rl.hop_cost == 0.01
     assert config.rl.checkpoint is None
     assert config.rl.train_connectives == ("implication", "and", "or")
 
@@ -175,6 +181,9 @@ def test_load_config_rejects_invalid_rl_values(
         ("  completion_reward: 1.0", "  completion_reward: 0.05"),
         ("  progress_reward: 0.1", "  progress_reward: -0.01"),
         ("  rejection_reward: -0.1", "  rejection_reward: 0"),
+        ("  invalid_output_reward: -0.05", "  invalid_output_reward: 0"),
+        ("  empty_output_reward: -0.02", "  empty_output_reward: 0.01"),
+        ("  hop_cost: 0.01", "  hop_cost: -0.01"),
     ],
 )
 def test_load_config_enforces_rl_reward_ordering(
@@ -184,7 +193,7 @@ def test_load_config_enforces_rl_reward_ordering(
     path = tmp_path / "config.yaml"
     path.write_text(_valid_yaml().replace(old, new, 1), encoding="utf-8")
 
-    with pytest.raises(module.ConfigError, match="reward"):
+    with pytest.raises(module.ConfigError, match="reward|hop_cost"):
         module.load_config(path)
 
 

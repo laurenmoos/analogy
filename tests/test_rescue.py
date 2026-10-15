@@ -307,6 +307,9 @@ class FakeEncoder:
         self.calls.append(rescue_context)
         return proof_representation()
 
+    def prediction_distance(self, predicted_state, actual_state):
+        return 0.25 if predicted_state != actual_state else 0.0
+
 
 class FakePolicy(torch.nn.Module):
     def __init__(self):
@@ -433,6 +436,7 @@ def test_direct_runner_generates_new_tactic_and_returns_verified_progress() -> N
     assert outcome.successor.state.id == "split"
     assert outcome.rollouts[0].attempts[0].proposal.candidate.source == "cases h"
     assert outcome.rollouts[0].termination is RescueTermination.PROGRESS
+    assert outcome.rollouts[0].attempts[0].prediction_distance == 0.25
     assert calls == ["cases h"]
 
 

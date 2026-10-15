@@ -24,6 +24,7 @@ from analogy.rescue import (
 from analogy.rl import (
     DirectRescuePolicy,
     PolicyAction,
+    RewardBaseline,
     RewardWeights,
     TrainingSample,
     reinforce_step,
@@ -199,7 +200,54 @@ def rollout(termination, *, tactic="simp", predicted="smaller goal", delta_norm=
 
 
 def weights():
-    return RewardWeights(completion=1.0, progress=0.1, rejection=-0.1)
+    return RewardWeights(
+        completion=1.0,
+        progress=0.1,
+        rejection=-0.1,
+        invalid_output=-0.05,
+        empty_output=-0.02,
+        hop_cost=0.01,
+    )
+
+
+def test_invalid_and_empty_outputs_receive_distinct_negative_rewards() -> None:
+    assert verifier_reward(
+        rollout(RescueTermination.INVALID_OUTPUT), weights()
+    ).invalid_output == -0.05
+    assert verifier_reward(
+        rollout(RescueTermination.EXHAUSTED), weights()
+    ).empty_output == -0.02
+
+
+def test_surprise_reward_is_zero_for_rejection_and_capped_by_progress() -> None:
+    progressed = rollout(RescueTermination.PROGRESS)
+    progressed_attempt = progressed.attempts[0]
+    progressed = RescueRollout(
+        progressed.rollout_id,
+        progressed.state_id,
+        progressed.action,
+        progressed.proposals,
+        (
+            RescueAttempt(
+                progressed_attempt.proposal,
+                progressed_attempt.result,
+                prediction_distance=9.0,
+            ),
+        ),
+        progressed.termination,
+    )
+    rejected = rollout(RescueTermination.REJECTED)
+
+    assert verifier_reward(progressed, weights(), surprise_enabled=True).surprise == 0.1
+    assert verifier_reward(rejected, weights(), surprise_enabled=True).surprise == 0.0
+    assert verifier_reward(progressed, weights(), surprise_enabled=False).surprise == 0.0
+
+
+def test_reward_baseline_uses_preupdate_mean() -> None:
+    baseline = RewardBaseline(decay=0.5)
+    assert baseline.update("train", 1.0) == pytest.approx(1.0)
+    assert baseline.update("train", 0.0) == pytest.approx(-1.0)
+    assert baseline.value("train") == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(
@@ -208,7 +256,7 @@ def weights():
         (RescueTermination.COMPLETE, 1.0),
         (RescueTermination.PROGRESS, 0.1),
         (RescueTermination.REJECTED, -0.1),
-        (RescueTermination.EXHAUSTED, 0.0),
+        (RescueTermination.EXHAUSTED, -0.02),
         (RescueTermination.BUDGET_EXHAUSTED, 0.0),
     ],
 )
@@ -285,6 +333,26 @@ def test_zero_advantage_and_entropy_leave_parameters_unchanged() -> None:
     )
 
     assert policy.theta.item() == 0.0
+
+
+def test_singleton_reinforce_uses_moving_baseline() -> None:
+    policy = OneParameterPolicy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+    baseline = RewardBaseline(decay=0.5)
+    baseline.update("train", 1.0)
+
+    reinforce_step(
+        policy,
+        optimizer,
+        (training_sample(policy, 0.0),),
+        0.0,
+        1.0,
+        baseline,
+        "train",
+    )
+
+    assert policy.theta.item() < 0.0
+    assert baseline.value("train") == 0.5
 
 
 def test_reinforce_does_not_create_gradients_for_external_generator() -> None:

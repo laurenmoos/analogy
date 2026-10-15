@@ -65,6 +65,9 @@ class RLConfig:
     completion_reward: float
     progress_reward: float
     rejection_reward: float
+    invalid_output_reward: float
+    empty_output_reward: float
+    hop_cost: float
     max_rescue_verifier_calls: int
     epochs: int
     checkpoint_interval: int
@@ -129,6 +132,9 @@ _SCHEMA: dict[str, frozenset[str]] = {
             "completion_reward",
             "progress_reward",
             "rejection_reward",
+            "invalid_output_reward",
+            "empty_output_reward",
+            "hop_cost",
             "max_rescue_verifier_calls",
             "epochs",
             "checkpoint_interval",
@@ -274,7 +280,20 @@ def load_config(path: Path) -> AppConfig:
     rejection_reward = _finite_number(
         rl["rejection_reward"], "config.rl.rejection_reward"
     )
-    if not completion_reward > progress_reward >= 0.0 > rejection_reward:
+    invalid_output_reward = _finite_number(
+        rl["invalid_output_reward"], "config.rl.invalid_output_reward"
+    )
+    empty_output_reward = _finite_number(
+        rl["empty_output_reward"], "config.rl.empty_output_reward"
+    )
+    hop_cost = _nonnegative_number(rl["hop_cost"], "config.rl.hop_cost")
+    if not (
+        completion_reward > progress_reward >= 0.0
+        and rejection_reward < 0.0
+        and invalid_output_reward < 0.0
+        and empty_output_reward < 0.0
+        and hop_cost < completion_reward
+    ):
         raise ConfigError(
             "rl reward ordering must satisfy completion > progress >= 0 > rejection"
         )
@@ -362,6 +381,9 @@ def load_config(path: Path) -> AppConfig:
             completion_reward=completion_reward,
             progress_reward=progress_reward,
             rejection_reward=rejection_reward,
+            invalid_output_reward=invalid_output_reward,
+            empty_output_reward=empty_output_reward,
+            hop_cost=hop_cost,
             max_rescue_verifier_calls=_positive_integer(
                 rl["max_rescue_verifier_calls"],
                 "config.rl.max_rescue_verifier_calls",

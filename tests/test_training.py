@@ -110,6 +110,7 @@ def test_training_samples_are_grouped_only_by_sibling_stuck_state() -> None:
         (RescueTermination.BUDGET_EXHAUSTED, True),
         (RescueTermination.CANCELLED, False),
         (RescueTermination.GENERATION_ERROR, False),
+        (RescueTermination.INVALID_OUTPUT, True),
     ),
 )
 def test_trainable_rollouts_include_valid_zero_reward_outcomes(
@@ -156,6 +157,8 @@ def test_evaluation_validates_checkpoint_before_creating_run_directory(
 
 
 def test_checkpoint_round_trip_restores_rng_optimizer_and_policy(tmp_path: Path) -> None:
+    from analogy.rl import RewardBaseline
+
     policy = torch.nn.Linear(1, 1)
     optimizer = torch.optim.Adam(policy.parameters(), lr=0.01)
     loss = policy(torch.ones((1, 1))).sum()
@@ -166,7 +169,11 @@ def test_checkpoint_round_trip_restores_rng_optimizer_and_policy(tmp_path: Path)
     random.seed(9)
     torch.manual_seed(9)
 
-    save_training_checkpoint(path, policy, optimizer, 1, split, "hash")
+    baseline = RewardBaseline(decay=0.5)
+    baseline.update("train", 0.75)
+    save_training_checkpoint(
+        path, policy, optimizer, 1, split, "hash", reward_baseline=baseline
+    )
     expected_python = random.random()
     expected_torch = torch.rand(1)
     with torch.no_grad():
@@ -174,11 +181,20 @@ def test_checkpoint_round_trip_restores_rng_optimizer_and_policy(tmp_path: Path)
     random.seed(1)
     torch.manual_seed(1)
 
-    epoch = load_training_checkpoint(path, policy, optimizer, split, "hash")
+    restored_baseline = RewardBaseline(decay=0.5)
+    epoch = load_training_checkpoint(
+        path,
+        policy,
+        optimizer,
+        split,
+        "hash",
+        reward_baseline=restored_baseline,
+    )
 
     assert epoch == 1
     assert random.random() == expected_python
     assert torch.equal(torch.rand(1), expected_torch)
+    assert restored_baseline.value("train") == 0.75
     with pytest.raises(ValueError, match="config"):
         load_training_checkpoint(path, policy, optimizer, split, "other")
 

@@ -339,6 +339,19 @@ class QwenProofEncoder:
             ),
         )
 
+    def prediction_distance(self, predicted_state: str, actual_state: str) -> float:
+        """Return frozen-encoder cosine distance between predicted and actual goals."""
+        predicted = self._generator.embed_text(predicted_state, layer=self._layer)
+        actual = self._generator.embed_text(actual_state, layer=self._layer)
+        if predicted.dimension != actual.dimension:
+            raise ValueError("prediction embeddings must have matching dimensions")
+        dot = sum(left * right for left, right in zip(predicted.values, actual.values))
+        predicted_norm = math.sqrt(sum(value * value for value in predicted.values))
+        actual_norm = math.sqrt(sum(value * value for value in actual.values))
+        if predicted_norm <= 0.0 or actual_norm <= 0.0:
+            raise ValueError("prediction embeddings must be nonzero")
+        return max(0.0, min(2.0, 1.0 - dot / (predicted_norm * actual_norm)))
+
 
 class QwenTacticRanker:
     """Generate a normalized conventional tactic pool for one proof state."""

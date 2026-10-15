@@ -38,6 +38,9 @@ rl:
   completion_reward: 1.0
   progress_reward: 0.1
   rejection_reward: -0.1
+  invalid_output_reward: -0.05
+  empty_output_reward: -0.02
+  hop_cost: 0.01
   max_rescue_verifier_calls: 8
   epochs: 10
   checkpoint_interval: 1

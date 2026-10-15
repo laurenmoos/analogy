@@ -33,6 +33,7 @@ from .rescue import DirectRescueRunner, RescueRollout, RescueTermination, Rollou
 from .rl import (
     DirectRescuePolicy,
     PolicyAction,
+    RewardBaseline,
     RewardWeights,
     TrainingMetrics,
     TrainingSample,
@@ -190,6 +191,8 @@ def save_training_checkpoint(
     epoch: int,
     problem_split: ProblemSplit,
     config_hash: str,
+    *,
+    reward_baseline: RewardBaseline | None = None,
 ) -> None:
     payload = {
         "policy": policy.state_dict(),
@@ -200,6 +203,9 @@ def save_training_checkpoint(
         "split": asdict(problem_split),
         "config_hash": config_hash,
         "policy_schema_version": int(getattr(policy, "schema_version", 1)),
+        "reward_baseline": (
+            reward_baseline.state_dict() if reward_baseline is not None else None
+        ),
     }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +220,8 @@ def load_training_checkpoint(
     optimizer: torch.optim.Optimizer,
     problem_split: ProblemSplit,
     config_hash: str,
+    *,
+    reward_baseline: RewardBaseline | None = None,
 ) -> int:
     payload = _torch_load(Path(path))
     if payload.get("config_hash") != config_hash:
@@ -225,6 +233,9 @@ def load_training_checkpoint(
         raise ValueError("checkpoint policy schema does not match")
     policy.load_state_dict(payload["policy"])
     optimizer.load_state_dict(payload["optimizer"])
+    saved_baseline = payload.get("reward_baseline")
+    if reward_baseline is not None and saved_baseline is not None:
+        reward_baseline.load_state_dict(saved_baseline)
     random.setstate(payload["python_rng"])
     torch.random.set_rng_state(payload["torch_rng"])
     return int(payload["epoch"])
@@ -274,6 +285,7 @@ def train_direct_rescue(
     active_optimizer = optimizer or torch.optim.Adam(
         active_policy.parameters(), lr=config.rl.learning_rate
     )
+    reward_baseline = RewardBaseline()
     resolved_hash = _config_hash(config)
     start_epoch = 0
     if config.rl.checkpoint is not None:
@@ -283,6 +295,7 @@ def train_direct_rescue(
             active_optimizer,
             problem_split,
             resolved_hash,
+            reward_baseline=reward_baseline,
         )
     identifier = run_id or uuid.uuid4().hex
     writer = RescueRunWriter.create(
@@ -304,6 +317,8 @@ def train_direct_rescue(
                     siblings,
                     config.rl.entropy_weight,
                     config.rl.max_gradient_norm,
+                    reward_baseline,
+                    "train",
                 )
                 all_metrics.append(metrics)
                 writer.append_jsonl(
@@ -326,6 +341,7 @@ def train_direct_rescue(
                 epoch,
                 problem_split,
                 resolved_hash,
+                reward_baseline=reward_baseline,
             )
         if validation_score > best_score:
             best_score = validation_score
@@ -337,6 +353,7 @@ def train_direct_rescue(
                     epoch,
                     problem_split,
                     resolved_hash,
+                    reward_baseline=reward_baseline,
                 )
             best_checkpoint = checkpoint
 
@@ -478,6 +495,9 @@ def _execute_problem(
             config.rl.completion_reward,
             config.rl.progress_reward,
             config.rl.rejection_reward,
+            config.rl.invalid_output_reward,
+            config.rl.empty_output_reward,
+            config.rl.hop_cost,
         )
         rewarded: list[RescueRollout] = []
         samples: list[TrainingSample] = []

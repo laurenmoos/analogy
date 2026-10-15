@@ -187,9 +187,19 @@ class RewardWeights:
     completion: float
     progress: float
     rejection: float
+    invalid_output: float = -0.05
+    empty_output: float = -0.02
+    hop_cost: float = 0.0
 
     def __post_init__(self) -> None:
-        values = (self.completion, self.progress, self.rejection)
+        values = (
+            self.completion,
+            self.progress,
+            self.rejection,
+            self.invalid_output,
+            self.empty_output,
+            self.hop_cost,
+        )
         if any(
             isinstance(value, bool)
             or not isinstance(value, (int, float))
@@ -199,10 +209,25 @@ class RewardWeights:
             raise ValueError("reward weights must be finite numbers")
         object.__setattr__(self, "completion", float(self.completion))
         object.__setattr__(self, "progress", float(self.progress))
-        object.__setattr__(self, "rejection", float(self.rejection))
-        if not self.completion > self.progress >= 0.0 > self.rejection:
+        for name in (
+            "completion",
+            "progress",
+            "rejection",
+            "invalid_output",
+            "empty_output",
+            "hop_cost",
+        ):
+            object.__setattr__(self, name, float(getattr(self, name)))
+        if not (
+            self.completion > self.progress >= 0.0
+            and self.rejection < 0.0
+            and self.invalid_output < 0.0
+            and self.empty_output < 0.0
+            and 0.0 <= self.hop_cost < self.completion
+        ):
             raise ValueError(
-                "reward weights require completion > progress >= 0 > rejection"
+                "reward weights require ordered positive rewards, negative failure "
+                "rewards, and a non-negative hop cost below completion"
             )
 
 
@@ -211,9 +236,21 @@ class RewardBreakdown:
     completion: float = 0.0
     progress: float = 0.0
     rejection: float = 0.0
+    invalid_output: float = 0.0
+    empty_output: float = 0.0
+    hop_cost: float = 0.0
+    surprise: float = 0.0
 
     def __post_init__(self) -> None:
-        for name in ("completion", "progress", "rejection"):
+        for name in (
+            "completion",
+            "progress",
+            "rejection",
+            "invalid_output",
+            "empty_output",
+            "hop_cost",
+            "surprise",
+        ):
             value = getattr(self, name)
             if (
                 isinstance(value, bool)
@@ -225,24 +262,107 @@ class RewardBreakdown:
 
     @property
     def total(self) -> float:
-        return self.completion + self.progress + self.rejection
+        return (
+            self.completion
+            + self.progress
+            + self.rejection
+            + self.invalid_output
+            + self.empty_output
+            + self.surprise
+            - self.hop_cost
+        )
 
 
 def verifier_reward(
-    rollout: RescueRollout, weights: RewardWeights
+    rollout: RescueRollout,
+    weights: RewardWeights,
+    *,
+    surprise_enabled: bool = False,
 ) -> RewardBreakdown:
     if not isinstance(rollout, RescueRollout):
         raise ValueError("rollout must be a RescueRollout")
     if not isinstance(weights, RewardWeights):
         raise ValueError("weights must be RewardWeights")
+    if not isinstance(surprise_enabled, bool):
+        raise ValueError("surprise_enabled must be a bool")
     _validate_rollout_termination(rollout)
     if rollout.termination is RescueTermination.COMPLETE:
         return RewardBreakdown(completion=weights.completion)
     if rollout.termination is RescueTermination.PROGRESS:
-        return RewardBreakdown(progress=weights.progress)
+        surprise = 0.0
+        if surprise_enabled:
+            distances = tuple(
+                item.prediction_distance
+                for item in rollout.attempts
+                if item.result.status is TacticStatus.ACCEPTED
+                and item.prediction_distance is not None
+            )
+            if distances:
+                surprise = min(weights.progress, max(distances) * weights.progress)
+        return RewardBreakdown(progress=weights.progress, surprise=surprise)
     if rollout.termination is RescueTermination.REJECTED:
         return RewardBreakdown(rejection=weights.rejection)
+    if rollout.termination is RescueTermination.INVALID_OUTPUT:
+        return RewardBreakdown(invalid_output=weights.invalid_output)
+    if rollout.termination is RescueTermination.EXHAUSTED:
+        return RewardBreakdown(empty_output=weights.empty_output)
     return RewardBreakdown()
+
+
+class RewardBaseline:
+    """Exponential moving reward baseline for singleton policy updates."""
+
+    def __init__(self, decay: float = 0.95) -> None:
+        if (
+            isinstance(decay, bool)
+            or not isinstance(decay, (int, float))
+            or not math.isfinite(float(decay))
+            or not 0.0 <= float(decay) < 1.0
+        ):
+            raise ValueError("decay must be finite and in [0, 1)")
+        self.decay = float(decay)
+        self._values: dict[str, float] = {}
+
+    def value(self, key: str) -> float:
+        if not isinstance(key, str) or not key:
+            raise ValueError("baseline key must be a non-empty string")
+        return self._values.get(key, 0.0)
+
+    def update(self, key: str, reward: float) -> float:
+        previous = self.value(key)
+        if (
+            isinstance(reward, bool)
+            or not isinstance(reward, (int, float))
+            or not math.isfinite(float(reward))
+        ):
+            raise ValueError("reward must be finite")
+        normalized = float(reward)
+        if key in self._values:
+            self._values[key] = self.decay * previous + (1.0 - self.decay) * normalized
+        else:
+            self._values[key] = normalized
+        return normalized - previous
+
+    def state_dict(self) -> dict[str, object]:
+        return {"decay": self.decay, "values": dict(self._values)}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        if not isinstance(state, dict) or set(state) != {"decay", "values"}:
+            raise ValueError("invalid reward baseline state")
+        if float(state["decay"]) != self.decay:
+            raise ValueError("reward baseline decay does not match")
+        values = state["values"]
+        if not isinstance(values, dict):
+            raise ValueError("invalid reward baseline values")
+        restored: dict[str, float] = {}
+        for key, value in values.items():
+            if not isinstance(key, str) or not key or isinstance(value, bool):
+                raise ValueError("invalid reward baseline entry")
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError("invalid reward baseline entry")
+            restored[key] = number
+        self._values = restored
 
 
 def _validate_rollout_termination(rollout: RescueRollout) -> None:
@@ -306,6 +426,8 @@ def reinforce_step(
     samples: Sequence[TrainingSample],
     entropy_weight: float,
     max_gradient_norm: float,
+    baseline: RewardBaseline | None = None,
+    baseline_key: str = "train",
 ) -> TrainingMetrics:
     normalized = tuple(samples)
     if not normalized:
@@ -331,7 +453,14 @@ def reinforce_step(
     rewards = torch.tensor(
         [sample.reward for sample in normalized], dtype=torch.float32
     )
-    advantages = rewards - rewards.mean() if len(normalized) > 1 else rewards
+    if baseline is not None and not isinstance(baseline, RewardBaseline):
+        raise ValueError("baseline must be a RewardBaseline")
+    if len(normalized) > 1:
+        advantages = rewards - rewards.mean()
+    elif baseline is not None:
+        advantages = rewards - baseline.value(baseline_key)
+    else:
+        advantages = rewards
     log_probabilities = torch.stack(
         [sample.action.log_probability for sample in normalized]
     )
@@ -360,6 +489,8 @@ def reinforce_step(
         optimizer.zero_grad(set_to_none=True)
         raise ValueError("policy gradients must be finite")
     optimizer.step()
+    if len(normalized) == 1 and baseline is not None:
+        baseline.update(baseline_key, normalized[0].reward)
     return TrainingMetrics(
         float(loss.detach().cpu().item()),
         float(rewards.mean().item()),
@@ -375,6 +506,7 @@ __all__ = [
     "DirectRescuePolicy",
     "PolicyAction",
     "RewardBreakdown",
+    "RewardBaseline",
     "RewardWeights",
     "TrainingMetrics",
     "TrainingSample",

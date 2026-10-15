@@ -203,6 +203,7 @@ class RescueAttempt:
     proposal: RescueProposal
     result: TacticResult
     discarded: DiscardedSuccessor | None = None
+    prediction_distance: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.proposal, RescueProposal):
@@ -211,6 +212,15 @@ class RescueAttempt:
             raise ValueError("result must be a TacticResult")
         if self.result.candidate != self.proposal.candidate:
             raise ValueError("result candidate must match proposal candidate")
+        if self.prediction_distance is not None:
+            distance = _finite_float(
+                self.prediction_distance, "prediction_distance"
+            )
+            if distance < 0.0 or self.result.status is not TacticStatus.ACCEPTED:
+                raise ValueError(
+                    "prediction distance requires a non-negative accepted result"
+                )
+            object.__setattr__(self, "prediction_distance", distance)
         if self.discarded is not None:
             if not isinstance(self.discarded, DiscardedSuccessor):
                 raise ValueError("discarded must be a DiscardedSuccessor or None")
@@ -713,8 +723,21 @@ class DirectRescueRunner:
                     break
                 evaluation = evaluator(proposal.candidate)
                 verifier_calls += 1
+                prediction_distance = None
+                if (
+                    evaluation.result.status is TacticStatus.ACCEPTED
+                    and evaluation.result.state is not None
+                    and hasattr(self._encoder, "prediction_distance")
+                ):
+                    prediction_distance = self._encoder.prediction_distance(
+                        proposal.predicted_state,
+                        evaluation.result.state.expression,
+                    )
                 rescue_attempt = RescueAttempt(
-                    proposal, evaluation.result, evaluation.discarded
+                    proposal,
+                    evaluation.result,
+                    evaluation.discarded,
+                    prediction_distance,
                 )
                 attempts.append(rescue_attempt)
                 if evaluation.completed_proof is not None:

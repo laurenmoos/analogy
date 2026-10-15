@@ -12,6 +12,7 @@ from .lean_gym.resources import LEAN_PROJECT_ROOT
 from .lean_gym.verifier import LeanSubprocessVerifier
 from .model import ModelConfigurationError, QwenGenerator, run_baseline, run_capability
 from .model_backend import load_model_backend
+from .run_audit import AuditRunError, audit_analogy_run
 from .training import evaluate_direct_rescue, train_direct_rescue
 
 
@@ -22,6 +23,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("config.yaml"),
         help="path to the experiment configuration",
+    )
+    parser.add_argument(
+        "--audit-source",
+        type=Path,
+        help="completed rescue run to inspect after an audit_analogy experiment",
+    )
+    parser.add_argument(
+        "--audit-output",
+        type=Path,
+        help="separate output directory for post-hoc audit artifacts",
+    )
+    parser.add_argument("--audit-seed", type=int, help="post-hoc judge seed")
+    parser.add_argument(
+        "--audit-max-calls",
+        type=int,
+        default=100,
+        help="maximum logged iterations to judge",
+    )
+    parser.add_argument(
+        "--audit-max-repair-calls",
+        type=int,
+        default=1,
+        help="schema-repair attempts per judgment",
     )
     return parser
 
@@ -39,6 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "baseline",
         "train_rescue",
         "evaluate_rescue",
+        "audit_analogy",
     }:
         print(
             f"Unsupported experiment stage: {config.experiment.stage}",
@@ -58,12 +83,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-
+    if config.experiment.stage == "audit_analogy":
+        missing = [
+            name
+            for name, value in (
+                ("--audit-source", args.audit_source),
+                ("--audit-output", args.audit_output),
+            )
+            if value is None
+        ]
+        if missing:
+            print(
+                f"audit_analogy requires {' and '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         generator = load_model_backend(config.model)
     except ModelConfigurationError as error:
         print(f"Model configuration error: {error}", file=sys.stderr)
         return 2
+    if config.experiment.stage == "audit_analogy":
+        assert args.audit_source is not None and args.audit_output is not None
+        try:
+            summary = audit_analogy_run(
+                args.audit_source,
+                args.audit_output,
+                generator,
+                config.benchmark.corpus,
+                seed=(config.run.seed if args.audit_seed is None else args.audit_seed),
+                max_calls=args.audit_max_calls,
+                max_repair_calls=args.audit_max_repair_calls,
+            )
+        except (AuditRunError, ValueError) as error:
+            print(f"Audit error: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"audit_analogy: {summary.judged}/{summary.attempted} judged; "
+            f"failures={summary.failures}"
+        )
+        return 0
     verifier = LeanSubprocessVerifier(LEAN_PROJECT_ROOT)
     if config.experiment.stage == "capability":
         results = run_capability(config, generator, verifier)

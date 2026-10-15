@@ -162,6 +162,39 @@ immutable record of the run.
 
 See the [quality and stream design](docs/superpowers/specs/2026-10-14-rescue-quality-and-analogy-stream-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-rescue-quality-and-analogy-stream.md).
 
+### Post-hoc LLM audit
+
+The audit stage explains a completed analogy run without participating in it.
+Training, search, Lean verification, surprise, rewards, and policy updates finish
+before the auditor starts. The source run is read-only and its hash is checked
+again after judging.
+
+Copy the matching model profile, set `experiment.stage: audit_analogy`, then run
+one audit for the training run and another for its held-out evaluation:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m analogy \
+  --config config.mlx-8b-audit.yaml \
+  --audit-source runs-fast/EXPERIMENT/rescue/TRAIN_RUN \
+  --audit-output runs-fast/EXPERIMENT/audits/train \
+  --audit-max-calls 100
+
+PYTHONPATH=src .venv/bin/python -m analogy \
+  --config config.mlx-8b-audit.yaml \
+  --audit-source runs-fast/EXPERIMENT/rescue/EVALUATION_RUN \
+  --audit-output runs-fast/EXPERIMENT/audits/test \
+  --audit-max-calls 100
+```
+
+Only `train`, `validation`, and `analogy_loop` iteration rows are audited; direct,
+conventional, and shuffled-control phases are excluded. Each separate audit
+writes `config.json`, append-only `judgments.jsonl`, and `summary.json`. A row
+classifies the earliest apparent failure as analogy choice, tactic translation,
+Lean execution, or proof progress (or `working`) and preserves the raw model
+output. The judge never sees reference proofs and its scores are descriptive—not
+rewards. Re-running the same output directory resumes by iteration key without
+duplicating completed rows.
+
 Run the complete preservation suite with:
 
 ```bash

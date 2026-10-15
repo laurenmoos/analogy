@@ -216,3 +216,86 @@ def test_rescue_stages_accept_analogy_enabled(tmp_path: Path, monkeypatch, capsy
 
     assert cli.main(["--config", str(config_path)]) == 0
     assert "train_rescue: 1 epochs" in capsys.readouterr().out
+
+
+def test_audit_stage_requires_source_and_output_before_model_load(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (ROOT / "config.yaml")
+        .read_text(encoding="utf-8")
+        .replace("stage: baseline", "stage: audit_analogy"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_model_backend",
+        lambda config: (_ for _ in ()).throw(AssertionError("model must not load")),
+    )
+
+    status = cli.main(["--config", str(config_path)])
+
+    assert status == 2
+    assert "--audit-source" in capsys.readouterr().err
+
+
+def test_audit_stage_dispatches_without_constructing_lean_verifier(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (ROOT / "config.yaml")
+        .read_text(encoding="utf-8")
+        .replace("stage: baseline", "stage: audit_analogy"),
+        encoding="utf-8",
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "audit"
+    generator = object()
+    received = []
+    monkeypatch.setattr(cli, "load_model_backend", lambda config: generator)
+    monkeypatch.setattr(
+        cli,
+        "LeanSubprocessVerifier",
+        lambda root: (_ for _ in ()).throw(AssertionError("Lean must not load")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "audit_analogy_run",
+        lambda source_run, output_dir, received_generator, corpus, **kwargs:
+        received.append(
+            (source_run, output_dir, received_generator, corpus, kwargs)
+        )
+        or SimpleNamespace(attempted=7, judged=6, failures=1),
+    )
+
+    status = cli.main(
+        [
+            "--config",
+            str(config_path),
+            "--audit-source",
+            str(source),
+            "--audit-output",
+            str(output),
+            "--audit-seed",
+            "17",
+            "--audit-max-calls",
+            "9",
+            "--audit-max-repair-calls",
+            "2",
+        ]
+    )
+
+    assert status == 0
+    assert received == [
+        (
+            source,
+            output,
+            generator,
+            config_path.parent / "src/analogy/lean_gym/corpus/problems.json",
+            {"seed": 17, "max_calls": 9, "max_repair_calls": 2},
+        )
+    ]
+    assert "audit_analogy: 6/7 judged; failures=1" in capsys.readouterr().out

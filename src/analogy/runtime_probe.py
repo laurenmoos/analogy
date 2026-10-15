@@ -40,22 +40,40 @@ class OperationCounts:
 class RuntimeProjection:
     cold_load_seconds: float
     expected_seconds: float
-    hard_upper_seconds: float
+    nominal_budget_seconds: float
+    guaranteed_upper_seconds: float | None = None
+
+
+def experiment_episode_count(
+    *,
+    train: int,
+    validation: int,
+    test: int,
+    epochs: int,
+    evaluation_conditions: int,
+) -> int:
+    values = (train, validation, test, epochs, evaluation_conditions)
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in values
+    ):
+        raise ValueError("episode-count inputs must be non-negative integers")
+    return epochs * (train + validation) + evaluation_conditions * test
 
 
 def project_runtime(
     measurement: RuntimeMeasurement,
     counts: OperationCounts,
     *,
-    hard_timeout_seconds: float,
+    nominal_budget_seconds: float,
 ) -> RuntimeProjection:
     if (
-        isinstance(hard_timeout_seconds, bool)
-        or not isinstance(hard_timeout_seconds, (int, float))
-        or not math.isfinite(float(hard_timeout_seconds))
-        or hard_timeout_seconds < 0
+        isinstance(nominal_budget_seconds, bool)
+        or not isinstance(nominal_budget_seconds, (int, float))
+        or not math.isfinite(float(nominal_budget_seconds))
+        or nominal_budget_seconds < 0
     ):
-        raise ValueError("hard timeout must be finite and non-negative")
+        raise ValueError("nominal budget must be finite and non-negative")
     expected = (
         measurement.generation * counts.generations
         + measurement.embedding * counts.embeddings
@@ -63,7 +81,7 @@ def project_runtime(
         + measurement.lean * counts.lean_calls
     )
     return RuntimeProjection(
-        float(measurement.load), float(expected), float(hard_timeout_seconds)
+        float(measurement.load), float(expected), float(nominal_budget_seconds)
     )
 
 
@@ -90,6 +108,7 @@ __all__ = [
     "OperationCounts",
     "RuntimeMeasurement",
     "RuntimeProjection",
+    "experiment_episode_count",
     "project_runtime",
     "runtime_report_payload",
 ]

@@ -21,37 +21,44 @@ Three offline probe runs produced these p50 latencies:
 
 | Operation | p50 |
 |---|---:|
-| Cold model load | 2.67 s |
-| Ordinary or latent-steered generation | 2.95 s |
-| Proof embedding | 0.11 s |
-| Two-candidate batched scoring | 5.32 s |
-| Lean tactic check | 1.58 s |
+| Cold model load | 2.81 s |
+| Ordinary or latent-steered generation | 3.26 s |
+| Proof embedding | 0.13 s |
+| Two-candidate batched scoring | 7.06 s |
+| Lean tactic check | 1.70 s |
 
-The operation-count projection is about 2.4 minutes for the six-problem smoke
-and 15.8 minutes for a 40-episode run. The configured hard bounds are 36 minutes
-and 4 hours respectively. These bounds are deliberately conservative: eight
-model calls at the full 45-second ceiling per episode.
+The operation-count projection is about 5.2 minutes for the 12-episode smoke
+and 17.2 minutes for a 40-episode run. The configured nominal budget totals are
+72 minutes and 4 hours respectively: eight model calls at the full 45-second
+ceiling per episode. They are not guaranteed wall-clock upper bounds because
+the model timeout is checked after an in-flight call returns.
 
 Probe artifacts:
 
-- `runs-fast/probes/507c0d1bc7344854a1f7098dac0b8c2c/runtime.json`
-- `runs-fast/probes/09477c3110fa44d4b3e0b732320abcf8/runtime.json`
-- `runs-fast/probes/5225d868e5a8410980a151ca922dd1fd/runtime.json`
+- `runs-fast/probes/700ea853fbc747dc9e44fbf644348bfd/runtime.json`
+- `runs-fast/probes/99898c447f6b42e69317b8df14533ca1/runtime.json`
+- `runs-fast/probes/9684ff7197864a3584bb20b117e315f3/runtime.json`
+
+A separate bounded diagnostic used the same prompt and seed with four
+deterministic nonzero final-layer directions. All four changed the sampled
+output relative to the unsteered baseline, confirming that the intervention
+now reaches logits after MLX-LM's split prefill schedule.
 
 ## Six-problem smoke
 
 The smoke used two hard problems from each requested connective:
 `imp_intro_04`, `imp_intro_05`, `not_intro_04`, `not_intro_05`,
-`iff_intro_04`, and `iff_intro_05`. Training took about 233 seconds from artifact
-timestamps; the final four-condition evaluation took 139.39 seconds, for about
-6.2 minutes total. Long proof-state prompts explain the gap from the simple
-operation-count projection.
+`iff_intro_04`, and `iff_intro_05`. Training took 140.06 seconds and the final
+four-condition evaluation took 151.54 seconds, for 291.60 seconds (4.86 minutes)
+total.
 
 The completed run recorded:
 
 - 12 problem episodes across training and matched evaluation;
-- 20 model generations, 63 Lean calls, 10 rescue rollouts;
-- 7 logged analogy iterations;
+- 18 rescue-generation attempt records, 64 episode-reported Lean calls, and 10
+  rescue rollouts (these scoped counters exclude ordinary backend generations
+  and verifier initialization calls);
+- 8 logged analogy iterations;
 - valid-generation rates of 1.0 for both the matched analogy and shuffled-analogy
   conditions;
 - zero solved problems in every evaluation condition.
@@ -64,9 +71,9 @@ end with the exact 8B model.
 
 Smoke artifacts:
 
-- `runs-fast/smoke-6-20261015T065317Z/smoke-report.json`
-- `runs-fast/smoke-6-20261015T065317Z/rescue/train/`
-- `runs-fast/smoke-6-20261015T065317Z/rescue/evaluate-epoch-0001/`
+- `runs-fast/smoke-6-20261015T153554Z/smoke-report.json`
+- `runs-fast/smoke-6-20261015T153554Z/rescue/train/`
+- `runs-fast/smoke-6-20261015T153554Z/rescue/evaluate-epoch-0001/`
 
 ## Evidence-backed tuning
 

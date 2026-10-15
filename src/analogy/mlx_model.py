@@ -13,20 +13,42 @@ from .records import Embedding, Message
 
 
 class _DeltaLayer:
-    def __init__(self, inner: Any, delta: Any, mx: Any) -> None:
+    def __init__(
+        self, inner: Any, delta: Any, mx: Any, *, prompt_tokens: int
+    ) -> None:
         self.inner = inner
         self.delta = delta
         self.mx = mx
+        self.prompt_tokens = prompt_tokens
+        self.tokens_seen = 0
         self.applied = False
 
     def __call__(self, hidden: Any, mask: Any = None, cache: Any = None) -> Any:
         output = self.inner(hidden, mask, cache)
-        if not self.applied:
+        width = int(hidden.shape[1])
+        start = self.tokens_seen
+        self.tokens_seen += width
+        if not self.applied and start < self.prompt_tokens <= self.tokens_seen:
+            index = self.prompt_tokens - start - 1
             output = self.mx.concatenate(
-                [output[:, :-1, :], output[:, -1:, :] + self.delta], axis=1
+                [
+                    output[:, :index, :],
+                    output[:, index : index + 1, :] + self.delta,
+                    output[:, index + 1 :, :],
+                ],
+                axis=1,
             )
             self.applied = True
         return output
+
+
+def _load_exact_model(load_fn: Callable[[str], Any], identifier: str) -> Any:
+    try:
+        return load_fn(identifier)
+    except Exception as error:
+        raise ModelConfigurationError(
+            f"failed to load MLX model {identifier!r}: {error or type(error).__name__}"
+        ) from error
 
 
 class MLXQwenGenerator:
@@ -75,7 +97,7 @@ class MLXQwenGenerator:
             raise ModelConfigurationError(
                 "the MLX extra is not installed; install analogy[mlx]"
             ) from error
-        model, tokenizer = load(config.name)
+        model, tokenizer = _load_exact_model(load, config.name)
         return cls(
             model=model,
             tokenizer=tokenizer,
@@ -88,7 +110,9 @@ class MLXQwenGenerator:
         )
 
     def generate(self, messages: tuple[Message, ...], *, seed: int) -> str:
-        return self._run_generation(messages, seed=seed)
+        return self._run_generation(
+            self._generation_prompt_tokens(messages), seed=seed
+        )
 
     def generate_with_delta(
         self,
@@ -99,13 +123,25 @@ class MLXQwenGenerator:
         seed: int,
     ) -> str:
         values = self._delta_values(delta)
+        prompt_tokens = self._generation_prompt_tokens(messages)
         layers = self._layers()
         resolved = _resolve_layer(layer, len(layers))
         mlx_delta = self.mx.array(values)
         original = layers[resolved]
-        layers[resolved] = _DeltaLayer(original, mlx_delta, self.mx)
+        wrapper = _DeltaLayer(
+            original,
+            mlx_delta,
+            self.mx,
+            prompt_tokens=len(prompt_tokens),
+        )
+        layers[resolved] = wrapper
         try:
-            return self._run_generation(messages, seed=seed)
+            output = self._run_generation(prompt_tokens, seed=seed)
+            if not wrapper.applied:
+                raise ModelConfigurationError(
+                    "MLX generation did not reach the final prompt token"
+                )
+            return output
         finally:
             layers[resolved] = original
 
@@ -119,7 +155,7 @@ class MLXQwenGenerator:
         if not token_ids:
             raise ModelConfigurationError("embedding tokenization must be nonempty")
         layers = self._layers()
-        resolved = _resolve_layer(layer, len(layers))
+        resolved = _resolve_layer(layer, len(layers) + 1)
         inputs = self.mx.array([token_ids])
         core = self.model.model
         embed_tokens = getattr(core, "embed_tokens", None)
@@ -127,8 +163,13 @@ class MLXQwenGenerator:
             raise ModelConfigurationError("MLX model does not expose token embeddings")
         hidden = embed_tokens(inputs)
         mask = self._create_attention_mask(hidden, None)
-        for decoder_layer in layers[: resolved + 1]:
+        for decoder_layer in layers[:resolved]:
             hidden = decoder_layer(hidden, mask, None)
+        if resolved == len(layers):
+            norm = getattr(core, "norm", None)
+            if norm is None:
+                raise ModelConfigurationError("MLX model does not expose final norm")
+            hidden = norm(hidden)
         vector = hidden[0, -1]
         vector = (
             vector.astype(self.mx.float32)
@@ -233,15 +274,26 @@ class MLXQwenGenerator:
             )
         return tuple(scores)
 
-    def _run_generation(
-        self, messages: tuple[Message, ...], *, seed: int
-    ) -> str:
+    def _generation_prompt_tokens(self, messages: tuple[Message, ...]) -> list[int]:
         prompt = self.tokenizer.apply_chat_template(
             [{"role": item.role, "content": item.content} for item in messages],
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        bos_token = getattr(self.tokenizer, "bos_token", None)
+        add_special_tokens = bos_token is None or not prompt.startswith(bos_token)
+        prompt_tokens = [
+            int(item)
+            for item in self.tokenizer.encode(
+                prompt, add_special_tokens=add_special_tokens
+            )
+        ]
+        if not prompt_tokens:
+            raise ModelConfigurationError("generation prompt tokenization must be nonempty")
+        return prompt_tokens
+
+    def _run_generation(self, prompt_tokens: list[int], *, seed: int) -> str:
         self.mx.random.seed(seed)
         sampler = (
             self._make_sampler(temp=0.0)
@@ -252,7 +304,7 @@ class MLXQwenGenerator:
         output = self._generate_fn(
             self.model,
             self.tokenizer,
-            prompt=prompt,
+            prompt=prompt_tokens,
             max_tokens=self.max_new_tokens,
             sampler=sampler,
             verbose=False,

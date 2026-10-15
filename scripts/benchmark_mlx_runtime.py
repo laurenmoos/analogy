@@ -22,9 +22,11 @@ from analogy.model_backend import load_model_backend
 from analogy.runtime_probe import (
     OperationCounts,
     RuntimeMeasurement,
+    experiment_episode_count,
     project_runtime,
     runtime_report_payload,
 )
+from analogy.training import build_evaluation_conditions, split_problems
 
 
 def _elapsed(call):
@@ -33,9 +35,9 @@ def _elapsed(call):
     return value, time.monotonic() - started
 
 
-def _projection_payload(measurement, counts, hard_seconds):
+def _projection_payload(measurement, counts, nominal_seconds):
     projection = project_runtime(
-        measurement, counts, hard_timeout_seconds=hard_seconds
+        measurement, counts, nominal_budget_seconds=nominal_seconds
     )
     return {
         "counts": asdict(counts),
@@ -54,9 +56,10 @@ def main(argv=None) -> int:
     generator, load_seconds = _elapsed(
         lambda: load_model_backend(config.model)
     )
+    problems = load_problems(config.benchmark.corpus)
     problem = next(
         item
-        for item in load_problems(config.benchmark.corpus)
+        for item in problems
         if item.id == "imp_intro_01"
     )
     messages = capability_prompt(problem)
@@ -101,9 +104,34 @@ def main(argv=None) -> int:
         lean=lean_seconds,
     )
     machine = f"{platform.platform()} / {platform.machine()}"
-    smoke_counts = OperationCounts(30, 48, 0, 30)
-    full_counts = OperationCounts(200, 320, 0, 200)
-    per_episode_hard = (
+    evaluation_conditions = len(build_evaluation_conditions(config))
+    smoke_episodes = experiment_episode_count(
+        train=2,
+        validation=2,
+        test=2,
+        epochs=config.rl.epochs,
+        evaluation_conditions=evaluation_conditions,
+    )
+    split = split_problems(
+        problems,
+        train_connectives=config.rl.train_connectives,
+        validation_connectives=config.rl.validation_connectives,
+        test_connectives=config.rl.test_connectives,
+    )
+    full_episodes = experiment_episode_count(
+        train=len(split.train),
+        validation=len(split.validation),
+        test=len(split.test),
+        epochs=config.rl.epochs,
+        evaluation_conditions=evaluation_conditions,
+    )
+    smoke_counts = OperationCounts(
+        5 * smoke_episodes, 8 * smoke_episodes, 0, 5 * smoke_episodes
+    )
+    full_counts = OperationCounts(
+        5 * full_episodes, 8 * full_episodes, 0, 5 * full_episodes
+    )
+    per_episode_nominal = (
         config.model.timeout_seconds * config.analogy.max_model_calls
     )
     report = runtime_report_payload(
@@ -114,7 +142,7 @@ def main(argv=None) -> int:
         projection=project_runtime(
             measurement,
             full_counts,
-            hard_timeout_seconds=40 * per_episode_hard,
+            nominal_budget_seconds=full_episodes * per_episode_nominal,
         ),
     )
     report.update(
@@ -140,14 +168,21 @@ def main(argv=None) -> int:
             },
             "projection_basis": (
                 "Typical estimate assumes one ordinary generation and two "
-                "two-call analogy iterations per episode. Hard bounds use "
-                "the configured eight-call episode deadline."
+                "two-call analogy iterations per episode. Nominal budgets use "
+                "the configured eight-call episode budget. The nominal budget "
+                "is not a guaranteed wall-clock upper bound because model "
+                "timeouts are checked after calls return."
             ),
+            "episode_counts": {
+                "smoke": smoke_episodes,
+                "full": full_episodes,
+                "evaluation_conditions": evaluation_conditions,
+            },
             "smoke": _projection_payload(
-                measurement, smoke_counts, 6 * per_episode_hard
+                measurement, smoke_counts, smoke_episodes * per_episode_nominal
             ),
             "full": _projection_payload(
-                measurement, full_counts, 40 * per_episode_hard
+                measurement, full_counts, full_episodes * per_episode_nominal
             ),
         }
     )

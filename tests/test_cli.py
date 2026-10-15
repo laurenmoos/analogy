@@ -4,10 +4,27 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import analogy.__main__ as cli
+from analogy.model import ModelConfigurationError
 from analogy.records import BaselineProblemResult, BaselineStatus, BenchmarkRun, CapabilityResult
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_model_load_error_names_exact_identifier(monkeypatch, capsys) -> None:
+    identifier = "mlx-community/Qwen3-8B-4bit"
+    monkeypatch.setattr(
+        cli,
+        "load_model_backend",
+        lambda config: (_ for _ in ()).throw(
+            ModelConfigurationError(f"failed to load MLX model {identifier}")
+        ),
+    )
+
+    status = cli.main(["--config", str(ROOT / "config.mlx-8b-fast.yaml")])
+
+    assert status == 2
+    assert identifier in capsys.readouterr().err
 
 
 def test_capability_stage_runs_model_and_reports_passing_gate(

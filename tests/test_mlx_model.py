@@ -74,9 +74,9 @@ class FixedFinalLayer:
 
 
 class EmbeddingCore:
-    def __init__(self, values=(3.0, 4.0)) -> None:
+    def __init__(self, values=(3.0, 4.0), norm=None) -> None:
         self.layers = [IdentityLayer(), FixedFinalLayer(values)]
-        self.norm = IdentityLayer()
+        self.norm = norm or IdentityLayer()
 
     @staticmethod
     def embed_tokens(inputs):
@@ -84,9 +84,14 @@ class EmbeddingCore:
 
 
 class EmbeddingModel:
-    def __init__(self, values=(3.0, 4.0)) -> None:
-        self.model = EmbeddingCore(values)
+    def __init__(self, values=(3.0, 4.0), norm=None) -> None:
+        self.model = EmbeddingCore(values, norm)
         self.args = SimpleNamespace(hidden_size=2)
+
+
+class WeightedNorm:
+    def __call__(self, hidden):
+        return hidden * torch.tensor([2.0, 1.0])
 
 
 class ScoringModel:
@@ -138,10 +143,14 @@ class Runtime:
         self.generate_calls.append(kwargs)
         if self.generate_error is not None:
             raise self.generate_error
-        prefill = torch.zeros((1, 2, 2))
+        prompt = kwargs["prompt"]
+        prefill = torch.zeros((1, len(prompt) - 1, 2))
+        final_prompt = torch.zeros((1, 1, 2))
         decode = torch.zeros((1, 1, 2))
         for layer in model.model.layers:
             prefill = layer(prefill, None, None)
+        for layer in model.model.layers:
+            final_prompt = layer(final_prompt, None, object())
         for layer in model.model.layers:
             decode = layer(decode, None, object())
         return "decoded answer"
@@ -188,7 +197,7 @@ def test_generation_renders_nonthinking_chat_and_uses_deterministic_sampler():
     assert runtime.sampler_calls == [{"temp": 0.0}]
     assert runtime.generate_calls == [
         {
-            "prompt": "rendered prompt",
+            "prompt": [1, 2],
             "max_tokens": 96,
             "sampler": ("sampler", {"temp": 0.0}),
             "verbose": False,
@@ -218,7 +227,7 @@ def test_sampled_generation_passes_temperature_and_top_p():
     assert runtime.sampler_calls == [{"temp": 0.3, "top_p": 0.9}]
 
 
-def test_delta_is_added_once_to_final_prefill_token_and_layer_is_restored():
+def test_delta_is_added_to_separately_processed_final_prompt_token_and_restored():
     runtime = Runtime()
     generator = runtime.generator()
     original = generator.model.model.layers[0]
@@ -227,8 +236,9 @@ def test_delta_is_added_once_to_final_prefill_token_and_layer_is_restored():
         messages(), delta=torch.tensor([1.0, 2.0]), layer=0, seed=7
     )
 
-    prefill, decode = runtime.model.recorder.values
-    assert prefill.tolist() == [[[0.0, 0.0], [1.0, 2.0]]]
+    prefill, final_prompt, decode = runtime.model.recorder.values
+    assert prefill.tolist() == [[[0.0, 0.0]]]
+    assert final_prompt.tolist() == [[[1.0, 2.0]]]
     assert decode.tolist() == [[[0.0, 0.0]]]
     assert generator.model.model.layers[0] is original
 
@@ -256,8 +266,10 @@ def test_steered_call_does_not_affect_later_unsteered_call():
     )
     generator.generate(messages(), seed=8)
 
-    later_prefill = runtime.model.recorder.values[2]
-    assert later_prefill.tolist() == [[[0.0, 0.0], [0.0, 0.0]]]
+    later_prefill, later_final, later_decode = runtime.model.recorder.values[3:]
+    assert later_prefill.tolist() == [[[0.0, 0.0]]]
+    assert later_final.tolist() == [[[0.0, 0.0]]]
+    assert later_decode.tolist() == [[[0.0, 0.0]]]
 
 
 @pytest.mark.parametrize(
@@ -286,9 +298,21 @@ def test_embed_text_returns_normalized_final_token_with_provenance():
 
     assert embedding.values == pytest.approx((0.6, 0.8))
     assert embedding.model_revision == "mlx-community/Qwen3-8B-4bit"
-    assert embedding.layer == 1
+    assert embedding.layer == 2
     assert embedding.token_index == 1
     assert len(embedding.text_hash) == 64
+
+
+def test_embed_text_matches_transformers_hidden_state_boundaries_and_final_norm():
+    generator = Runtime(EmbeddingModel(norm=WeightedNorm())).generator()
+
+    input_embedding = generator.embed_text("proof view", layer=0)
+    final_embedding = generator.embed_text("proof view", layer=-1)
+
+    assert input_embedding.values == pytest.approx((2 ** -0.5, 2 ** -0.5))
+    assert input_embedding.layer == 0
+    assert final_embedding.values == pytest.approx((6 / 52 ** 0.5, 4 / 52 ** 0.5))
+    assert final_embedding.layer == 2
 
 
 def test_embed_text_rejects_blank_input():
@@ -325,3 +349,18 @@ def test_score_completions_does_not_require_log_softmax_on_mlx_core():
     scores = generator.score_completions(messages(), ("weak", "strong"))
 
     assert len(scores) == 2
+
+
+def test_load_failure_names_exact_model_and_preserves_cause():
+    from analogy.mlx_model import _load_exact_model
+
+    def missing(identifier):
+        raise OSError("offline cache miss")
+
+    with pytest.raises(
+        ModelConfigurationError,
+        match="mlx-community/Qwen3-8B-4bit",
+    ) as captured:
+        _load_exact_model(missing, "mlx-community/Qwen3-8B-4bit")
+
+    assert isinstance(captured.value.__cause__, OSError)

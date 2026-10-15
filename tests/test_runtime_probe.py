@@ -6,12 +6,13 @@ import pytest
 from analogy.runtime_probe import (
     OperationCounts,
     RuntimeMeasurement,
+    experiment_episode_count,
     project_runtime,
     runtime_report_payload,
 )
 
 
-def test_projection_uses_measured_calls_and_reports_hard_bound() -> None:
+def test_projection_uses_measured_calls_and_reports_nominal_budget() -> None:
     measured = RuntimeMeasurement(
         load=4, generation=6, embedding=1, scoring=2, lean=1
     )
@@ -20,11 +21,12 @@ def test_projection_uses_measured_calls_and_reports_hard_bound() -> None:
     )
 
     result = project_runtime(
-        measured, counts, hard_timeout_seconds=300
+        measured, counts, nominal_budget_seconds=300
     )
 
     assert result.expected_seconds == 96
-    assert result.hard_upper_seconds == 300
+    assert result.nominal_budget_seconds == 300
+    assert result.guaranteed_upper_seconds is None
     assert result.cold_load_seconds == 4
 
 
@@ -44,7 +46,7 @@ def test_runtime_report_payload_is_json_serializable_and_complete() -> None:
     measured = RuntimeMeasurement(4, 6, 1, 2, 1)
     counts = OperationCounts(10, 20, 2, 12)
     projection = project_runtime(
-        measured, counts, hard_timeout_seconds=300
+        measured, counts, nominal_budget_seconds=300
     )
 
     payload = runtime_report_payload(
@@ -61,4 +63,15 @@ def test_runtime_report_payload_is_json_serializable_and_complete() -> None:
     assert payload["measurement"]["generation"] == 6
     assert payload["counts"]["lean_calls"] == 12
     assert payload["projection"]["expected_seconds"] == 96
-    assert math.isfinite(payload["projection"]["hard_upper_seconds"])
+    assert math.isfinite(payload["projection"]["nominal_budget_seconds"])
+    assert payload["projection"]["guaranteed_upper_seconds"] is None
+
+
+def test_episode_count_includes_training_validation_and_every_condition() -> None:
+    assert experiment_episode_count(
+        train=2,
+        validation=2,
+        test=2,
+        epochs=1,
+        evaluation_conditions=4,
+    ) == 12

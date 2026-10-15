@@ -20,6 +20,7 @@ from .rescue import (
     GenericRescueOutcome,
     GenericRescueRunner,
     PolicyActionRecord,
+    ProofRepresentation,
     ProofRescueContext,
     RescueAttempt,
     RescueOutputError,
@@ -28,6 +29,8 @@ from .rescue import (
     RescueTermination,
     TacticEvaluation,
     parse_rescue_proposals,
+    proof_prompt_hash,
+    render_proof_embeddings,
     render_direct_rescue_prompt,
 )
 from .loop import (
@@ -82,7 +85,7 @@ __all__ = [
     "ObservableStucknessPolicy", "OperatorComposition", "OperatorLibraryEntry",
     "OperatorRelation", "OperatorTransformation", "PertinenceAssessment",
     "PertinenceGate", "PopulationOrigin", "ProgramCandidate", "ProgressPolicy",
-    "PolicyActionRecord", "ProofRescueContext",
+    "PolicyActionRecord", "ProofRepresentation", "ProofRescueContext",
     "PseudoOperator", "RelationCanonicalizer", "RelationProposal",
     "RelationRefiner", "RelationSampler", "SearchNode", "SearchResult",
     "RescueAttempt", "RescueOutputError", "RescueProposal", "RescueRollout",
@@ -93,6 +96,6 @@ __all__ = [
     "TacticStatus", "VerificationEvidence", "VerificationStatus",
     "VerifiedProgram", "WhitespaceRelationCanonicalizer",
     "WhitespaceTacticCanonicalizer", "load_config", "parse_rescue_proposals",
-    "render_direct_rescue_prompt",
+    "proof_prompt_hash", "render_direct_rescue_prompt", "render_proof_embeddings",
 ]
 

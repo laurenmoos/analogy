@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol
@@ -11,6 +12,7 @@ from .records import (
     CancellationToken,
     CandidateOrigin,
     DiscardedSuccessor,
+    Embedding,
     SearchNode,
     SymbolicState,
     TacticCandidate,
@@ -89,6 +91,33 @@ class ProofRescueContext:
         object.__setattr__(
             self, "failed_tactics", _text_tuple(self.failed_tactics, "failed_tactics")
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProofRepresentation:
+    context: ProofRescueContext
+    language_prompt_hash: str
+    structure_prompt_hash: str
+    language_embedding: Embedding
+    structure_embedding: Embedding
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.context, ProofRescueContext):
+            raise ValueError("context must be a ProofRescueContext")
+        _require_text(self.language_prompt_hash, "language_prompt_hash")
+        _require_text(self.structure_prompt_hash, "structure_prompt_hash")
+        if self.language_prompt_hash == self.structure_prompt_hash:
+            raise ValueError("proof-view prompt hashes must be distinct")
+        if not isinstance(self.language_embedding, Embedding):
+            raise ValueError("language_embedding must be an Embedding")
+        if not isinstance(self.structure_embedding, Embedding):
+            raise ValueError("structure_embedding must be an Embedding")
+        if self.language_embedding.dimension != self.structure_embedding.dimension:
+            raise ValueError("proof-view embedding dimensions must match")
+
+    @property
+    def dimension(self) -> int:
+        return self.language_embedding.dimension
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,3 +312,30 @@ def render_direct_rescue_prompt(context: ProofRescueContext) -> str:
         '"tactics". predicted_state must describe the expected next Lean goals; '
         "tactics must be a non-empty list of single-line Lean tactics."
     )
+
+
+def render_proof_embeddings(context: ProofRescueContext) -> tuple[str, str]:
+    if not isinstance(context, ProofRescueContext):
+        raise ValueError("context must be a ProofRescueContext")
+    accepted = "\n".join(context.accepted_tactics) or "(none)"
+    failed = "\n".join(context.failed_tactics) or "(none)"
+    language = (
+        "Explain the proof's current reasoning need without solving it.\n\n"
+        f"Overall target:\n{context.goal.expression}\n\n"
+        f"Current goals:\n{context.state.expression}\n\n"
+        f"Accepted prefix:\n{accepted}\n\n"
+        f"Failed tactics:\n{failed}"
+    )
+    structure = (
+        "Describe the Current Lean goals structurally: propositions, hypotheses, "
+        "constructors, dependencies, and unresolved relationships. Abstract from "
+        "identifier spelling. Do not propose tactics.\n\n"
+        f"Overall target:\n{context.goal.expression}\n\n"
+        f"Current Lean goals:\n{context.state.expression}"
+    )
+    return language, structure
+
+
+def proof_prompt_hash(text: str) -> str:
+    _require_text(text, "text")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

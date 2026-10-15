@@ -13,6 +13,12 @@ from typing import Any, Protocol
 from .config import AppConfig, ModelConfig
 from .daydream import CuriosityOutcome
 from .rescue import GenericRescueOutcome
+from .rescue import (
+    ProofRepresentation,
+    ProofRescueContext,
+    proof_prompt_hash,
+    render_proof_embeddings,
+)
 from .lean_gym.corpus import load_problems
 from .lean_gym.models import Problem, VerificationStatus
 from .lean_gym.session import ProofSession, SessionError
@@ -33,6 +39,7 @@ from .records import (
     CandidateOrigin,
     CapabilityResult,
     DiscardReason,
+    Embedding,
     Message,
     SearchStatus,
     SymbolicState,
@@ -198,6 +205,77 @@ class QwenGenerator:
         )
         new_tokens = generated[0][input_length:]
         return self._tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+    def embed_text(self, text: str, *, layer: int) -> Embedding:
+        if not isinstance(text, str) or not text.strip():
+            raise ModelConfigurationError("embedding text must be nonblank")
+        if isinstance(layer, bool) or not isinstance(layer, int):
+            raise ModelConfigurationError("hidden layer must be an integer")
+        encoded = self._tokenizer(
+            [text], return_tensors="pt", padding=True
+        ).to(self._device)
+        with self._torch.no_grad():
+            output = self._model(
+                **encoded, output_hidden_states=True, use_cache=False
+            )
+        hidden_states = getattr(output, "hidden_states", None)
+        if not isinstance(hidden_states, (tuple, list)) or not hidden_states:
+            raise ModelConfigurationError("model did not return hidden states")
+        resolved = _resolve_hidden_layer(layer, len(hidden_states))
+        hidden = hidden_states[resolved]
+        if not hasattr(hidden, "ndim") or hidden.ndim != 3:
+            raise ModelConfigurationError("hidden state must have rank 3")
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is None or attention_mask.ndim != 2:
+            raise ModelConfigurationError("tokenizer must return a rank-2 attention mask")
+        if hidden.shape[0] != 1 or attention_mask.shape[0] != 1:
+            raise ModelConfigurationError("embedding extraction requires batch size one")
+        token_count = int(attention_mask[0].sum().item())
+        if token_count <= 0 or token_count > hidden.shape[1]:
+            raise ModelConfigurationError("attention mask selects no valid final token")
+        vector = hidden[0, token_count - 1].detach().float()
+        norm = self._torch.linalg.vector_norm(vector)
+        finite_vector = bool(self._torch.isfinite(vector).all().item())
+        finite_norm = bool(self._torch.isfinite(norm).item())
+        if not finite_vector or not finite_norm or norm.item() <= 0.0:
+            raise ModelConfigurationError("embedding must be finite and nonzero")
+        values = tuple(float(item) for item in (vector / norm).cpu().tolist())
+        return Embedding(
+            f"{self.model_revision}:layer={resolved}:final-nonpadding", values
+        )
+
+
+def _resolve_hidden_layer(layer: int, count: int) -> int:
+    if isinstance(layer, bool) or not isinstance(layer, int):
+        raise ModelConfigurationError("hidden layer must be an integer")
+    resolved = layer if layer >= 0 else count + layer
+    if resolved < 0 or resolved >= count:
+        raise ModelConfigurationError(
+            f"hidden layer {layer} is out of range for {count} returned layers"
+        )
+    return resolved
+
+
+class QwenProofEncoder:
+    def __init__(self, generator: Any, *, layer: int) -> None:
+        if isinstance(layer, bool) or not isinstance(layer, int):
+            raise ValueError("layer must be an integer")
+        self._generator = generator
+        self._layer = layer
+
+    def encode(self, context: ProofRescueContext) -> ProofRepresentation:
+        language, structure = render_proof_embeddings(context)
+        return ProofRepresentation(
+            context=context,
+            language_prompt_hash=proof_prompt_hash(language),
+            structure_prompt_hash=proof_prompt_hash(structure),
+            language_embedding=self._generator.embed_text(
+                language, layer=self._layer
+            ),
+            structure_embedding=self._generator.embed_text(
+                structure, layer=self._layer
+            ),
+        )
 
 
 class QwenTacticRanker:
@@ -660,6 +738,7 @@ __all__ = [
     "ModelConfigurationError",
     "ModelOutputError",
     "QwenGenerator",
+    "QwenProofEncoder",
     "QwenTacticRanker",
     "TacticRankingError",
     "TextGenerator",

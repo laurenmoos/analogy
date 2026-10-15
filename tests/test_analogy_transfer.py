@@ -316,6 +316,28 @@ def test_source_fields_reject_proof_admission_tactics(field, tactic):
         parse_source_analogy(json.dumps(payload), analogy_id="analogy-1")
 
 
+def test_transfer_allows_grammatical_assumption_reasoning_from_negation_smoke():
+    payload = valid_transfer_payload()
+    payload["reasoning_steps"] = [
+        "Assume B is true (introduced assumption).",
+        "This contradiction shows that our assumption B must be false.",
+        "The assumption B and the premise B → S yield S.",
+    ]
+    result = parse_proof_reasoning_transfer(json.dumps(payload), need=proof_need(),
+                                           alignment=alignment(), transfer_id="transfer-1")
+    assert result.reasoning_steps == tuple(payload["reasoning_steps"])
+
+
+@pytest.mark.parametrize("text", ["assumption", "by assumption", "intro h", "by", "assume h : B",
+                                  "The assumption suffices.\nassumption", "Use `assumption`."])
+def test_transfer_assumption_prose_exception_does_not_allow_tactic_commands(text):
+    payload = valid_transfer_payload()
+    payload["reasoning_steps"] = [text]
+    with pytest.raises(TransferOutputError, match="tactic-free"):
+        parse_proof_reasoning_transfer(json.dumps(payload), need=proof_need(),
+                                       alignment=alignment(), transfer_id="transfer-1")
+
+
 @pytest.mark.parametrize("tactic", ["sorry", "admit"])
 @pytest.mark.parametrize("field", ["premises", "reasoning_steps", "predicted_next_subgoal"])
 def test_proof_reasoning_rejects_proof_admission_tactics(field, tactic):

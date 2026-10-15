@@ -132,6 +132,20 @@ def _tactic_free(texts: tuple[str, ...]) -> None:
         raise TransferOutputError("reasoning and transformation text must be tactic-free")
 
 
+def _proof_reasoning_guard(texts: tuple[str, ...]) -> None:
+    """Allow the grammatical noun, while preserving command boundaries."""
+    for text in texts:
+        if re.search(r"(?:^|[;\r\n])\s*(?:by\s*$|assume\s+\w+\s*:)", text, re.IGNORECASE):
+            raise TransferOutputError("proof reasoning must be tactic-free")
+        # Do not match across newlines: a later standalone `assumption` is a
+        # command even when the preceding line happens to end in a determiner.
+        prose = re.sub(
+            r"\b(?:our|the|an|this|that|introduced|temporary|local)[ \t]+assumption\b",
+            "the premise", text, flags=re.IGNORECASE,
+        )
+        _tactic_free((prose,))
+
+
 def _has_proposition(text: str, need: ProofNeed | None) -> bool:
     fragments = () if need is None else (need.fixed_target, need.active_subgoal)
     # Identifier boundaries keep a one-letter proposition from matching
@@ -264,14 +278,14 @@ class ProofReasoningTransfer:
 
     def __post_init__(self) -> None:
         _set_texts(self, "transfer_id", "alignment_id", "active_subgoal")
-        _set_texts(self, "predicted_next_subgoal", guard=_tactic_free)
+        _set_texts(self, "predicted_next_subgoal", guard=_proof_reasoning_guard)
         object.__setattr__(self, "premises", _texts(
-            self.premises, "premises", unique=True, guard=_tactic_free))
+            self.premises, "premises", unique=True, guard=_proof_reasoning_guard))
         object.__setattr__(self, "reasoning_steps", _texts(
-            self.reasoning_steps, "reasoning_steps", minimum=1, guard=_tactic_free))
+            self.reasoning_steps, "reasoning_steps", minimum=1, guard=_proof_reasoning_guard))
         if not isinstance(self.completion_expected, bool):
             raise TransferOutputError("completion_expected must be a boolean")
-        _tactic_free((*self.premises, *self.reasoning_steps, self.predicted_next_subgoal))
+        _proof_reasoning_guard((*self.premises, *self.reasoning_steps, self.predicted_next_subgoal))
 
 
 @dataclass(frozen=True, slots=True)

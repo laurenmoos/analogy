@@ -477,6 +477,153 @@ def indexed_fixture(module):
     return tuple(items)
 
 
+def selecting_signature(module):
+    return module.parse_proof_signature({
+        "goal_count": 1,
+        "target": {"root": "atom", "children": []},
+        "hypotheses": [{
+            "root": "and",
+            "children": [
+                {"root": "atom", "children": []},
+                {"root": "target", "children": []},
+            ],
+        }],
+    })
+
+
+def indexed_transformation(
+    module,
+    *,
+    identifier="item",
+    operation="select",
+    input_arity="two",
+    output_arity="one",
+    permutation="none",
+    information_flow=("select", "discard"),
+):
+    payload = valid_transformation_payload()
+    payload.update(
+        operation=operation,
+        input_arity=input_arity,
+        output_arity=output_arity,
+        permutation=permutation,
+        information_flow=list(information_flow),
+        domain_neutral_summary="A structural item changes while preserving its role.",
+    )
+    return module.IndexedTransformation(
+        module.Transition(identifier, "poetry", "before", "after", {}),
+        module.parse_transformation_record(json.dumps(payload)),
+        None,
+        f"key-{identifier}",
+    )
+
+
+def test_structural_shortlist_explains_score_components() -> None:
+    module = load_script()
+    signature = selecting_signature(module)
+    exact = indexed_transformation(module, identifier="exact")
+    reorder = indexed_transformation(
+        module,
+        identifier="reorder",
+        operation="reorder",
+        input_arity="two",
+        output_arity="two",
+    )
+
+    shortlist = module.structural_shortlist(signature, (reorder, exact), limit=4)
+
+    assert [item.item.transition.id for item in shortlist] == [exact.transition.id]
+    assert shortlist[0].breakdown.operation == pytest.approx(0.40)
+    assert shortlist[0].breakdown.total == pytest.approx(1.0)
+
+
+def test_empty_structural_shortlist_is_an_explicit_fallback() -> None:
+    module = load_script()
+    signature = selecting_signature(module)
+    index = (
+        indexed_transformation(module, operation="introduce"),
+    )
+    assert module.structural_shortlist(
+        signature,
+        index,
+        limit=4,
+    ) == ()
+
+    model = SpyModel()
+    decision = module.rank_for_condition(
+        module.Condition.ANALOGY,
+        module.Problem("p", "(P : Prop)", "P"),
+        "⊢ P",
+        ("assumption", "exact h"),
+        None,
+        index,
+        model,
+        1,
+        0,
+        proof_signature=signature,
+    )
+    assert decision.indices == (0, 1)
+    assert model.generation_calls == []
+
+
+def test_structural_compatibility_unknowns_score_zero_and_conflicts_exclude() -> None:
+    module = load_script()
+    unknown = indexed_transformation(
+        module,
+        identifier="unknown",
+        input_arity="unknown",
+        output_arity="unknown",
+        permutation="unknown",
+    )
+    conflict = indexed_transformation(
+        module,
+        identifier="conflict",
+        input_arity="one",
+        output_arity="many",
+    )
+
+    breakdown = module.structural_compatibility(selecting_signature(module), unknown)
+
+    assert breakdown is not None
+    assert breakdown.arity == breakdown.permutation == 0.0
+    assert 0.0 <= breakdown.total <= 1.0
+    assert module.structural_compatibility(selecting_signature(module), conflict) is None
+
+
+def test_structural_shortlist_ties_by_id_and_rejects_duplicate_ids() -> None:
+    module = load_script()
+    second = indexed_transformation(module, identifier="b")
+    first = indexed_transformation(module, identifier="a")
+    shortlist = module.structural_shortlist(selecting_signature(module), (second, first), limit=2)
+    assert [item.item.transition.id for item in shortlist] == ["a", "b"]
+
+    with pytest.raises(module.ExperimentError, match="duplicate"):
+        module.structural_shortlist(selecting_signature(module), (first, first), limit=2)
+    with pytest.raises(module.ExperimentError, match="positive"):
+        module.structural_shortlist(selecting_signature(module), (first,), limit=0)
+
+
+def test_matched_random_retrieve_is_deterministic_and_shortlist_bounded() -> None:
+    module = load_script()
+    shortlist = module.structural_shortlist(
+        selecting_signature(module),
+        tuple(indexed_transformation(module, identifier=value) for value in ("c", "a", "b")),
+        limit=3,
+    )
+
+    first = module.matched_random_retrieve(shortlist, count=2, seed=9)
+    second = module.matched_random_retrieve(shortlist, count=2, seed=9)
+
+    assert first == second
+    assert tuple(item.item.transition.id for item in first) == tuple(
+        sorted(item.item.transition.id for item in first)
+    )
+    assert {item.item.transition.id for item in first} <= {
+        item.item.transition.id for item in shortlist
+    }
+    assert module.matched_random_retrieve((), count=2, seed=9) == ()
+
+
 def test_cosine_and_random_retrieval_use_same_eligible_index() -> None:
     module = load_script()
     index = indexed_fixture(module)
@@ -722,12 +869,12 @@ def test_generation_operations_receive_difficulty_and_json_contract(tmp_path: Pa
         model,
         1,
         0,
+        proof_signature=selecting_signature(module),
     )
 
     assert model.generation_options == [
         {"operation": "candidate", "difficulty": 5, "expected_json": "array"},
         {"operation": "transformation", "difficulty": 1, "expected_json": "object"},
-        {"operation": "proof_need", "difficulty": 5, "expected_json": None},
         {"operation": "ranking", "difficulty": 5, "expected_json": "array"},
     ]
 
@@ -1001,7 +1148,7 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
         (output / "transitions.jsonl").read_text(encoding="utf-8").splitlines()[0]
     )
     assert transition_row["record"]["operation"] == "select"
-    assert transition_row["diagnostic_embedding"]["used_for_retrieval"] is False
+    assert transition_row["diagnostic_embedding"] is None
     trial_rows = [json.loads(line) for line in (output / "trials.jsonl").read_text(encoding="utf-8").splitlines()]
     sentinel = next(row for row in trial_rows if row["problem_id"] == "sentinel" and row["condition"] == "none")
     ordinary = next(row for row in trial_rows if row["problem_id"] == "ordinary" and row["condition"] == "none")
@@ -1320,7 +1467,7 @@ def test_operational_failure_writes_incomplete_artifacts(tmp_path: Path) -> None
     assert summary["operational_failures"][0]["status"] == "model_failure"
 
 
-def test_retrieval_query_uses_prefix_failures_and_is_persisted(tmp_path: Path) -> None:
+def test_retrieval_query_uses_deterministic_signature_not_generated_need(tmp_path: Path) -> None:
     module = load_script()
     model = ExperimentModel(module)
     problem = module.Problem("identity", "(P : Prop) (h : P)", "P")
@@ -1343,14 +1490,15 @@ def test_retrieval_query_uses_prefix_failures_and_is_persisted(tmp_path: Path) -
         0,
         accepted=("intro h",),
         failed=("assumption",),
+        proof_signature=selecting_signature(module),
     )
 
     rendered = "\n".join(
         message.content for messages, _ in model.generation_calls for message in messages
     )
-    assert "intro h" in rendered
-    assert "assumption" in rendered
-    assert decision.proof_need.description in rendered
+    assert "The target is atomic" in rendered
+    assert "proof-need-v1" not in rendered
+    assert decision.proof_need is None
 
 
 def test_manifest_records_inputs_model_lean_environment_and_problem_statements(tmp_path: Path) -> None:

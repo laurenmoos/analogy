@@ -1514,6 +1514,197 @@ def _validated_retrieval(index: tuple[IndexedTransformation, ...], count: int) -
         raise ExperimentError("retrieval count exceeds the eligible index")
 
 
+# Structural retrieval
+
+
+STRUCTURAL_COMPATIBILITY_VERSION = "structural-compatibility-v1"
+STRUCTURAL_WEIGHTS = MappingProxyType(
+    {
+        "operation": 0.40,
+        "information_flow": 0.20,
+        "arity": 0.15,
+        "permutation": 0.15,
+        "shape_role": 0.10,
+    }
+)
+_COMPATIBLE_OPERATION_PAIRS = frozenset(
+    {
+        frozenset({OperationClass.DECOMPOSE, OperationClass.SELECT}),
+        frozenset({OperationClass.COMBINE, OperationClass.RESTRUCTURE}),
+        frozenset({OperationClass.REWRITE, OperationClass.REPLACE}),
+        frozenset({OperationClass.REORDER, OperationClass.RESTRUCTURE}),
+        frozenset({OperationClass.REUSE, OperationClass.SELECT}),
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CompatibilityBreakdown:
+    operation: float
+    information_flow: float
+    arity: float
+    permutation: float
+    shape_role: float
+    matches: tuple[str, ...]
+    conflicts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        components = (
+            self.operation,
+            self.information_flow,
+            self.arity,
+            self.permutation,
+            self.shape_role,
+        )
+        if any(not math.isfinite(value) or value < 0.0 for value in components):
+            raise ExperimentError("compatibility components must be finite and nonnegative")
+        if not 0.0 <= sum(components) <= 1.0 + 1e-12:
+            raise ExperimentError("compatibility total must be in [0, 1]")
+
+    @property
+    def total(self) -> float:
+        return (
+            self.operation
+            + self.information_flow
+            + self.arity
+            + self.permutation
+            + self.shape_role
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralCandidate:
+    item: IndexedTransformation
+    breakdown: CompatibilityBreakdown
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item, IndexedTransformation):
+            raise ExperimentError("structural candidate requires an indexed transformation")
+        if not isinstance(self.breakdown, CompatibilityBreakdown):
+            raise ExperimentError("structural candidate requires a compatibility breakdown")
+
+
+def _operations_compatible(
+    candidates: tuple[OperationClass, ...], operation: OperationClass
+) -> bool:
+    if operation is OperationClass.UNKNOWN:
+        return True
+    return any(
+        operation is candidate
+        or frozenset({candidate, operation}) in _COMPATIBLE_OPERATION_PAIRS
+        for candidate in candidates
+    )
+
+
+def structural_compatibility(
+    signature: ProofSignature, item: IndexedTransformation
+) -> CompatibilityBreakdown | None:
+    if not isinstance(signature, ProofSignature) or not isinstance(item, IndexedTransformation):
+        raise ExperimentError("structural compatibility requires canonical records")
+    record = item.record
+    if not _operations_compatible(signature.candidate_operations, record.operation):
+        return None
+
+    matches: list[str] = []
+    conflicts: list[str] = []
+    operation_score = 0.0
+    if record.operation in signature.candidate_operations:
+        operation_score = STRUCTURAL_WEIGHTS["operation"]
+        matches.append("operation:exact")
+    elif record.operation is not OperationClass.UNKNOWN:
+        operation_score = STRUCTURAL_WEIGHTS["operation"] / 2
+        matches.append("operation:compatible")
+
+    proof_flow = set(signature.information_flow)
+    record_flow = set(record.information_flow)
+    if record_flow == proof_flow:
+        flow_score = STRUCTURAL_WEIGHTS["information_flow"]
+        matches.append("information_flow:exact")
+    elif record_flow & proof_flow:
+        flow_score = STRUCTURAL_WEIGHTS["information_flow"] / 2
+        matches.append("information_flow:overlap")
+    else:
+        conflicts.append("information_flow")
+        return None
+
+    arity_score = 0.0
+    known_arity_fields = 0
+    matching_arity_fields = 0
+    for field_name, proof_value, record_value in (
+        ("input_arity", signature.input_arity, record.input_arity),
+        ("output_arity", signature.output_arity, record.output_arity),
+    ):
+        if record_value is Arity.UNKNOWN or proof_value is Arity.UNKNOWN:
+            continue
+        known_arity_fields += 1
+        if record_value is not proof_value:
+            conflicts.append(field_name)
+            return None
+        matching_arity_fields += 1
+        matches.append(f"{field_name}:exact")
+    if known_arity_fields:
+        arity_score = STRUCTURAL_WEIGHTS["arity"] * (
+            matching_arity_fields / known_arity_fields
+        )
+
+    permutation_score = 0.0
+    if record.permutation is not Permutation.UNKNOWN and signature.permutation is not Permutation.UNKNOWN:
+        if record.permutation is not signature.permutation:
+            conflicts.append("permutation")
+            return None
+        permutation_score = STRUCTURAL_WEIGHTS["permutation"]
+        matches.append("permutation:exact")
+
+    shape_role_score = 0.0
+    if operation_score == STRUCTURAL_WEIGHTS["operation"]:
+        shape_role_score = STRUCTURAL_WEIGHTS["shape_role"]
+        matches.append("shape_role:operation-aligned")
+
+    return CompatibilityBreakdown(
+        operation_score,
+        flow_score,
+        arity_score,
+        permutation_score,
+        shape_role_score,
+        tuple(matches),
+        tuple(conflicts),
+    )
+
+
+def structural_shortlist(
+    signature: ProofSignature,
+    index: tuple[IndexedTransformation, ...],
+    limit: int,
+) -> tuple[StructuralCandidate, ...]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ExperimentError("structural shortlist limit must be positive")
+    identifiers = [item.transition.id for item in index]
+    if len(set(identifiers)) != len(identifiers):
+        raise ExperimentError("structural shortlist contains duplicate transition IDs")
+    candidates = tuple(
+        StructuralCandidate(item, breakdown)
+        for item in index
+        if (breakdown := structural_compatibility(signature, item)) is not None
+    )
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (-candidate.breakdown.total, candidate.item.transition.id),
+        )[:limit]
+    )
+
+
+def matched_random_retrieve(
+    shortlist: tuple[StructuralCandidate, ...], count: int, seed: int
+) -> tuple[StructuralCandidate, ...]:
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ExperimentError("matched-random count must be positive")
+    if not shortlist:
+        return ()
+    selected = random.Random(seed).sample(list(shortlist), min(count, len(shortlist)))
+    return tuple(sorted(selected, key=lambda candidate: candidate.item.transition.id))
+
+
 def cosine_retrieve(
     query: Embedding | tuple[float, ...],
     index: tuple[IndexedTransformation, ...],
@@ -1590,6 +1781,7 @@ def rank_for_condition(
     accepted: tuple[str, ...] = (),
     failed: tuple[str, ...] = (),
     deadline: float | None = None,
+    proof_signature: ProofSignature | None = None,
 ) -> RankingDecision:
     if not isinstance(condition, Condition):
         raise ExperimentError("condition must be a Condition")
@@ -1597,31 +1789,23 @@ def rank_for_condition(
     if not candidates:
         raise ExperimentError("candidate pool must not be empty")
     hits: tuple[RetrievalHit, ...] = ()
-    current_need = proof_need
     if condition is not Condition.NONE:
-        if current_need is None:
-            description = _generate_before_deadline(
-                model,
-                proof_need_prompt(problem, state, accepted, failed),
-                seed=derived_seed(seed, problem.id, sha256_text(state), "proof-need"),
-                deadline=deadline,
-                operation="proof_need",
-                difficulty=problem.difficulty,
-                expected_json=None,
-            ).strip()
-            if not description:
-                raise ModelOutputError("proof need description must not be blank")
-            current_need = ProofNeed(description, model.embed(description, layer))
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("theorem timeout")
+        if proof_signature is None:
+            raise ExperimentError("retrieval conditions require a deterministic proof signature")
+        shortlist = structural_shortlist(proof_signature, index, max(len(index), 1))
+        if not shortlist:
+            return RankingDecision(candidates, tuple(range(len(candidates))))
         if condition is Condition.ANALOGY:
-            hits = cosine_retrieve(current_need.embedding, index, retrieval_count)
+            selected = shortlist[: min(retrieval_count, len(shortlist))]
         else:
-            hits = random_retrieve(
-                index,
+            selected = matched_random_retrieve(
+                shortlist,
                 retrieval_count,
                 derived_seed(seed, problem.id, sha256_text(state), "random-retrieval"),
             )
+        hits = tuple(
+            RetrievalHit(candidate.item, candidate.breakdown.total) for candidate in selected
+        )
     transformations = tuple(hit.item.transformation for hit in hits)
     generated = _generate_before_deadline(
         model,
@@ -1630,7 +1814,7 @@ def rank_for_condition(
             state,
             candidates,
             transformations,
-            current_need.description if current_need is not None else None,
+            render_proof_signature(proof_signature) if proof_signature is not None else None,
         ),
         seed=derived_seed(seed, problem.id, sha256_text(state), condition.value, "ranking"),
         deadline=deadline,
@@ -1639,7 +1823,7 @@ def rank_for_condition(
         expected_json="array",
     )
     indices = parse_ranking(generated, len(candidates))
-    return RankingDecision(candidates, indices, hits, current_need)
+    return RankingDecision(candidates, indices, hits, proof_need)
 
 
 class CandidatePoolStore:
@@ -2139,6 +2323,7 @@ class SearchRanker(Protocol):
         candidates: tuple[str, ...],
         seed: int,
         deadline: float | None = None,
+        proof_signature: ProofSignature | None = None,
     ) -> RankingDecision: ...
 
 
@@ -2249,6 +2434,15 @@ def search_problem(
         fingerprint = state_fingerprint(problem, state)
         expansions += 1
         failed = tuple(failed_by_state.get(fingerprint, ()))
+        failed_operations = {
+            operation
+            for tactic in failed
+            if (operation := classify_failed_tactic(tactic)) is not None
+        }
+        ranked_signature = replace(
+            signature,
+            failed_operation_classes=_enum_tuple(OperationClass, failed_operations),
+        )
         try:
             pool_started = time.monotonic()
             candidates = pool_store.get(
@@ -2260,15 +2454,12 @@ def search_problem(
                 top_k=limits.top_k,
             )
             deadline += time.monotonic() - pool_started
+            rank_parameters = inspect.signature(ranker.rank).parameters
+            rank_kwargs: dict[str, Any] = {"deadline": deadline}
+            if "proof_signature" in rank_parameters:
+                rank_kwargs["proof_signature"] = ranked_signature
             decision = ranker.rank(
-                condition,
-                problem,
-                state,
-                prefix,
-                failed,
-                candidates,
-                seed,
-                deadline=deadline,
+                condition, problem, state, prefix, failed, candidates, seed, **rank_kwargs
             )
         except TimeoutError as error:
             if time.monotonic() >= deadline or str(error) == "theorem timeout":
@@ -2651,6 +2842,7 @@ class ConditionRanker:
         candidates: tuple[str, ...],
         seed: int,
         deadline: float | None = None,
+        proof_signature: ProofSignature | None = None,
     ) -> RankingDecision:
         return rank_for_condition(
             condition,
@@ -2666,6 +2858,7 @@ class ConditionRanker:
             accepted=accepted,
             failed=failed,
             deadline=deadline,
+            proof_signature=proof_signature,
         )
 
 
@@ -2773,7 +2966,7 @@ def run_experiment(
                 model,
                 config.cache_dir,
                 config.hidden_layer,
-                capture_diagnostic_embeddings=True,
+                capture_diagnostic_embeddings=False,
             )
             index_stats = {
                 "input_count": len(config.transitions),
@@ -2795,9 +2988,7 @@ def run_experiment(
                     "record": _jsonable(item.record),
                     "cache_key": item.cache_key,
                     "diagnostic_embedding": (
-                        None
-                        if item.diagnostic_embedding is None
-                        else {
+                        None if item.diagnostic_embedding is None else {
                             "used_for_retrieval": False,
                             "model_revision": item.diagnostic_embedding.model_revision,
                             "layer": item.diagnostic_embedding.layer,

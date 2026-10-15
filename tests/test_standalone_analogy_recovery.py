@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -383,6 +384,134 @@ def make_qwen(module, final_vector=(3.0, 4.0)):
         max_new_tokens=16,
         timeout_seconds=5.0,
     )
+
+
+class ScoringTokenizer:
+    pad_token_id = 0
+    eos_token_id = 9
+
+    def apply_chat_template(self, messages, **kwargs):
+        return "PROMPT"
+
+    def encode(self, text, add_special_tokens=False):
+        return {
+            "PROMPT": [1, 2],
+            "intro": [3],
+            "exact h.right": [4, 5, 6],
+            "relevant": [7],
+            "irrelevant": [4],
+        }[text]
+
+
+class ScoringModel:
+    def __init__(self, torch_module, *, nonfinite=False):
+        self.torch = torch_module
+        self.nonfinite = nonfinite
+        self.config = SimpleNamespace(_commit_hash="scoring-revision")
+        self.parameter = torch_module.nn.Parameter(torch_module.tensor([1.0]))
+
+    def parameters(self):
+        return (self.parameter,)
+
+    def eval(self):
+        return self
+
+    def __call__(self, input_ids, attention_mask, use_cache=False):
+        torch = self.torch
+        batch, width = input_ids.shape
+        logits = torch.full((batch, width, 10), -100.0)
+        for row in range(batch):
+            for position in range(width - 1):
+                target = int(input_ids[row, position + 1].item())
+                desired = -0.5 if target in {3, 7} else -1.0
+                logits[row, position, target] = 0.0
+                logits[row, position, 8] = math.log(math.expm1(-desired))
+        if self.nonfinite:
+            logits[0, 1, 3] = float("nan")
+        return SimpleNamespace(logits=logits)
+
+
+def make_scoring_qwen(module, *, tokenizer=None, nonfinite=False):
+    import torch
+
+    return module.QwenModel(
+        tokenizer=tokenizer or ScoringTokenizer(),
+        model=ScoringModel(torch, nonfinite=nonfinite),
+        torch_module=torch,
+        device="cpu",
+        max_new_tokens=8,
+        timeout_seconds=5.0,
+    )
+
+
+def test_completion_scoring_masks_prompt_and_right_padding() -> None:
+    module = load_script()
+    qwen = make_scoring_qwen(module)
+
+    scores = qwen.score_completions(
+        (module.Message("user", "state"),),
+        ("intro", "exact h.right"),
+    )
+
+    assert [score.token_count for score in scores] == [1, 3]
+    assert scores[0].sum_log_likelihood == pytest.approx(-0.5)
+    assert scores[1].sum_log_likelihood == pytest.approx(-3.0)
+    assert scores[1].mean_log_likelihood == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize("completions", [(), ("",)])
+def test_completion_scoring_rejects_empty_completions(completions) -> None:
+    module = load_script()
+    with pytest.raises(module.ExperimentError, match="completion"):
+        make_scoring_qwen(module).score_completions(
+            (module.Message("user", "state"),), completions
+        )
+
+
+def test_completion_scoring_rejects_bad_padding_logits_and_batch_limit() -> None:
+    module = load_script()
+    tokenizer = ScoringTokenizer()
+    tokenizer.pad_token_id = None
+    tokenizer.eos_token_id = None
+    with pytest.raises(module.ModelConfigurationError, match="pad|EOS"):
+        make_scoring_qwen(module, tokenizer=tokenizer).score_completions(
+            (module.Message("user", "state"),), ("intro",)
+        )
+    with pytest.raises(module.ModelOutputError, match="finite"):
+        make_scoring_qwen(module, nonfinite=True).score_completions(
+            (module.Message("user", "state"),), ("intro",)
+        )
+    with pytest.raises(module.ExperimentError, match="longest"):
+        make_scoring_qwen(module).score_completions(
+            (module.Message("user", "state"),),
+            ("exact h.right",),
+            max_batch_tokens=4,
+        )
+
+
+class PairScoringModel:
+    model_revision = "pair-scoring"
+
+    def __init__(self, module, *, relevant, irrelevant):
+        self.module = module
+        self.values = {"relevant": relevant, "irrelevant": irrelevant}
+
+    def score_completions(self, messages, completions, *, max_batch_tokens=None):
+        return tuple(
+            self.module.CompletionScore(text, self.values[text], self.values[text], 1)
+            for text in completions
+        )
+
+
+def test_pair_score_is_relevant_minus_irrelevant_log_likelihood() -> None:
+    module = load_script()
+    scores = module.score_relevance_pairs(
+        PairScoringModel(module, relevant=-0.25, irrelevant=-1.75),
+        ((selecting_signature(module), indexed_transformation(module)),),
+    )
+
+    assert scores[0].margin == pytest.approx(1.5)
+    assert scores[0].relevant.mean_log_likelihood == pytest.approx(-0.25)
 
 
 def test_embedding_uses_final_nonpadding_token_and_normalizes_float32() -> None:

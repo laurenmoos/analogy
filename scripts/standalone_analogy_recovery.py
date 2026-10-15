@@ -537,6 +537,40 @@ class Embedding:
         return len(self.values)
 
 
+@dataclass(frozen=True, slots=True)
+class CompletionScore:
+    text: str
+    sum_log_likelihood: float
+    mean_log_likelihood: float
+    token_count: int
+
+    def __post_init__(self) -> None:
+        _nonblank(self.text, "completion_score.text")
+        if not math.isfinite(self.sum_log_likelihood) or not math.isfinite(
+            self.mean_log_likelihood
+        ):
+            raise ModelOutputError("completion likelihoods must be finite")
+        if isinstance(self.token_count, bool) or not isinstance(self.token_count, int) or self.token_count <= 0:
+            raise ModelOutputError("completion token count must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class PairScore:
+    transition_id: str
+    relevant: CompletionScore
+    irrelevant: CompletionScore
+    margin: float
+
+    def __post_init__(self) -> None:
+        _nonblank(self.transition_id, "pair_score.transition_id")
+        if not isinstance(self.relevant, CompletionScore) or not isinstance(
+            self.irrelevant, CompletionScore
+        ):
+            raise ExperimentError("pair score requires completion scores")
+        if not math.isfinite(self.margin):
+            raise ModelOutputError("pair score margin must be finite")
+
+
 class TextModel(Protocol):
     model_revision: str
 
@@ -544,17 +578,27 @@ class TextModel(Protocol):
 
     def embed(self, text: str, layer: int) -> Embedding: ...
 
+    def score_completions(
+        self,
+        messages: tuple[Message, ...],
+        completions: tuple[str, ...],
+        *,
+        max_batch_tokens: int | None = None,
+    ) -> tuple[CompletionScore, ...]: ...
+
 
 CANDIDATE_PROMPT_VERSION = "candidate-v1"
 PROOF_NEED_PROMPT_VERSION = "proof-need-v1"
 TRANSFORMATION_PROMPT_VERSION = "transformation-v1"
 RANKING_PROMPT_VERSION = "ranking-v1"
+PAIR_SCORING_PROMPT_VERSION = "pair-scoring-v1"
 PROMPT_VERSIONS = MappingProxyType(
     {
         "candidate": CANDIDATE_PROMPT_VERSION,
         "proof_need": PROOF_NEED_PROMPT_VERSION,
         "transformation": TRANSFORMATION_PROMPT_VERSION,
         "ranking": RANKING_PROMPT_VERSION,
+        "pair_scoring": PAIR_SCORING_PROMPT_VERSION,
     }
 )
 
@@ -943,6 +987,7 @@ class QwenModel:
         self._max_new_tokens = max_new_tokens
         self._timeout_seconds = timeout_seconds
         self._generation_sink: Callable[[Mapping[str, Any]], Any] | None = None
+        self._scoring_sink: Callable[[Mapping[str, Any]], Any] | None = None
         self.model_revision = str(
             getattr(getattr(model, "config", None), "_commit_hash", None)
             or getattr(getattr(model, "config", None), "name_or_path", None)
@@ -996,6 +1041,11 @@ class QwenModel:
     ) -> None:
         self._generation_sink = sink
 
+    def set_scoring_sink(
+        self, sink: Callable[[Mapping[str, Any]], Any] | None
+    ) -> None:
+        self._scoring_sink = sink
+
     def _render(self, messages: tuple[Message, ...], *, thinking: bool) -> str:
         return self._tokenizer.apply_chat_template(
             [{"role": item.role, "content": item.content} for item in messages],
@@ -1003,6 +1053,149 @@ class QwenModel:
             add_generation_prompt=True,
             enable_thinking=thinking,
         )
+
+    def score_completions(
+        self,
+        messages: tuple[Message, ...],
+        completions: tuple[str, ...],
+        *,
+        max_batch_tokens: int | None = None,
+    ) -> tuple[CompletionScore, ...]:
+        rendered = self._render(tuple(messages), thinking=False)
+        return self._score_rendered_completions(
+            ((rendered, tuple(completions)),), max_batch_tokens=max_batch_tokens
+        )[0]
+
+    def _score_rendered_completions(
+        self,
+        requests: tuple[tuple[str, tuple[str, ...]], ...],
+        *,
+        max_batch_tokens: int | None,
+    ) -> tuple[tuple[CompletionScore, ...], ...]:
+        if not requests:
+            return ()
+        pad_token_id = getattr(self._tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = getattr(self._tokenizer, "eos_token_id", None)
+        if pad_token_id is None:
+            raise ModelConfigurationError("tokenizer must define a pad or EOS token ID")
+        if max_batch_tokens is not None and (
+            isinstance(max_batch_tokens, bool)
+            or not isinstance(max_batch_tokens, int)
+            or max_batch_tokens <= 0
+        ):
+            raise ExperimentError("max_batch_tokens must be a positive integer")
+
+        entries: list[tuple[int, int, str, tuple[int, ...], tuple[int, ...]]] = []
+        group_sizes: list[int] = []
+        for request_index, (rendered, completions) in enumerate(requests):
+            _nonblank(rendered, "scoring prompt")
+            if not completions:
+                raise ExperimentError("scoring completions must be nonempty")
+            prompt_ids = tuple(
+                int(item)
+                for item in self._tokenizer.encode(rendered, add_special_tokens=False)
+            )
+            if not prompt_ids:
+                raise ModelConfigurationError("scoring prompt tokenization must be nonempty")
+            group_sizes.append(len(completions))
+            for completion_index, completion in enumerate(completions):
+                _nonblank(completion, "scoring completion")
+                completion_ids = tuple(
+                    int(item)
+                    for item in self._tokenizer.encode(completion, add_special_tokens=False)
+                )
+                if not completion_ids:
+                    raise ModelConfigurationError("completion tokenization must be nonempty")
+                entries.append(
+                    (request_index, completion_index, completion, prompt_ids, completion_ids)
+                )
+
+        longest = max(len(prompt) + len(completion) for _, _, _, prompt, completion in entries)
+        if max_batch_tokens is not None and max_batch_tokens < longest:
+            raise ExperimentError("max_batch_tokens is below the longest individual sequence")
+
+        batches: list[list[tuple[int, int, str, tuple[int, ...], tuple[int, ...]]]] = []
+        current: list[tuple[int, int, str, tuple[int, ...], tuple[int, ...]]] = []
+        current_width = 0
+        for entry in entries:
+            sequence_length = len(entry[3]) + len(entry[4])
+            proposed_width = max(current_width, sequence_length)
+            proposed_tokens = proposed_width * (len(current) + 1)
+            if current and max_batch_tokens is not None and proposed_tokens > max_batch_tokens:
+                batches.append(current)
+                current = []
+                current_width = 0
+            current.append(entry)
+            current_width = max(current_width, sequence_length)
+        if current:
+            batches.append(current)
+
+        grouped: list[list[CompletionScore | None]] = [
+            [None] * size for size in group_sizes
+        ]
+        for batch_index, batch in enumerate(batches):
+            width = max(len(entry[3]) + len(entry[4]) for entry in batch)
+            input_rows: list[list[int]] = []
+            attention_rows: list[list[int]] = []
+            for _, _, _, prompt_ids, completion_ids in batch:
+                sequence = list(prompt_ids + completion_ids)
+                padding = width - len(sequence)
+                input_rows.append(sequence + [int(pad_token_id)] * padding)
+                attention_rows.append([1] * len(sequence) + [0] * padding)
+            input_ids = self._torch.tensor(
+                input_rows, dtype=self._torch.long, device=self._device
+            )
+            attention_mask = self._torch.tensor(
+                attention_rows, dtype=self._torch.long, device=self._device
+            )
+            started = time.monotonic()
+            with self._torch.inference_mode():
+                output = self._model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+            if self._device == "mps":
+                self._torch.mps.synchronize()
+            elapsed = time.monotonic() - started
+            logits = getattr(output, "logits", None)
+            if logits is None or logits.ndim != 3:
+                raise ModelOutputError("completion scorer requires rank-3 logits")
+            if not bool(self._torch.isfinite(logits).all().item()):
+                raise ModelOutputError("completion scorer logits must be finite")
+            log_probabilities = self._torch.log_softmax(
+                logits.to(dtype=self._torch.float32), dim=-1
+            )
+            for row, (request_index, completion_index, text, prompt_ids, completion_ids) in enumerate(batch):
+                token_scores: list[float] = []
+                for offset, token_id in enumerate(completion_ids):
+                    logit_position = len(prompt_ids) + offset - 1
+                    if not 0 <= token_id < int(log_probabilities.shape[-1]):
+                        raise ModelOutputError("completion token ID is outside model vocabulary")
+                    token_scores.append(
+                        float(log_probabilities[row, logit_position, token_id].item())
+                    )
+                total = sum(token_scores)
+                grouped[request_index][completion_index] = CompletionScore(
+                    text,
+                    total,
+                    total / len(token_scores),
+                    len(token_scores),
+                )
+            if self._scoring_sink is not None:
+                self._scoring_sink(
+                    {
+                        "operation": "completion_scoring",
+                        "batch_index": batch_index,
+                        "sequence_count": len(batch),
+                        "padded_token_count": len(batch) * width,
+                        "elapsed_seconds": elapsed,
+                    }
+                )
+        if any(score is None for group in grouped for score in group):
+            raise ModelOutputError("completion scorer did not fill every request")
+        return tuple(tuple(group) for group in grouped)  # type: ignore[arg-type]
 
     def generate(
         self,
@@ -1236,6 +1429,72 @@ class IndexedTransformation:
         if self.diagnostic_embedding is None:
             raise ExperimentError("diagnostic embedding was not captured")
         return self.diagnostic_embedding
+
+
+def relevance_pair_prompt(
+    signature: ProofSignature, item: IndexedTransformation
+) -> tuple[Message, ...]:
+    return (
+        Message(
+            "system",
+            f"Prompt {PAIR_SCORING_PROMPT_VERSION}. Judge whether the candidate "
+            "cross-domain transformation is structurally relevant to the proof need. "
+            "The completion must be exactly relevant or irrelevant.",
+        ),
+        Message(
+            "user",
+            f"Proof structure: {render_proof_signature(signature)}\n"
+            f"Proof signature: {json.dumps(_jsonable(signature), sort_keys=True, separators=(',', ':'))}\n"
+            f"Transformation schema: {json.dumps(_jsonable(item.record), sort_keys=True, separators=(',', ':'))}\n"
+            f"Transformation summary: {item.record.domain_neutral_summary}\n"
+            "Judgment:",
+        ),
+    )
+
+
+def score_relevance_pairs(
+    model: TextModel,
+    pairs: tuple[tuple[ProofSignature, IndexedTransformation], ...],
+    *,
+    max_batch_tokens: int | None = None,
+) -> tuple[PairScore, ...]:
+    normalized = tuple(pairs)
+    if not normalized:
+        return ()
+    completions = ("relevant", "irrelevant")
+    internal = getattr(model, "_score_rendered_completions", None)
+    render = getattr(model, "_render", None)
+    if callable(internal) and callable(render):
+        rendered_requests = tuple(
+            (render(relevance_pair_prompt(signature, item), thinking=False), completions)
+            for signature, item in normalized
+        )
+        grouped_scores = internal(
+            rendered_requests, max_batch_tokens=max_batch_tokens
+        )
+    else:
+        grouped_scores = tuple(
+            model.score_completions(
+                relevance_pair_prompt(signature, item),
+                completions,
+                max_batch_tokens=max_batch_tokens,
+            )
+            for signature, item in normalized
+        )
+    results: list[PairScore] = []
+    for (_, item), scores in zip(normalized, grouped_scores):
+        if len(scores) != 2:
+            raise ModelOutputError("pair scorer must return relevant and irrelevant scores")
+        relevant, irrelevant = scores
+        results.append(
+            PairScore(
+                item.transition.id,
+                relevant,
+                irrelevant,
+                relevant.mean_log_likelihood - irrelevant.mean_log_likelihood,
+            )
+        )
+    return tuple(results)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2959,6 +3218,9 @@ def run_experiment(
         set_generation_sink = getattr(model, "set_generation_sink", None)
         if callable(set_generation_sink):
             set_generation_sink(generation_sink.write)
+        set_scoring_sink = getattr(model, "set_scoring_sink", None)
+        if callable(set_scoring_sink):
+            set_scoring_sink(generation_sink.write)
         needs_index = any(condition is not Condition.NONE for condition in config.conditions)
         if needs_index:
             index, exclusions = build_transformation_index(

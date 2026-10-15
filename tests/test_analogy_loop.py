@@ -100,6 +100,41 @@ class Plans:
         return GeneratedTacticPlan(plan, (attempt,))
 
 
+class Repairs:
+    def __init__(self, tactics=("fixed",), *, predicted=None):
+        self.tactics = tuple(tactics)
+        self.predicted = predicted
+        self.calls = []
+
+    def repair(
+        self,
+        context,
+        action,
+        *,
+        failed_plan,
+        failed_attempts,
+        iteration_index,
+        candidate_count,
+        max_attempts=None,
+    ):
+        del action
+        self.calls.append(
+            (context, failed_plan, failed_attempts, candidate_count, max_attempts)
+        )
+        plan = AnalogyTacticPlan(
+            self.predicted or failed_plan.predicted_state,
+            self.tactics,
+            context.active_hop_id,
+        )
+        generation = GenerationAttempt(
+            iteration_index + 200,
+            "{}",
+            GenerationStatus.VALID,
+            repair=True,
+        )
+        return GeneratedTacticPlan(plan, (generation,))
+
+
 class Comparisons:
     def __init__(self, surprises):
         self.surprises = tuple(surprises)
@@ -146,7 +181,7 @@ def loop_runner(
     *, predicted=("p1", "p2", "p3"), surprises=(0.8, 0.1, 0.09),
     stops=(), min_iterations=1, max_iterations=8, threshold=0.2, patience=2,
     max_model_calls=20, max_lean_calls=20,
-    iteration_sink=None, tactic_reranker=None,
+    iteration_sink=None, tactic_reranker=None, tactic_repairer=None,
 ):
     return AnalogyLoopRunner(
         proof_view_builder=Views(),
@@ -169,6 +204,7 @@ def loop_runner(
         max_lean_calls=max_lean_calls,
         iteration_sink=iteration_sink,
         tactic_reranker=tactic_reranker,
+        tactic_repairer=tactic_repairer,
     )
 
 
@@ -301,6 +337,162 @@ def test_repeated_successor_stops_without_comparing_transition():
     assert trace.stop_reason is StopReason.NO_SUCCESSOR
     assert trace.iterations[0].surprise is None
     assert runner.transition_comparator.calls == []
+
+
+def test_rejected_plan_uses_diagnostics_to_repair_and_complete_within_budgets():
+    repairer = Repairs(("fixed", "unused"))
+    runner = loop_runner(
+        predicted=("done",),
+        max_iterations=1,
+        max_model_calls=3,
+        max_lean_calls=3,
+        tactic_repairer=repairer,
+    )
+    seen = []
+
+    def evaluator(candidate):
+        seen.append(candidate.source)
+        if candidate.source == "fixed":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="by fixed")
+            return TacticEvaluation(result, completed_proof="by fixed")
+        result = TacticResult(
+            candidate,
+            TacticStatus.ERROR,
+            diagnostics=("unknown identifier 'assume'",),
+        )
+        return TacticEvaluation(result)
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), evaluator, NeverCancelled()
+    )
+
+    iteration = outcome.rollouts[0].analogy_trace.iterations[0]
+    assert outcome.completed_proof == "by fixed"
+    assert seen == ["step_1", "fixed"]
+    assert iteration.repair_plan.tactics == ("fixed", "unused")
+    assert iteration.repair_generation_attempts[0].repair is True
+    assert iteration.repair_succeeded is True
+    assert iteration.model_calls == 3
+    assert iteration.lean_calls == 2
+    assert repairer.calls[0][2][0].result.diagnostics == (
+        "unknown identifier 'assume'",
+    )
+
+
+def test_successful_repair_compares_the_repaired_predicted_transition():
+    repairer = Repairs(("fixed",), predicted="repaired prediction")
+    runner = loop_runner(
+        predicted=("wrong prediction",),
+        max_iterations=1,
+        max_model_calls=3,
+        max_lean_calls=3,
+        tactic_repairer=repairer,
+    )
+
+    def evaluator(candidate):
+        if candidate.source == "fixed":
+            next_state = state("next", "actual repaired state")
+            result = TacticResult(candidate, TacticStatus.ACCEPTED, next_state)
+            return TacticEvaluation(result, successor=SearchNode(next_state, 0.5))
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.ERROR, diagnostics=("bad",))
+        )
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), evaluator, NeverCancelled()
+    )
+
+    iteration = outcome.rollouts[0].analogy_trace.iterations[0]
+    assert iteration.repair_plan is not None
+    assert runner.transition_comparator.calls == [
+        ("goal stuck", iteration.repair_plan.predicted_state, "actual repaired state")
+    ]
+    assert iteration.predicted_transition == iteration.repair_plan.predicted_state
+
+
+def test_rejected_repair_refines_analogy_on_same_state_with_diagnostics():
+    repairer = Repairs(("still_bad",))
+    runner = loop_runner(
+        predicted=("p1", "p2"),
+        max_iterations=2,
+        max_model_calls=8,
+        max_lean_calls=6,
+        tactic_repairer=repairer,
+    )
+
+    def evaluator(candidate):
+        result = TacticResult(
+            candidate,
+            TacticStatus.ERROR,
+            diagnostics=(f"Lean rejected {candidate.source}",),
+        )
+        return TacticEvaluation(result)
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), evaluator, NeverCancelled()
+    )
+
+    trace = outcome.rollouts[0].analogy_trace
+    assert len(trace.iterations) == 2
+    assert trace.iterations[0].refined_same_state is True
+    assert trace.iterations[1].state_before.id == "stuck"
+    second_context = runner.analogy_generator.contexts[1]
+    assert second_context.proof.failed_tactics == ("step_1", "still_bad")
+    assert second_context.prior_iterations[0].lean_diagnostics == (
+        "Lean rejected step_1",
+        "Lean rejected still_bad",
+    )
+
+
+def test_semantic_repair_is_skipped_when_model_or_lean_budget_is_exhausted():
+    for model_calls, lean_calls in ((2, 4), (4, 1)):
+        repairer = Repairs()
+        runner = loop_runner(
+            predicted=("p1",),
+            max_iterations=1,
+            max_model_calls=model_calls,
+            max_lean_calls=lean_calls,
+            tactic_repairer=repairer,
+        )
+
+        def reject(candidate):
+            return TacticEvaluation(
+                TacticResult(candidate, TacticStatus.ERROR, diagnostics=("bad",))
+            )
+
+        runner.search(
+            state("stuck"), state("goal"), (), (), reject, NeverCancelled()
+        )
+
+        assert repairer.calls == []
+
+
+def test_cancellation_after_initial_rejection_skips_semantic_repair():
+    repairer = Repairs()
+    runner = loop_runner(
+        predicted=("p1",), tactic_repairer=repairer, max_iterations=1
+    )
+
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self):
+            return self.cancelled
+
+    token = Token()
+
+    def reject(candidate):
+        token.cancelled = True
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.ERROR, diagnostics=("bad",))
+        )
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), reject, token
+    )
+
+    assert outcome.cancelled
+    assert repairer.calls == []
 
 
 def test_model_stop_is_advisory_until_minimum_iterations():

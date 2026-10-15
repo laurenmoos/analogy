@@ -17,6 +17,7 @@ from .analogy_stream import (
 from .proof_views import ProofStructure, ProofViews, render_structure_view
 from .records import Message
 from .rescue import GenerationAttempt, GenerationStatus, ProofRescueContext
+from .rescue import RescueAttempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class IterationSummary:
     surprise_delta: float | None
     generated_tactics: tuple[str, ...]
     lean_outcomes: tuple[str, ...]
+    lean_diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +125,45 @@ def render_tactic_prompt(
     )
 
 
+def render_semantic_repair_prompt(
+    context: TacticGenerationContext,
+    failed_plan: AnalogyTacticPlan,
+    failed_attempts: tuple[RescueAttempt, ...],
+    *,
+    candidate_count: int,
+) -> str:
+    if (
+        isinstance(candidate_count, bool)
+        or not isinstance(candidate_count, int)
+        or candidate_count <= 0
+    ):
+        raise ValueError("candidate_count must be a positive integer")
+    rejected = [
+        {
+            "tactic": attempt.proposal.candidate.source,
+            "diagnostics": list(attempt.result.diagnostics) or ["Lean rejected tactic"],
+        }
+        for attempt in failed_attempts
+    ]
+    stream = json.dumps(
+        [asdict(item) for item in context.analogy.stream.hops],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"Current proof state (repair the same current proof state):\n"
+        f"{context.analogy.proof.state.expression}\n"
+        f"Lean structural signature: {render_structure_view(context.analogy.structure)}\n"
+        f"Complete analogy stream: {stream}\n"
+        f"Rejected plan: {json.dumps(asdict(failed_plan), sort_keys=True)}\n"
+        f"Lean verifier feedback: {json.dumps(rejected, sort_keys=True)}\n"
+        f"Generate exactly {candidate_count} distinct corrected single-line Lean 4 "
+        "tactics. Preserve the analogy's line of reasoning, but fix the concrete "
+        "syntax or type error identified by Lean. Do not repeat a rejected tactic. "
+        "Use Lean 4 syntax only; prefer `intro`, `exact`, `apply`, `fun`, `.mp`, "
+        "`.mpr`, and `rw` when appropriate. Return exactly predicted_state, "
+        "tactics, and motivating_hop_id as JSON."
+    )
 class AnalogyGenerator:
     def __init__(
         self,
@@ -167,11 +208,19 @@ class AnalogyTacticGenerator:
         hidden_layer: int,
         base_seed: int,
         max_repair_calls: int,
+        candidate_count: int = 4,
     ) -> None:
         self.generator = generator
         self.hidden_layer = hidden_layer
         self.base_seed = base_seed
         self.max_repair_calls = max_repair_calls
+        if (
+            isinstance(candidate_count, bool)
+            or not isinstance(candidate_count, int)
+            or candidate_count <= 0
+        ):
+            raise ValueError("candidate_count must be a positive integer")
+        self.candidate_count = candidate_count
 
     def generate(
         self, context, action, *, iteration_index: int, max_attempts: int | None = None
@@ -180,7 +229,12 @@ class AnalogyTacticGenerator:
             generator=self.generator,
             messages=(
                 Message("system", "Decode the cited analogy into Lean tactics."),
-                Message("user", render_tactic_prompt(context)),
+                Message(
+                    "user",
+                    render_tactic_prompt(
+                        context, candidate_count=self.candidate_count
+                    ),
+                ),
             ),
             action=action,
             hidden_layer=self.hidden_layer,
@@ -191,10 +245,51 @@ class AnalogyTacticGenerator:
             result_type=GeneratedTacticPlan,
         )
 
+    def repair(
+        self,
+        context,
+        action,
+        *,
+        failed_plan: AnalogyTacticPlan,
+        failed_attempts: tuple[RescueAttempt, ...],
+        iteration_index: int,
+        candidate_count: int | None = None,
+        max_attempts: int | None = None,
+    ) -> GeneratedTacticPlan:
+        count = self.candidate_count if candidate_count is None else candidate_count
+        return _generate_strict(
+            generator=self.generator,
+            messages=(
+                Message(
+                    "system",
+                    "Repair rejected analogy-conditioned tactics using Lean 4 diagnostics.",
+                ),
+                Message(
+                    "user",
+                    render_semantic_repair_prompt(
+                        context,
+                        failed_plan,
+                        failed_attempts,
+                        candidate_count=count,
+                    ),
+                ),
+            ),
+            action=action,
+            hidden_layer=self.hidden_layer,
+            seed=self.base_seed + iteration_index * 10 + 6,
+            max_repair_calls=self.max_repair_calls,
+            max_attempts=max_attempts,
+            parser=lambda raw: parse_analogy_tactic_plan(
+                raw, context.analogy.stream
+            ),
+            result_type=GeneratedTacticPlan,
+            initial_repair=True,
+        )
+
 
 def _generate_strict(
     *, generator, messages, action, hidden_layer, seed, max_repair_calls, max_attempts,
-    parser, result_type,
+    parser, result_type, initial_repair=False,
 ):
     if max_attempts is not None and (
         isinstance(max_attempts, bool)
@@ -222,7 +317,7 @@ def _generate_strict(
                     active_seed,
                     "",
                     GenerationStatus.RUNTIME_ERROR,
-                    repair=bool(repair_index),
+                    repair=initial_repair or bool(repair_index),
                     error_kind=type(error).__name__,
                     diagnostic=str(error) or type(error).__name__,
                 )
@@ -238,7 +333,7 @@ def _generate_strict(
                     active_seed,
                     raw,
                     GenerationStatus.INVALID,
-                    repair=bool(repair_index),
+                    repair=initial_repair or bool(repair_index),
                     error_kind="schema",
                     diagnostic=str(error),
                 )
@@ -254,7 +349,10 @@ def _generate_strict(
             continue
         attempts.append(
             GenerationAttempt(
-                active_seed, raw, GenerationStatus.VALID, repair=bool(repair_index)
+                active_seed,
+                raw,
+                GenerationStatus.VALID,
+                repair=initial_repair or bool(repair_index),
             )
         )
         return result_type(parsed, tuple(attempts))
@@ -266,5 +364,6 @@ def _generate_strict(
 __all__ = [
     "AnalogyGenerationContext", "AnalogyGenerationFailure", "AnalogyGenerator", "AnalogyTacticGenerator",
     "GeneratedHop", "GeneratedTacticPlan", "IterationSummary",
-    "TacticGenerationContext", "render_hop_prompt", "render_tactic_prompt",
+    "TacticGenerationContext", "render_hop_prompt", "render_semantic_repair_prompt",
+    "render_tactic_prompt",
 ]

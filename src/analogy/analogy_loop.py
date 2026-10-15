@@ -82,6 +82,9 @@ class AnalogyIteration:
     action: PolicyActionRecord
     tactic_plan: AnalogyTacticPlan
     tactic_generation_attempts: tuple[GenerationAttempt, ...]
+    repair_plan: AnalogyTacticPlan | None
+    repair_generation_attempts: tuple[GenerationAttempt, ...]
+    repair_succeeded: bool
     proposals: tuple[RescueProposal, ...]
     attempts: tuple[RescueAttempt, ...]
     predicted_transition: str
@@ -89,6 +92,7 @@ class AnalogyIteration:
     comparison: TransitionComparison | None
     surprise_delta: float | None
     decision: SurpriseDecision
+    refined_same_state: bool
     model_calls: int
     lean_calls: int
     elapsed_seconds: float
@@ -133,6 +137,7 @@ class AnalogyLoopRunner:
         tactic_reranker: Callable[
             [TacticGenerationContext, AnalogyTacticPlan], AnalogyTacticPlan
         ] | None = None,
+        tactic_repairer: Any | None = None,
         proof_view_lean_cost: int = 0,
     ) -> None:
         for value, name in (
@@ -153,6 +158,7 @@ class AnalogyLoopRunner:
         self.max_lean_calls = max_lean_calls
         self.iteration_sink = iteration_sink
         self.tactic_reranker = tactic_reranker
+        self.tactic_repairer = tactic_repairer
         if (
             isinstance(proof_view_lean_cost, bool)
             or not isinstance(proof_view_lean_cost, int)
@@ -269,11 +275,54 @@ class AnalogyLoopRunner:
             verified, resources = self._verify_plan(
                 current, tactic_plan, evaluator, cancellation, resources
             )
+            repair_plan = None
+            repair_generation_attempts: tuple[GenerationAttempt, ...] = ()
+            repair_succeeded = False
+            if self._can_repair(verified, resources, cancellation):
+                try:
+                    repaired = self.tactic_repairer.repair(
+                        tactic_context,
+                        action,
+                        failed_plan=tactic_plan,
+                        failed_attempts=verified.attempts,
+                        iteration_index=iteration_index,
+                        candidate_count=self.tactics_per_iteration,
+                        max_attempts=resources.remaining_model_calls,
+                    )
+                except AnalogyGenerationFailure as failure:
+                    repair_generation_attempts = failure.attempts
+                    generations.extend(failure.attempts)
+                    resources = resources.use_model(len(failure.attempts))
+                else:
+                    repair_plan = repaired.plan
+                    repair_generation_attempts = repaired.attempts
+                    generations.extend(repaired.attempts)
+                    resources = resources.use_model(len(repaired.attempts))
+                    if not cancellation.is_cancelled() and resources.remaining_lean_calls > 0:
+                        repaired_verified, resources = self._verify_plan(
+                            current,
+                            repaired.plan,
+                            evaluator,
+                            cancellation,
+                            resources,
+                            excluded={
+                                item.proposal.candidate.source
+                                for item in verified.attempts
+                            },
+                        )
+                        repair_succeeded = (
+                            repaired_verified.completed_proof is not None
+                            or repaired_verified.successor is not None
+                        )
+                        verified = _merge_verified(verified, repaired_verified)
             proposals.extend(verified.proposals)
             attempts.extend(verified.attempts)
             completed_proof = verified.completed_proof
             if verified.successor is not None:
                 latest_successor = verified.successor
+            verified_plan = (
+                repair_plan if repair_succeeded and repair_plan is not None else tactic_plan
+            )
 
             # Boundary 4: transition embeddings are optional after cancellation.
             cancelled_before_comparison = cancellation.is_cancelled()
@@ -285,7 +334,7 @@ class AnalogyLoopRunner:
             ):
                 comparison = self.transition_comparator(
                     current.expression,
-                    tactic_plan.predicted_state,
+                    verified_plan.predicted_state,
                     verified.successor.state.expression,
                 )
 
@@ -299,7 +348,19 @@ class AnalogyLoopRunner:
                 remaining_model_calls=resources.remaining_model_calls,
                 remaining_lean_calls=resources.remaining_lean_calls,
             )
-            decision = self.controller.decide(controller_state, observation)
+            if self._can_refine_same_state(
+                iteration_index, verified, resources, cancellation
+            ):
+                decision = SurpriseDecision(
+                    True, StopReason.CONTINUE, controller_state
+                )
+            else:
+                decision = self.controller.decide(controller_state, observation)
+            refined_same_state = (
+                decision.continue_loop
+                and verified.successor is None
+                and completed_proof is None
+            )
             surprise_delta = _surprise_delta(controller_state, comparison)
             controller_state = decision.state
             iteration = AnalogyIteration(
@@ -311,13 +372,17 @@ class AnalogyLoopRunner:
                 _action_record(action),
                 tactic_plan,
                 generated_plan.attempts,
+                repair_plan,
+                repair_generation_attempts,
+                repair_succeeded,
                 verified.proposals,
                 verified.attempts,
-                tactic_plan.predicted_state,
+                verified_plan.predicted_state,
                 None if verified.successor is None else verified.successor.state.expression,
                 comparison,
                 surprise_delta,
                 decision,
+                refined_same_state,
                 resources.model_calls,
                 resources.lean_calls,
                 time.monotonic() - iteration_started,
@@ -330,8 +395,15 @@ class AnalogyLoopRunner:
             if not decision.continue_loop:
                 break
 
-            current = verified.successor.state
-            accepted_tactics += (verified.attempts[-1].proposal.candidate.source,)
+            if verified.successor is not None:
+                current = verified.successor.state
+                accepted_tactics += (
+                    verified.attempts[-1].proposal.candidate.source,
+                )
+            else:
+                failed_tactics += tuple(
+                    item.proposal.candidate.source for item in verified.attempts
+                )
 
         self.live_actions = tuple(actions)
         trace = AnalogyLoopTrace(
@@ -356,8 +428,24 @@ class AnalogyLoopRunner:
         returned_successor = None if completed_proof is not None else latest_successor
         return GenericRescueOutcome(completed_proof, returned_successor, (rollout,))
 
-    def _verify_plan(self, current, plan, evaluator, cancellation, resources):
-        tactics = plan.tactics[: self.tactics_per_iteration]
+    def _verify_plan(
+        self,
+        current,
+        plan,
+        evaluator,
+        cancellation,
+        resources,
+        *,
+        excluded: set[str] | None = None,
+    ):
+        excluded = excluded or set()
+        tactics = tuple(
+            tactic
+            for tactic in plan.tactics
+            if tactic not in excluded
+        )[: self.tactics_per_iteration]
+        if not tactics:
+            return _VerifiedPlan((), (), None, None), resources
         score = 1.0 / len(tactics)
         proposals = tuple(
             RescueProposal(
@@ -393,6 +481,37 @@ class AnalogyLoopRunner:
                 successor = evaluation.successor
                 break
         return _VerifiedPlan(proposals, tuple(attempts), completed, successor), resources
+
+    def _can_repair(self, verified, resources, cancellation):
+        return (
+            self.tactic_repairer is not None
+            and bool(verified.attempts)
+            and all(
+                item.result.status is TacticStatus.ERROR
+                for item in verified.attempts
+            )
+            and not cancellation.is_cancelled()
+            and resources.remaining_model_calls > 0
+            and resources.remaining_lean_calls > 0
+        )
+
+    def _can_refine_same_state(
+        self, iteration_index, verified, resources, cancellation
+    ):
+        return (
+            self.tactic_repairer is not None
+            and verified.completed_proof is None
+            and verified.successor is None
+            and bool(verified.attempts)
+            and all(
+                item.result.status is TacticStatus.ERROR
+                for item in verified.attempts
+            )
+            and not cancellation.is_cancelled()
+            and iteration_index + 1 < self.controller.config.max_iterations
+            and resources.remaining_model_calls >= 2
+            and resources.remaining_lean_calls > self.proof_view_lean_cost
+        )
 
     @staticmethod
     def _preflight(resources, cancellation):
@@ -474,6 +593,20 @@ def _summarize(iteration: AnalogyIteration) -> IterationSummary:
         iteration.surprise_delta,
         iteration.tactic_plan.tactics,
         tuple(item.result.status.value for item in iteration.attempts),
+        tuple(
+            diagnostic
+            for item in iteration.attempts
+            for diagnostic in item.result.diagnostics
+        ),
+    )
+
+
+def _merge_verified(first: _VerifiedPlan, second: _VerifiedPlan) -> _VerifiedPlan:
+    return _VerifiedPlan(
+        first.proposals + second.proposals,
+        first.attempts + second.attempts,
+        second.completed_proof or first.completed_proof,
+        second.successor or first.successor,
     )
 
 

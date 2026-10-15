@@ -7,14 +7,17 @@ from analogy.analogy_generation import (
     AnalogyGenerationFailure,
     AnalogyGenerationContext,
     AnalogyGenerator,
+    AnalogyTacticGenerator,
     IterationSummary,
     TacticGenerationContext,
     render_hop_prompt,
+    render_semantic_repair_prompt,
     render_tactic_prompt,
 )
 from analogy.analogy_stream import (
     AnalogyOutputError,
     AnalogyStream,
+    AnalogyTacticPlan,
     parse_analogy_hop,
     parse_analogy_tactic_plan,
 )
@@ -24,8 +27,20 @@ from analogy.proof_views import (
     ProofStructure,
     ProofViews,
 )
-from analogy.records import Embedding, SymbolicState
-from analogy.rescue import GenerationStatus, ProofRescueContext
+from analogy.records import (
+    CandidateOrigin,
+    Embedding,
+    SymbolicState,
+    TacticCandidate,
+    TacticResult,
+    TacticStatus,
+)
+from analogy.rescue import (
+    GenerationStatus,
+    ProofRescueContext,
+    RescueAttempt,
+    RescueProposal,
+)
 from analogy.rl import PolicyAction
 
 
@@ -125,6 +140,58 @@ def test_tactic_prompt_requests_distinct_lean4_candidates_and_blocks_observed_di
     assert "comma-separated tactic programs" in prompt
 
 
+def test_semantic_repair_prompt_contains_rejected_tactics_and_lean_diagnostics():
+    hop = parse_analogy_hop(HOP, hop_id="hop-0")
+    context = TacticGenerationContext(
+        analogy_context((hop,)), active_hop_id="hop-0"
+    )
+    candidate = TacticCandidate(
+        "exact (assume P; h)", 1.0, CandidateOrigin.ANALOGICAL
+    )
+    proposal = RescueProposal(candidate, "closed")
+    attempt = RescueAttempt(
+        proposal,
+        TacticResult(
+            candidate,
+            TacticStatus.ERROR,
+            diagnostics=("unexpected token ';'",),
+        ),
+    )
+
+    prompt = render_semantic_repair_prompt(
+        context,
+        AnalogyTacticPlan("closed", (candidate.source,), "hop-0"),
+        (attempt,),
+        candidate_count=2,
+    )
+
+    assert "exact (assume P; h)" in prompt
+    assert "unexpected token ';'" in prompt
+    assert "exactly 2 distinct corrected" in prompt
+    assert "same current proof state" in prompt
+
+
+def test_semantic_repair_prompt_has_fallback_when_lean_returns_no_diagnostic():
+    hop = parse_analogy_hop(HOP, hop_id="hop-0")
+    context = TacticGenerationContext(
+        analogy_context((hop,)), active_hop_id="hop-0"
+    )
+    candidate = TacticCandidate("exact h", 1.0, CandidateOrigin.ANALOGICAL)
+    proposal = RescueProposal(candidate, "closed")
+    attempt = RescueAttempt(
+        proposal, TacticResult(candidate, TacticStatus.ERROR)
+    )
+
+    prompt = render_semantic_repair_prompt(
+        context,
+        AnalogyTacticPlan("closed", (candidate.source,), "hop-0"),
+        (attempt,),
+        candidate_count=1,
+    )
+
+    assert "Lean rejected tactic" in prompt
+
+
 class SequenceGenerator:
     def __init__(self, outputs):
         self.outputs = iter(outputs)
@@ -136,6 +203,47 @@ class SequenceGenerator:
         if isinstance(output, Exception):
             raise output
         return output
+
+
+def test_tactic_generator_semantic_repair_is_recorded_as_a_repair_attempt():
+    corrected = json.dumps(
+        {
+            "predicted_state": "no goals",
+            "tactics": ["intro h; exact h"],
+            "motivating_hop_id": "hop-0",
+        }
+    )
+    generator = SequenceGenerator((corrected,))
+    service = AnalogyTacticGenerator(
+        generator,
+        hidden_layer=-1,
+        base_seed=7,
+        max_repair_calls=1,
+    )
+    hop = parse_analogy_hop(HOP, hop_id="hop-0")
+    context = TacticGenerationContext(
+        analogy_context((hop,)), active_hop_id="hop-0"
+    )
+    candidate = TacticCandidate("assume h; exact h", 1.0, CandidateOrigin.ANALOGICAL)
+    proposal = RescueProposal(candidate, "no goals")
+    attempt = RescueAttempt(
+        proposal,
+        TacticResult(candidate, TacticStatus.ERROR, diagnostics=("unexpected identifier",)),
+    )
+    action = PolicyAction(torch.zeros(2), torch.tensor(0.0), torch.tensor(0.0))
+
+    repaired = service.repair(
+        context,
+        action,
+        failed_plan=AnalogyTacticPlan("no goals", (candidate.source,), "hop-0"),
+        failed_attempts=(attempt,),
+        iteration_index=0,
+        candidate_count=2,
+        max_attempts=1,
+    )
+
+    assert repaired.plan.tactics == ("intro h; exact h",)
+    assert repaired.attempts[0].repair is True
 
 
 def test_analogy_generator_repairs_invalid_card_and_preserves_raw_attempts():

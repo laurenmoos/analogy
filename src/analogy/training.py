@@ -991,6 +991,7 @@ def _new_analogy_runner(
         hidden_layer=config.model.hidden_layer,
         base_seed=config.run.seed,
         max_repair_calls=1,
+        candidate_count=config.analogy.tactics_per_iteration,
     )
 
     def rerank_tactics(context, plan):
@@ -1044,6 +1045,7 @@ def _new_analogy_runner(
         ),
         proof_view_lean_cost=1,
         tactic_reranker=(rerank_tactics if config.analogy.rerank_tactics else None),
+        tactic_repairer=tactic_generator,
         iteration_sink=iteration_sink,
     )
 

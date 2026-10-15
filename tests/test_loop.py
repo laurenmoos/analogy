@@ -6,6 +6,14 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from analogy.daydream import CuriosityOutcome
+from analogy.rescue import (
+    GenericRescueOutcome,
+    PolicyActionRecord,
+    RescueAttempt,
+    RescueProposal,
+    RescueRollout,
+    RescueTermination,
+)
 from analogy.records import SymbolicState
 from analogy.loop import (
     AcceptNovelState, CandidateOrigin, DiscardReason, DiscardedSuccessor,
@@ -156,6 +164,56 @@ class EvaluatingCuriosity(RecordingCuriosity):
         return CuriosityOutcome(evaluation.completed_proof, evaluation.successor)
 
 
+def rollout_for(selected, evaluation):
+    proposal = RescueProposal(selected, "predicted next goals")
+    attempt = RescueAttempt(proposal, evaluation.result, evaluation.discarded)
+    if evaluation.completed_proof is not None:
+        termination = RescueTermination.COMPLETE
+    elif evaluation.successor is not None:
+        termination = RescueTermination.PROGRESS
+    elif evaluation.result.status is TacticStatus.ERROR:
+        termination = RescueTermination.REJECTED
+    else:
+        termination = RescueTermination.EXHAUSTED
+    return RescueRollout(
+        "rollout-1",
+        "start",
+        PolicyActionRecord(7, 0.0, 0.0, 0.0),
+        (proposal,),
+        (attempt,),
+        termination,
+    )
+
+
+class ProposingRolloutRescue:
+    def __init__(self, tactic_source: str):
+        self.tactic_source = tactic_source
+        self.calls = []
+
+    def search(self, current, goal, tactic_pool, ordinary_attempts, evaluator, cancellation):
+        selected = TacticCandidate(
+            self.tactic_source, 1.0, CandidateOrigin.ANALOGICAL
+        )
+        evaluation = evaluator(selected)
+        self.calls.append((current, tactic_pool, evaluation))
+        rollout = rollout_for(selected, evaluation)
+        return GenericRescueOutcome(
+            completed_proof=evaluation.completed_proof,
+            successor=evaluation.successor,
+            rollouts=(rollout,),
+        )
+
+
+class FixedRolloutRescue:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls = []
+
+    def search(self, *args):
+        self.calls.append(args)
+        return self.outcome
+
+
 class RejectAllProgress:
     def accepts(self, before, after, goal):
         return False
@@ -179,6 +237,218 @@ def test_ordinary_completion_never_invokes_curiosity() -> None:
     verifier = FakeVerifier({("start", "exact h"): TacticResult(exact, TacticStatus.COMPLETE, proof="by exact h")})
     result = make_search(FakeTacticRanker({"start": (exact,)}), verifier).search(state("start"), state("goal"))
     assert result.proof == "by exact h"
+
+
+def test_generic_rescue_may_verify_tactic_outside_ordinary_pool() -> None:
+    ordinary = candidate("bad", 1.0)
+    generated = TacticCandidate(
+        "exact h", 1.0, CandidateOrigin.ANALOGICAL
+    )
+    verifier = FakeVerifier(
+        {
+            ("start", "bad"): TacticResult(ordinary, TacticStatus.ERROR),
+            ("start", "exact h"): TacticResult(
+                generated, TacticStatus.COMPLETE, proof="by exact h"
+            ),
+        }
+    )
+
+    result = make_search(
+        FakeTacticRanker({"start": (ordinary,)}),
+        verifier,
+        curiosity_search=None,
+        rollout_rescue=ProposingRolloutRescue("exact h"),
+    ).search(state("start"), state("goal"))
+
+    assert result.status is SearchStatus.COMPLETE
+    assert verifier.calls == [("start", "bad"), ("start", "exact h")]
+    assert len(result.rescue_rollouts) == 1
+
+
+def test_disabled_generic_rescue_preserves_complete_search_result() -> None:
+    exact = candidate("exact h", 0.9)
+    verifier = FakeVerifier(
+        {
+            ("start", "exact h"): TacticResult(
+                exact, TacticStatus.COMPLETE, proof="by exact h"
+            )
+        }
+    )
+
+    result = make_search(
+        FakeTacticRanker({"start": (exact,)}), verifier, rollout_rescue=None
+    ).search(state("start"), state("goal"))
+
+    expected_expansion = ExpansionOutcome(
+        SearchNode(state("start"), 1.0),
+        (TacticResult(exact, TacticStatus.COMPLETE, proof="by exact h"),),
+        completed_proof="by exact h",
+        candidate_pool=(exact,),
+    )
+    assert result == SearchResult(
+        SearchStatus.COMPLETE, "by exact h", (expected_expansion,)
+    )
+
+
+def test_search_rejects_two_rescue_implementations() -> None:
+    with pytest.raises(ValueError, match="one rescue"):
+        make_search(
+            FakeTacticRanker({}),
+            FakeVerifier({}),
+            curiosity_search=FailingCuriosity(),
+            rollout_rescue=FixedRolloutRescue(GenericRescueOutcome()),
+        )
+
+
+def test_generic_rescue_rejects_verifier_result_for_wrong_candidate() -> None:
+    ordinary = candidate("bad")
+    generated = TacticCandidate("new", 1.0, CandidateOrigin.ANALOGICAL)
+    wrong = TacticCandidate("wrong", 1.0, CandidateOrigin.ANALOGICAL)
+    verifier = FakeVerifier(
+        {
+            ("start", "bad"): TacticResult(ordinary, TacticStatus.ERROR),
+            ("start", "new"): TacticResult(wrong, TacticStatus.ERROR),
+        }
+    )
+    with pytest.raises(ValueError, match="requested candidate"):
+        make_search(
+            FakeTacticRanker({"start": (ordinary,)}),
+            verifier,
+            curiosity_search=None,
+            rollout_rescue=ProposingRolloutRescue(generated.source),
+        ).search(state("start"), state("goal"))
+
+
+def test_repeated_generic_successor_is_discarded_and_not_reexpanded() -> None:
+    ordinary = candidate("bad")
+    generated = TacticCandidate("loop", 1.0, CandidateOrigin.ANALOGICAL)
+    verifier = FakeVerifier(
+        {
+            ("start", "bad"): TacticResult(ordinary, TacticStatus.ERROR),
+            ("start", "loop"): TacticResult(
+                generated, TacticStatus.ACCEPTED, state("start")
+            ),
+        }
+    )
+    rescue = ProposingRolloutRescue("loop")
+
+    result = make_search(
+        FakeTacticRanker({"start": (ordinary,)}),
+        verifier,
+        curiosity_search=None,
+        rollout_rescue=rescue,
+    ).search(state("start"), state("goal"))
+
+    assert result.status is SearchStatus.EXHAUSTED
+    evaluation = rescue.calls[0][2]
+    assert evaluation.successor is None
+    assert evaluation.discarded.reason is DiscardReason.REPEATED_STATE
+    assert len(result.ordinary_expansions) == 1
+
+
+def test_novel_generic_successor_returns_to_ordinary_frontier() -> None:
+    ordinary = candidate("bad")
+    generated = TacticCandidate("escape", 1.0, CandidateOrigin.ANALOGICAL)
+    finish = candidate("finish", 1.0)
+    verifier = FakeVerifier(
+        {
+            ("start", "bad"): TacticResult(ordinary, TacticStatus.ERROR),
+            ("start", "escape"): TacticResult(
+                generated, TacticStatus.ACCEPTED, state("rescued")
+            ),
+            ("rescued", "finish"): TacticResult(
+                finish, TacticStatus.COMPLETE, proof="rescued proof"
+            ),
+        }
+    )
+
+    result = make_search(
+        FakeTacticRanker({"start": (ordinary,), "rescued": (finish,)}),
+        verifier,
+        curiosity_search=None,
+        rollout_rescue=ProposingRolloutRescue("escape"),
+    ).search(state("start"), state("goal"))
+
+    assert result.proof == "rescued proof"
+    assert verifier.calls[-1] == ("rescued", "finish")
+
+
+def test_generic_rescue_never_runs_after_ordinary_progress() -> None:
+    progress = candidate("intro h")
+    finish = candidate("exact h")
+    verifier = FakeVerifier(
+        {
+            ("start", "intro h"): TacticResult(
+                progress, TacticStatus.ACCEPTED, state("next")
+            ),
+            ("next", "exact h"): TacticResult(
+                finish, TacticStatus.COMPLETE, proof="by intro h; exact h"
+            ),
+        }
+    )
+    rescue = FixedRolloutRescue(GenericRescueOutcome())
+
+    result = make_search(
+        FakeTacticRanker({"start": (progress,), "next": (finish,)}),
+        verifier,
+        curiosity_search=None,
+        rollout_rescue=rescue,
+    ).search(state("start"), state("goal"))
+
+    assert result.status is SearchStatus.COMPLETE
+    assert rescue.calls == []
+
+
+class SequenceCancellation:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    def is_cancelled(self):
+        return next(self.values, self.values)
+
+
+def test_cancellation_before_search_has_no_rescue_trace() -> None:
+    result = make_search(
+        FakeTacticRanker({}),
+        FakeVerifier({}),
+        curiosity_search=None,
+        rollout_rescue=FixedRolloutRescue(GenericRescueOutcome()),
+        cancellation=SequenceCancellation((True,)),
+    ).search(state("start"), state("goal"))
+
+    assert result.status is SearchStatus.CANCELLED
+    assert result.rescue_rollouts == ()
+
+
+def test_cancelled_generic_rescue_preserves_completed_rollout_trace() -> None:
+    ordinary = candidate("bad")
+    rejected = TacticCandidate("also bad", 1.0, CandidateOrigin.ANALOGICAL)
+    failed = TacticResult(rejected, TacticStatus.ERROR)
+    proposal = RescueProposal(rejected, "still stuck")
+    rollout = RescueRollout(
+        "r",
+        "start",
+        PolicyActionRecord(1, 0.0, 0.0, 0.0),
+        (proposal,),
+        (RescueAttempt(proposal, failed),),
+        RescueTermination.REJECTED,
+    )
+    rescue = FixedRolloutRescue(
+        GenericRescueOutcome(rollouts=(rollout,), cancelled=True)
+    )
+    verifier = FakeVerifier(
+        {("start", "bad"): TacticResult(ordinary, TacticStatus.ERROR)}
+    )
+
+    result = make_search(
+        FakeTacticRanker({"start": (ordinary,)}),
+        verifier,
+        curiosity_search=None,
+        rollout_rescue=rescue,
+    ).search(state("start"), state("goal"))
+
+    assert result.status is SearchStatus.CANCELLED
+    assert result.rescue_rollouts == (rollout,)
 
 
 def test_ordinary_novel_successor_returns_to_frontier_without_curiosity() -> None:

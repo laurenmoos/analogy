@@ -22,7 +22,8 @@ from analogy.loop import (
     StateIdFingerprinter,
     WhitespaceTacticCanonicalizer,
 )
-from analogy.model import QwenTacticRanker, run_baseline
+from analogy.model import QwenTacticRanker, _DisabledRolloutRescue, run_baseline
+from analogy.rescue import GenericRescueOutcome
 from analogy.records import BaselineStatus, SearchStatus, SymbolicState
 
 
@@ -42,6 +43,10 @@ class SequenceGenerator:
 class NoCuriosity:
     def search(self, *args):
         return CuriosityOutcome()
+
+
+def test_disabled_rollout_rescue_returns_empty_generic_outcome() -> None:
+    assert _DisabledRolloutRescue().search(object()) == GenericRescueOutcome()
 
 
 def test_ranked_policy_and_real_lean_complete_a_two_step_search() -> None:

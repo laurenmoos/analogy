@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from .config import AppConfig, ModelConfig
 from .daydream import CuriosityOutcome
+from .rescue import GenericRescueOutcome
 from .lean_gym.corpus import load_problems
 from .lean_gym.models import Problem, VerificationStatus
 from .lean_gym.session import ProofSession, SessionError
@@ -502,6 +503,11 @@ def run_capability(
 class _DisabledCuriosity:
     def search(self, *args: Any) -> CuriosityOutcome:
         return CuriosityOutcome()
+
+
+class _DisabledRolloutRescue:
+    def search(self, *args: Any) -> GenericRescueOutcome:
+        return GenericRescueOutcome()
 
 
 def _baseline_problem_result(

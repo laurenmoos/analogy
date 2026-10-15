@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,18 @@ class AnalogyConfig:
 class RLConfig:
     enabled: bool
     algorithm: str
+    rollouts_per_state: int
+    tactics_per_rollout: int
+    hidden_width: int
+    max_delta_norm: float
+    initial_log_scale: float
+    learning_rate: float
+    entropy_weight: float
+    max_gradient_norm: float
+    completion_reward: float
+    progress_reward: float
+    rejection_reward: float
+    max_rescue_verifier_calls: int
 
 
 @dataclass(frozen=True)
@@ -95,7 +108,24 @@ _SCHEMA: dict[str, frozenset[str]] = {
     "benchmark": frozenset({"corpus"}),
     "search": frozenset({"top_k", "max_steps", "stuck_after"}),
     "analogy": frozenset({"enabled", "samples"}),
-    "rl": frozenset({"enabled", "algorithm"}),
+    "rl": frozenset(
+        {
+            "enabled",
+            "algorithm",
+            "rollouts_per_state",
+            "tactics_per_rollout",
+            "hidden_width",
+            "max_delta_norm",
+            "initial_log_scale",
+            "learning_rate",
+            "entropy_weight",
+            "max_gradient_norm",
+            "completion_reward",
+            "progress_reward",
+            "rejection_reward",
+            "max_rescue_verifier_calls",
+        }
+    ),
     "run": frozenset({"output_dir", "seed"}),
     "data": frozenset({"root"}),
 }
@@ -137,8 +167,24 @@ def _positive_number(value: Any, path: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{path} must be a number")
     number = float(value)
-    if number <= 0.0:
+    if not math.isfinite(number) or number <= 0.0:
         raise ConfigError(f"{path} must be positive")
+    return number
+
+
+def _finite_number(value: Any, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{path} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ConfigError(f"{path} must be a finite number")
+    return number
+
+
+def _nonnegative_number(value: Any, path: str) -> float:
+    number = _finite_number(value, path)
+    if number < 0.0:
+        raise ConfigError(f"{path} must be non-negative")
     return number
 
 
@@ -190,6 +236,20 @@ def load_config(path: Path) -> AppConfig:
     data = sections["data"]
     base = config_path.parent
 
+    completion_reward = _finite_number(
+        rl["completion_reward"], "config.rl.completion_reward"
+    )
+    progress_reward = _finite_number(
+        rl["progress_reward"], "config.rl.progress_reward"
+    )
+    rejection_reward = _finite_number(
+        rl["rejection_reward"], "config.rl.rejection_reward"
+    )
+    if not completion_reward > progress_reward >= 0.0 > rejection_reward:
+        raise ConfigError(
+            "rl reward ordering must satisfy completion > progress >= 0 > rejection"
+        )
+
     return AppConfig(
         experiment=ExperimentConfig(
             stage=_string(experiment["stage"], "config.experiment.stage"),
@@ -229,6 +289,37 @@ def load_config(path: Path) -> AppConfig:
         rl=RLConfig(
             enabled=_boolean(rl["enabled"], "config.rl.enabled"),
             algorithm=_string(rl["algorithm"], "config.rl.algorithm"),
+            rollouts_per_state=_positive_integer(
+                rl["rollouts_per_state"], "config.rl.rollouts_per_state"
+            ),
+            tactics_per_rollout=_positive_integer(
+                rl["tactics_per_rollout"], "config.rl.tactics_per_rollout"
+            ),
+            hidden_width=_positive_integer(
+                rl["hidden_width"], "config.rl.hidden_width"
+            ),
+            max_delta_norm=_positive_number(
+                rl["max_delta_norm"], "config.rl.max_delta_norm"
+            ),
+            initial_log_scale=_finite_number(
+                rl["initial_log_scale"], "config.rl.initial_log_scale"
+            ),
+            learning_rate=_positive_number(
+                rl["learning_rate"], "config.rl.learning_rate"
+            ),
+            entropy_weight=_nonnegative_number(
+                rl["entropy_weight"], "config.rl.entropy_weight"
+            ),
+            max_gradient_norm=_positive_number(
+                rl["max_gradient_norm"], "config.rl.max_gradient_norm"
+            ),
+            completion_reward=completion_reward,
+            progress_reward=progress_reward,
+            rejection_reward=rejection_reward,
+            max_rescue_verifier_calls=_positive_integer(
+                rl["max_rescue_verifier_calls"],
+                "config.rl.max_rescue_verifier_calls",
+            ),
         ),
         run=RunConfig(
             output_dir=_path(run["output_dir"], "config.run.output_dir", base),

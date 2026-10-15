@@ -180,3 +180,103 @@ def test_proof_encoder_embeds_each_view_once_with_same_layer() -> None:
     assert [layer for _, layer in embedder.calls] == [-1, -1]
     assert embedder.calls[0][0] != embedder.calls[1][0]
     assert representation.language_prompt_hash != representation.structure_prompt_hash
+
+
+class HookBlock(torch.nn.Module):
+    def forward(self, hidden):
+        return hidden, "cache"
+
+
+class HookModel(torch.nn.Module):
+    def __init__(self, *, raises: bool = False):
+        super().__init__()
+        self.parameter = torch.nn.Parameter(torch.ones(1))
+        self.model = SimpleNamespace(layers=torch.nn.ModuleList([HookBlock()]))
+        self.config = SimpleNamespace(_commit_hash="revision-1", hidden_size=2)
+        self.device = "cpu"
+        self.raises = raises
+        self.outputs = []
+
+    def generate(self, **kwargs):
+        prefill = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+        decode = torch.tensor([[[7.0, 8.0]]])
+        self.outputs.append(self.model.layers[0](prefill))
+        self.outputs.append(self.model.layers[0](decode))
+        if self.raises:
+            raise RuntimeError("generation failed")
+        return torch.tensor([[10, 11, 99]])
+
+
+class HookTokenizer:
+    def apply_chat_template(self, messages, **kwargs):
+        return "rendered"
+
+    def __call__(self, texts, **kwargs):
+        return TensorBatch(
+            input_ids=torch.tensor([[10, 11]]),
+            attention_mask=torch.tensor([[1, 1]]),
+        )
+
+    def decode(self, tokens, **kwargs):
+        return "decoded"
+
+
+def hook_generator(*, raises: bool = False):
+    model = HookModel(raises=raises)
+    return QwenGenerator(
+        tokenizer=HookTokenizer(),
+        model=model,
+        torch_module=torch,
+        device="cpu",
+        max_new_tokens=8,
+        timeout_seconds=1.0,
+    ), model
+
+
+def test_delta_changes_only_final_prefill_token_and_preserves_tuple_members() -> None:
+    generator, model = hook_generator()
+
+    assert generator.generate_with_delta(
+        (), delta=torch.tensor([10.0, 20.0]), layer=0, seed=4
+    ) == "decoded"
+
+    prefill, cache = model.outputs[0]
+    decode, decode_cache = model.outputs[1]
+    assert torch.equal(prefill[0, :2], torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    assert torch.equal(prefill[0, 2], torch.tensor([15.0, 26.0]))
+    assert torch.equal(decode, torch.tensor([[[7.0, 8.0]]]))
+    assert cache == decode_cache == "cache"
+
+
+def test_zero_delta_matches_unperturbed_generation() -> None:
+    ordinary, ordinary_model = hook_generator()
+    changed, changed_model = hook_generator()
+
+    ordinary_text = ordinary.generate((), seed=4)
+    changed_text = changed.generate_with_delta(
+        (), delta=torch.zeros(2), layer=-1, seed=4
+    )
+
+    assert changed_text == ordinary_text
+    assert torch.equal(changed_model.outputs[0][0], ordinary_model.outputs[0][0])
+
+
+@pytest.mark.parametrize("delta", [torch.zeros((1, 2)), torch.zeros(3)])
+def test_delta_rejects_batch_or_dimension_mismatch_before_generation(delta) -> None:
+    generator, model = hook_generator()
+
+    with pytest.raises(ModelConfigurationError, match="delta"):
+        generator.generate_with_delta((), delta=delta, layer=0, seed=4)
+
+    assert model.outputs == []
+
+
+def test_delta_hook_is_removed_when_generation_raises() -> None:
+    generator, model = hook_generator(raises=True)
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        generator.generate_with_delta(
+            (), delta=torch.ones(2), layer=0, seed=4
+        )
+
+    assert not model.model.layers[0]._forward_hooks

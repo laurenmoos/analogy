@@ -27,6 +27,18 @@ analogy:
 rl:
   enabled: false
   algorithm: reinforce
+  rollouts_per_state: 4
+  tactics_per_rollout: 2
+  hidden_width: 256
+  max_delta_norm: 2.0
+  initial_log_scale: -2.0
+  learning_rate: 0.0001
+  entropy_weight: 0.001
+  max_gradient_norm: 1.0
+  completion_reward: 1.0
+  progress_reward: 0.1
+  rejection_reward: -0.1
+  max_rescue_verifier_calls: 8
 
 run:
   output_dir: runs

@@ -173,6 +173,64 @@ class QwenGenerator:
         return "cpu"
 
     def generate(self, messages: tuple[Message, ...], *, seed: int) -> str:
+        model_inputs = self._prepare_generation(messages)
+        return self._run_generation(model_inputs, seed=seed)
+
+    def generate_with_delta(
+        self,
+        messages: tuple[Message, ...],
+        *,
+        delta: Any,
+        layer: int,
+        seed: int,
+    ) -> str:
+        if not isinstance(delta, self._torch.Tensor) or delta.ndim != 1:
+            raise ModelConfigurationError(
+                "latent delta must be a one-dimensional Torch tensor"
+            )
+        if not bool(self._torch.isfinite(delta).all().item()):
+            raise ModelConfigurationError("latent delta must be finite")
+        blocks = getattr(getattr(self._model, "model", None), "layers", None)
+        if blocks is None:
+            raise ModelConfigurationError("model does not expose decoder layers")
+        resolved = _resolve_hidden_layer(layer, len(blocks))
+        hidden_size = getattr(getattr(self._model, "config", None), "hidden_size", None)
+        if hidden_size is None or int(hidden_size) != delta.numel():
+            raise ModelConfigurationError(
+                "latent delta dimension must match model hidden size"
+            )
+        model_inputs = self._prepare_generation(messages)
+        applied = False
+
+        def inject(_module: Any, _inputs: Any, output: Any) -> Any:
+            nonlocal applied
+            if applied:
+                return output
+            hidden = output[0] if isinstance(output, tuple) else output
+            if not isinstance(hidden, self._torch.Tensor) or hidden.ndim != 3:
+                raise ModelConfigurationError(
+                    "decoder layer hidden output must have rank 3"
+                )
+            if hidden.shape[0] != 1 or hidden.shape[-1] != delta.numel():
+                raise ModelConfigurationError(
+                    "latent delta batch or dimension does not match hidden output"
+                )
+            changed = hidden.clone()
+            changed[:, -1, :] = changed[:, -1, :] + delta.detach().to(
+                device=hidden.device, dtype=hidden.dtype
+            )
+            applied = True
+            if isinstance(output, tuple):
+                return (changed, *output[1:])
+            return changed
+
+        handle = blocks[resolved].register_forward_hook(inject)
+        try:
+            return self._run_generation(model_inputs, seed=seed)
+        finally:
+            handle.remove()
+
+    def _prepare_generation(self, messages: tuple[Message, ...]) -> Any:
         rendered = [{"role": item.role, "content": item.content} for item in messages]
         prompt = self._tokenizer.apply_chat_template(
             rendered,
@@ -180,7 +238,9 @@ class QwenGenerator:
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        model_inputs = self._tokenizer([prompt], return_tensors="pt").to(self._device)
+        return self._tokenizer([prompt], return_tensors="pt").to(self._device)
+
+    def _run_generation(self, model_inputs: Any, *, seed: int) -> str:
         self._torch.manual_seed(seed)
         started = time.monotonic()
         decoding: dict[str, Any] = {"do_sample": self._do_sample}

@@ -76,3 +76,64 @@ Run the complete preservation suite with:
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q
 ```
+
+## Standalone retrieval experiment
+
+The retrieval comparison is independent of the numbered implementation plans and does not import the `analogy` package. It is a tactic-recovery experiment with three paired conditions:
+
+- `none`: Qwen scores the shared tactic strings with no corpus context;
+- `random`: Qwen sees a deterministic random sample from the structurally eligible poetry/physics shortlist;
+- `analogy`: Qwen sees the highest teacher-forced proof–transformation pair scores from that same shortlist.
+
+Lean derives a name-free structural signature from each elaborated proof state. Qwen remains frozen and local: it extracts corpus records, scores relevance labels, and scores the actual tactic-string completions in batched forward passes. Lean is the only correctness authority. Optional hidden vectors are diagnostic artifacts and never select retrieved examples.
+
+The launcher requires Apple Silicon MPS and fails instead of silently using CPU. It also uses offline-safe, non-overwriting result directories and a 30-second per-call Lean ceiling inside a 600-second theorem budget, preventing cold-start compilation from being mistaken for a condition failure. Install or cache `Qwen/Qwen3-8B` locally before the first offline run.
+
+Generation budgets follow the current Lean proof signature rather than the benchmark's curriculum level: atomic elimination states answer directly, while nested or branching states may use a bounded thinking phase. Valid corpus transformations and deterministic schema exclusions are both cached in `/tmp/analogy-data/standalone-cache`. Rescue remains a direct, non-thinking generation of at most two tactics; the main condition comparison uses teacher-forced likelihoods.
+
+Run the default three-problem, three-condition smoke experiment with:
+
+```bash
+./run_experiment.sh
+```
+
+Validate the inputs and Lean setup without loading Qwen:
+
+```bash
+./run_experiment.sh --dry-run
+```
+
+Run all twenty-five mixed-difficulty benchmark problems with:
+
+```bash
+./run_experiment.sh \
+  --problem and_intro_01 --problem and_intro_02 --problem and_intro_03 \
+  --problem and_intro_04 --problem and_intro_05 \
+  --problem imp_intro_01 --problem imp_intro_02 --problem imp_intro_03 \
+  --problem imp_intro_04 --problem imp_intro_05 \
+  --problem or_intro_01 --problem or_intro_03 --problem or_intro_04 \
+  --problem or_intro_05 --problem or_intro_06 \
+  --problem iff_intro_01 --problem iff_intro_02 --problem iff_intro_03 \
+  --problem iff_intro_04 --problem iff_intro_05 \
+  --problem not_intro_01 --problem not_intro_02 --problem not_intro_03 \
+  --problem not_intro_04 --problem not_intro_05
+```
+
+After the 25-problem run is operationally sound, run a three-seed replication by adding the same problem list to:
+
+```bash
+./run_experiment.sh --seed 0 --seed 1 --seed 2
+```
+
+Additional arguments are passed through after launcher defaults, so user values override them. For example, `./run_experiment.sh --problem imp_intro_05 --retrieval-count 2` replaces the mixed default set and retrieval count.
+
+Each result directory contains:
+
+- `config.json`: immutable inputs, Lean/model provenance, hybrid budgets, warm-up status, and counterbalanced condition order;
+- `transitions.jsonl`: validated corpus schemas and optional diagnostic embeddings;
+- `attempts.jsonl`: proof-signature fingerprints, shortlist IDs, compatibility components, pair margins, tactic likelihoods, and Lean outcomes;
+- `trials.jsonl`: one finalized theorem/condition/seed result, including the fixed-pool/rescue split;
+- `generations.jsonl`: bounded corpus extraction and rescue calls plus teacher-forced scoring batches;
+- `summary.json`: paired condition aggregates, fixed-pool solves, separately counted rescue solves, and operational fallbacks.
+
+The primary metric is Lean-verified solve rate within the identical fixed candidate and verifier budget. Compare `analogy` with both `none` and structurally matched `random`; do not fold rescue solves into the fixed-pool result. A null result—no eligible analogy, no improvement, or equal rankings—is valid evidence rather than an experiment failure. Rescue proposes at most two new tactics only after the fixed pool is exhausted and is reported separately.

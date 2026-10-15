@@ -26,6 +26,17 @@ $$z_{ab}=H(s_{ab}).$$
 
 Relations do not need fixed names such as *splitting* or *revealing*. They may exist only as directions or neighborhoods in the learned space. Cross-domain transfer still requires a model to interpret a retrieved relation in the context of the proof.
 
+The intended analogy matches the proof trajectory up to the stuck point, then treats the analogy's continuation as a hypothesis for what the proof should do next:
+
+```text
+analogy:  a₀ → a₁ → a₂ → a₃
+proof:    s₀ → s₁ → s₂ →  ?
+                       alignment
+prediction: map a₃ back into proof space → next tactic
+```
+
+The transferable object is therefore a line of reasoning, not a similar theorem. Lean decides whether the proposed continuation is useful.
+
 ## Stuck-only tactic discovery
 
 The readable control flow is:

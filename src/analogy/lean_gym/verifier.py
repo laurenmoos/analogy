@@ -16,8 +16,61 @@ from ..records import (
     TacticResult,
     TacticStatus,
 )
+from ..proof_views import ProofStructure, ProofViewError
 
 from .models import Diagnostic, Problem, ProofState, VerificationResult, VerificationStatus
+
+
+_LEAN_STRUCTURE_PRELUDE = r'''import Lean
+open Lean Meta Elab Tactic
+
+partial def analogyExprShape (needle : Option Expr) (expression : Expr)
+    (depth : Nat := 0) : MetaM Json := do
+  if depth >= 8 then
+    return Json.mkObj [("root", Json.str "opaque"), ("children", Json.arr #[])]
+  let expression ← instantiateMVars expression
+  if let some target := needle then
+    if expression == target then
+      return Json.mkObj [("root", Json.str "target"), ("children", Json.arr #[])]
+  match expression with
+  | .forallE _ domain body _ =>
+      let root := if body.hasLooseBVar 0 then "forall" else "implication"
+      let left ← analogyExprShape needle domain (depth + 1)
+      let right ← analogyExprShape needle body (depth + 1)
+      return Json.mkObj [("root", Json.str root), ("children", Json.arr #[left, right])]
+  | _ =>
+      let root := match expression.getAppFn.constName? with
+        | some ``And => "and"
+        | some ``Or => "or"
+        | some ``Iff => "iff"
+        | some ``Eq => "equality"
+        | some ``Not => "not"
+        | some ``Exists => "exists"
+        | some ``False => "false"
+        | _ => if expression.isApp then "application" else "atom"
+      let children ← expression.getAppArgs.mapM fun child =>
+        analogyExprShape needle child (depth + 1)
+      return Json.mkObj [("root", Json.str root), ("children", Json.arr children)]
+
+elab "trace_proof_structure" : tactic => do
+  let goals ← getGoals
+  match goals[0]? with
+  | none => pure ()
+  | some goal => goal.withContext do
+      let target ← instantiateMVars (← goal.getType)
+      let targetJson ← analogyExprShape none target
+      let mut hypotheses : Array Json := #[]
+      for declaration in (← getLCtx) do
+        if !declaration.isImplementationDetail && (← isProp declaration.type) then
+          let shape ← analogyExprShape (some target) declaration.type
+          hypotheses := hypotheses.push shape
+      let payload := Json.mkObj [
+        ("goal_count", toJson goals.length),
+        ("target", targetJson),
+        ("hypotheses", Json.arr hypotheses)
+      ]
+      logInfo m!"ANALOGY_PROOF_STRUCTURE:{payload.compress}"
+'''
 
 
 class Verifier(Protocol):
@@ -68,6 +121,37 @@ class LeanSubprocessVerifier:
             return invalid
         rendered = self._render_probe(problem, accepted_tactics)
         return self._classify_probe(problem, accepted_tactics, rendered, self._run_lean(rendered.text))
+
+    def proof_structure_after(
+        self, problem: Problem, accepted_tactics: tuple[str, ...]
+    ) -> ProofStructure:
+        invalid = self._validate_prefix(accepted_tactics)
+        if invalid is not None:
+            raise ProofViewError("cannot extract structure from an invalid tactic prefix")
+        source = self._render_structure_probe(problem, accepted_tactics)
+        run = self._run_lean(source)
+        if run.timed_out or run.internal_error or run.exit_code != 0:
+            detail = "; ".join(item.message for item in run.diagnostics)
+            raise ProofViewError(f"Lean structure extraction failed: {detail}")
+        payloads = []
+        for diagnostic in run.diagnostics:
+            marker = "ANALOGY_PROOF_STRUCTURE:"
+            if marker in diagnostic.message:
+                payloads.append(diagnostic.message.split(marker, 1)[1].strip())
+        if len(payloads) != 1:
+            raise ProofViewError("Lean emitted an invalid number of proof structures")
+        try:
+            payload = json.loads(payloads[0])
+            return ProofStructure(
+                int(payload["goal_count"]),
+                json.dumps(payload["target"], sort_keys=True, separators=(",", ":")),
+                tuple(
+                    json.dumps(item, sort_keys=True, separators=(",", ":"))
+                    for item in payload["hypotheses"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ProofViewError("Lean proof structure payload is malformed") from error
 
     def try_tactic(
         self,
@@ -152,6 +236,15 @@ class LeanSubprocessVerifier:
         lines = [problem.theorem_header()]
         lines.extend(f"  {tactic}" for tactic in tactics)
         return RenderedSource("\n".join(lines) + "\n", None, None)
+
+    @staticmethod
+    def _render_structure_probe(
+        problem: Problem, tactics: tuple[str, ...]
+    ) -> str:
+        lines = [_LEAN_STRUCTURE_PRELUDE, problem.theorem_header()]
+        lines.extend(f"  {tactic}" for tactic in tactics)
+        lines.extend(("  trace_proof_structure", "  all_goals sorry"))
+        return "\n".join(lines) + "\n"
 
     def _run_lean(self, source: str) -> LeanRun:
         started = time.monotonic_ns()

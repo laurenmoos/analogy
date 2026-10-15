@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
+import torch
 
 from analogy.config import ModelConfig
 from analogy.model import (
@@ -14,6 +16,52 @@ from analogy.model import (
     parse_tactic_sequence,
 )
 from analogy.records import CandidateOrigin, CapabilityResult, Message
+
+
+def test_embed_text_records_frozen_embedding_provenance() -> None:
+    class TensorBatch(dict):
+        def to(self, device):
+            return self
+
+    class Tokenizer:
+        def __call__(self, texts, **kwargs):
+            return TensorBatch(
+                input_ids=torch.tensor([[1, 2]]),
+                attention_mask=torch.tensor([[1, 1]]),
+            )
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(()))
+            self.config = SimpleNamespace(
+                hidden_size=2, _commit_hash="revision-test"
+            )
+
+        def forward(self, **kwargs):
+            return SimpleNamespace(
+                hidden_states=(
+                    torch.tensor([[[1.0, 0.0], [0.0, 1.0]]]),
+                    torch.tensor([[[0.0, 1.0], [3.0, 4.0]]]),
+                )
+            )
+
+    generator = QwenGenerator(
+        tokenizer=Tokenizer(),
+        model=Model(),
+        torch_module=torch,
+        device="cpu",
+        max_new_tokens=8,
+        timeout_seconds=5.0,
+    )
+
+    embedding = generator.embed_text("proof view", layer=-1)
+
+    assert embedding.values == pytest.approx((0.6, 0.8))
+    assert embedding.model_revision == "revision-test"
+    assert embedding.layer == 1
+    assert embedding.token_index == 1
+    assert len(embedding.text_hash) == 64
 
 
 def test_parse_tactic_sequence_accepts_nonempty_json_string_array() -> None:

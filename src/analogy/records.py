@@ -41,6 +41,10 @@ def _finite_float(value: object, field: str) -> float:
 class Embedding:
     model_id: str
     values: tuple[float, ...]
+    model_revision: str | None = None
+    layer: int | None = None
+    token_index: int | None = None
+    text_hash: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.model_id, "model_id")
@@ -52,6 +56,15 @@ class Embedding:
             raise ValueError("values must not be empty")
         normalized = tuple(_finite_float(value, "values") for value in raw_values)
         object.__setattr__(self, "values", normalized)
+        if self.model_revision is not None:
+            _require_text(self.model_revision, "model_revision")
+        for value, name in ((self.layer, "layer"), (self.token_index, "token_index")):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise ValueError(f"{name} must be an integer or None")
+        if self.token_index is not None and self.token_index < 0:
+            raise ValueError("token_index must be non-negative")
+        if self.text_hash is not None:
+            _require_text(self.text_hash, "text_hash")
 
     @property
     def dimension(self) -> int:

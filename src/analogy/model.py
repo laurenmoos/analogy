@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import time
 import uuid
@@ -303,7 +304,12 @@ class QwenGenerator:
             raise ModelConfigurationError("embedding must be finite and nonzero")
         values = tuple(float(item) for item in (vector / norm).cpu().tolist())
         return Embedding(
-            f"{self.model_revision}:layer={resolved}:final-nonpadding", values
+            f"{self.model_revision}:layer={resolved}:final-nonpadding",
+            values,
+            model_revision=self.model_revision,
+            layer=resolved,
+            token_index=token_count - 1,
+            text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
 

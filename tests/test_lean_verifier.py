@@ -60,6 +60,20 @@ def test_real_lean_preserves_multiple_goals(verifier: LeanSubprocessVerifier) ->
     assert final.status is VerificationStatus.COMPLETE
 
 
+def test_real_lean_extracts_structural_proof_signature(
+    verifier: LeanSubprocessVerifier,
+) -> None:
+    item = problem("(P Q : Prop) (h : P ∧ Q)", "Q ∧ P")
+
+    structure = verifier.proof_structure_after(item, ())
+
+    assert structure.goal_count == 1
+    assert '"root":"and"' in structure.target_shape
+    assert structure.hypothesis_shapes
+    assert "hidden" not in structure.target_shape
+    assert "/tmp/" not in structure.target_shape
+
+
 @pytest.mark.parametrize("candidate", ["", "   ", "intro h\nend", "intro h\rend", "intro\x00h", "x" * 4097])
 def test_invalid_tactic_is_rejected_without_starting_lean(monkeypatch: pytest.MonkeyPatch, candidate: str) -> None:
     called = False

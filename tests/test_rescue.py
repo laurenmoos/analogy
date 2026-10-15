@@ -19,6 +19,8 @@ from analogy.records import (
 )
 from analogy.rescue import (
     DirectRescueRunner,
+    GenerationAttempt,
+    GenerationStatus,
     GenericRescueOutcome,
     PolicyActionRecord,
     ProofRescueContext,
@@ -32,6 +34,7 @@ from analogy.rescue import (
     derive_rescue_seed,
     parse_rescue_proposals,
     render_direct_rescue_prompt,
+    render_repair_prompt,
 )
 from analogy.rl import PolicyAction
 
@@ -84,6 +87,29 @@ def test_parser_validates_every_tactic_before_truncating() -> None:
             '{"predicted_state":"goal","tactics":["simp","exact h\\nassumption"]}',
             limit=1,
         )
+
+
+def test_parser_accepts_one_json_fence_without_surrounding_prose() -> None:
+    parsed = parse_rescue_proposals(
+        '```json\n{"predicted_state":"done","tactics":["exact h"]}\n```',
+        limit=1,
+    )
+
+    assert parsed[0].candidate.source == "exact h"
+
+
+def test_generation_attempt_validates_status_and_diagnostic() -> None:
+    attempt = GenerationAttempt(7, "not json", GenerationStatus.INVALID, False, "schema", "bad JSON")
+    assert attempt.raw_text == "not json"
+    with pytest.raises(ValueError, match="diagnostic"):
+        GenerationAttempt(7, "text", GenerationStatus.INVALID, error_kind="schema")
+
+
+def test_repair_prompt_contains_invalid_text_and_diagnostic() -> None:
+    prompt = render_repair_prompt("not json", "expected one object")
+    assert "not json" in prompt
+    assert "expected one object" in prompt
+    assert "Return only" in prompt
 
 
 @pytest.mark.parametrize(
@@ -322,6 +348,8 @@ def direct_runner(outputs, **overrides):
         "max_rescue_verifier_calls": 8,
         "base_seed": 11,
         "hidden_layer": -1,
+        "max_model_calls": max(1, len(outputs)),
+        "max_repair_calls": 0,
     }
     values.update(overrides)
     return DirectRescueRunner(**values)
@@ -443,9 +471,60 @@ def test_direct_runner_isolates_malformed_generation_and_can_complete_later() ->
 
     assert outcome.completed_proof == "by exact h"
     assert [item.termination for item in outcome.rollouts] == [
-        RescueTermination.GENERATION_ERROR,
+        RescueTermination.INVALID_OUTPUT,
         RescueTermination.COMPLETE,
     ]
+
+
+def test_direct_runner_records_invalid_output_and_successful_repair() -> None:
+    generator = SequenceDeltaGenerator(
+        ("not json", '{"predicted_state":"done","tactics":["exact h"]}')
+    )
+    runner = direct_runner(
+        (),
+        generator=generator,
+        rollouts_per_state=1,
+        max_model_calls=2,
+        max_repair_calls=1,
+    )
+    calls = []
+
+    outcome = runner.search(
+        state("stuck"),
+        state("goal"),
+        (),
+        (),
+        evaluator_for({"exact h": (TacticStatus.COMPLETE, "by exact h")}, calls),
+        NeverCancelledToken(),
+    )
+
+    assert outcome.completed_proof == "by exact h"
+    assert [item.status for item in outcome.rollouts[0].generations] == [
+        GenerationStatus.INVALID,
+        GenerationStatus.VALID,
+    ]
+    assert outcome.rollouts[0].generations[0].raw_text == "not json"
+    assert outcome.rollouts[0].generations[1].repair
+    assert len(generator.calls) == 2
+
+
+def test_direct_runner_does_not_repair_runtime_generation_error() -> None:
+    generator = SequenceDeltaGenerator((RuntimeError("device lost"),))
+    runner = direct_runner(
+        (),
+        generator=generator,
+        rollouts_per_state=1,
+        max_model_calls=2,
+        max_repair_calls=1,
+    )
+
+    outcome = runner.search(
+        state("stuck"), state("goal"), (), (), evaluator_for({}, []), NeverCancelledToken()
+    )
+
+    assert outcome.rollouts[0].termination is RescueTermination.GENERATION_ERROR
+    assert outcome.rollouts[0].generations[0].status is GenerationStatus.RUNTIME_ERROR
+    assert len(generator.calls) == 1
 
 
 def test_direct_runner_records_all_rejected_and_exact_budget_exhaustion() -> None:

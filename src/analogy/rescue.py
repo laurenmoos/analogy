@@ -71,7 +71,39 @@ class RescueTermination(str, Enum):
     EXHAUSTED = "exhausted"
     CANCELLED = "cancelled"
     GENERATION_ERROR = "generation_error"
+    INVALID_OUTPUT = "invalid_output"
     BUDGET_EXHAUSTED = "budget_exhausted"
+
+
+class GenerationStatus(str, Enum):
+    VALID = "valid"
+    INVALID = "invalid"
+    RUNTIME_ERROR = "runtime_error"
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationAttempt:
+    seed: int
+    raw_text: str
+    status: GenerationStatus
+    repair: bool = False
+    error_kind: str | None = None
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+            raise ValueError("seed must be a non-negative integer")
+        _require_text(self.raw_text, "raw_text", allow_empty=True)
+        if not isinstance(self.status, GenerationStatus):
+            raise ValueError("status must be a GenerationStatus")
+        if not isinstance(self.repair, bool):
+            raise ValueError("repair must be a bool")
+        if self.status is GenerationStatus.VALID:
+            if self.error_kind is not None or self.diagnostic is not None:
+                raise ValueError("valid generation attempts must not include errors")
+        else:
+            _require_text(self.error_kind, "error_kind")
+            _require_text(self.diagnostic, "diagnostic")
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +215,7 @@ class RescueRollout:
     attempts: tuple[RescueAttempt, ...]
     termination: RescueTermination
     reward: float | None = None
+    generations: tuple[GenerationAttempt, ...] = ()
 
     def __post_init__(self) -> None:
         _require_text(self.rollout_id, "rollout_id")
@@ -193,6 +226,11 @@ class RescueRollout:
         attempts = _typed_tuple(self.attempts, RescueAttempt, "attempts")
         object.__setattr__(self, "proposals", proposals)
         object.__setattr__(self, "attempts", attempts)
+        object.__setattr__(
+            self,
+            "generations",
+            _typed_tuple(self.generations, GenerationAttempt, "generations"),
+        )
         if not isinstance(self.termination, RescueTermination):
             raise ValueError("termination must be a RescueTermination")
         if any(item.proposal not in proposals for item in attempts):
@@ -262,6 +300,7 @@ def parse_rescue_proposals(text: str, limit: int) -> tuple[RescueProposal, ...]:
         raise ValueError("limit must be a positive integer")
     if not isinstance(text, str):
         raise RescueOutputError("rescue output must be text")
+    text = _extract_json_object(text)
     try:
         payload = json.loads(text)
     except (json.JSONDecodeError, TypeError) as error:
@@ -299,6 +338,27 @@ def parse_rescue_proposals(text: str, limit: int) -> tuple[RescueProposal, ...]:
     )
 
 
+def _extract_json_object(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if (
+        len(lines) < 3
+        or lines[0].strip().casefold() != "```json"
+        or lines[-1].strip() != "```"
+    ):
+        raise RescueOutputError(
+            "fenced rescue output must contain exactly one json block"
+        )
+    inner = "\n".join(lines[1:-1]).strip()
+    if "```" in inner:
+        raise RescueOutputError(
+            "fenced rescue output must contain exactly one json block"
+        )
+    return inner
+
+
 def render_direct_rescue_prompt(context: ProofRescueContext) -> str:
     if not isinstance(context, ProofRescueContext):
         raise ValueError("context must be a ProofRescueContext")
@@ -312,6 +372,19 @@ def render_direct_rescue_prompt(context: ProofRescueContext) -> str:
         'Return one JSON object with exactly the keys "predicted_state" and '
         '"tactics". predicted_state must describe the expected next Lean goals; '
         "tactics must be a non-empty list of single-line Lean tactics."
+    )
+
+
+def render_repair_prompt(raw_text: str, diagnostic: str) -> str:
+    if not isinstance(raw_text, str):
+        raise ValueError("raw_text must be text")
+    _require_text(diagnostic, "diagnostic")
+    return (
+        "The prior response did not satisfy the required JSON schema.\n\n"
+        f"Parser diagnostic:\n{diagnostic}\n\n"
+        f"Prior response:\n{raw_text}\n\n"
+        'Return only one JSON object with exactly "predicted_state" and '
+        '"tactics". Do not include prose or Markdown fences.'
     )
 
 
@@ -401,6 +474,8 @@ class DirectRescueRunner:
         max_rescue_verifier_calls: int,
         base_seed: int,
         hidden_layer: int,
+        max_model_calls: int | None = None,
+        max_repair_calls: int = 0,
         collector: RolloutCollector | None = None,
     ) -> None:
         for value, name in (
@@ -414,6 +489,20 @@ class DirectRescueRunner:
             raise ValueError("base_seed must be an integer")
         if isinstance(hidden_layer, bool) or not isinstance(hidden_layer, int):
             raise ValueError("hidden_layer must be an integer")
+        if max_model_calls is None:
+            max_model_calls = rollouts_per_state * (1 + max_repair_calls)
+        if (
+            isinstance(max_model_calls, bool)
+            or not isinstance(max_model_calls, int)
+            or max_model_calls <= 0
+        ):
+            raise ValueError("max_model_calls must be a positive integer")
+        if (
+            isinstance(max_repair_calls, bool)
+            or not isinstance(max_repair_calls, int)
+            or max_repair_calls < 0
+        ):
+            raise ValueError("max_repair_calls must be a non-negative integer")
         self._encoder = encoder
         self._policy = policy
         self._generator = generator
@@ -422,6 +511,8 @@ class DirectRescueRunner:
         self._max_rescue_verifier_calls = max_rescue_verifier_calls
         self._base_seed = base_seed
         self._hidden_layer = hidden_layer
+        self._max_model_calls = max_model_calls
+        self._max_repair_calls = max_repair_calls
         self.collector = collector or RolloutCollector()
 
     def search(
@@ -454,6 +545,7 @@ class DirectRescueRunner:
         attempted = {_canonical_tactic(item.candidate.source) for item in ordinary_attempts}
         rollouts: list[RescueRollout] = []
         verifier_calls = 0
+        model_calls = 0
 
         for index in range(self._rollouts_per_state):
             if cancellation.is_cancelled():
@@ -461,6 +553,8 @@ class DirectRescueRunner:
                     rollouts=tuple(rollouts), cancelled=True
                 )
             if verifier_calls >= self._max_rescue_verifier_calls:
+                break
+            if model_calls >= self._max_model_calls:
                 break
             action_seed = derive_rescue_seed(
                 self._base_seed, state.id, index, "action"
@@ -480,24 +574,84 @@ class DirectRescueRunner:
                 entropy=float(action.entropy.detach().float().cpu().item()),
             )
             rollout_id = f"{state.id}:direct:{index}"
-            try:
-                generated = self._generator.generate_with_delta(
-                    messages,
-                    delta=action.delta.detach(),
-                    layer=self._hidden_layer,
-                    seed=generation_seed,
+            generations: list[GenerationAttempt] = []
+            parsed: tuple[RescueProposal, ...] | None = None
+            active_messages = messages
+            for generation_index in range(1 + self._max_repair_calls):
+                if model_calls >= self._max_model_calls:
+                    break
+                seed = generation_seed
+                if generation_index:
+                    seed = derive_rescue_seed(
+                        self._base_seed,
+                        state.id,
+                        index,
+                        f"generation-repair-{generation_index}",
+                    )
+                try:
+                    generated = self._generator.generate_with_delta(
+                        active_messages,
+                        delta=action.delta.detach(),
+                        layer=self._hidden_layer,
+                        seed=seed,
+                    )
+                    model_calls += 1
+                    parsed = parse_rescue_proposals(
+                        generated, self._tactics_per_rollout
+                    )
+                    generations.append(
+                        GenerationAttempt(
+                            seed,
+                            generated,
+                            GenerationStatus.VALID,
+                            repair=bool(generation_index),
+                        )
+                    )
+                    break
+                except RescueOutputError as error:
+                    raw = generated if isinstance(generated, str) else repr(generated)
+                    generations.append(
+                        GenerationAttempt(
+                            seed,
+                            raw,
+                            GenerationStatus.INVALID,
+                            repair=bool(generation_index),
+                            error_kind="schema",
+                            diagnostic=str(error),
+                        )
+                    )
+                    active_messages = (
+                        messages[0],
+                        Message("user", render_repair_prompt(raw, str(error))),
+                    )
+                except Exception as error:
+                    model_calls += 1
+                    generations.append(
+                        GenerationAttempt(
+                            seed,
+                            "",
+                            GenerationStatus.RUNTIME_ERROR,
+                            repair=bool(generation_index),
+                            error_kind=type(error).__name__,
+                            diagnostic=str(error) or type(error).__name__,
+                        )
+                    )
+                    break
+            if parsed is None:
+                termination = (
+                    RescueTermination.GENERATION_ERROR
+                    if generations
+                    and generations[-1].status is GenerationStatus.RUNTIME_ERROR
+                    else RescueTermination.INVALID_OUTPUT
                 )
-                parsed = parse_rescue_proposals(
-                    generated, self._tactics_per_rollout
-                )
-            except Exception:
                 rollout = RescueRollout(
                     rollout_id,
                     state.id,
                     action_record,
                     (),
                     (),
-                    RescueTermination.GENERATION_ERROR,
+                    termination,
+                    generations=tuple(generations),
                 )
                 self._record(rollouts, rollout, action)
                 continue
@@ -532,6 +686,7 @@ class DirectRescueRunner:
                         proposals,
                         tuple(attempts),
                         RescueTermination.CANCELLED,
+                        generations=tuple(generations),
                     )
                     self._record(rollouts, rollout, action)
                     return GenericRescueOutcome(
@@ -554,6 +709,7 @@ class DirectRescueRunner:
                         proposals,
                         tuple(attempts),
                         RescueTermination.COMPLETE,
+                        generations=tuple(generations),
                     )
                     self._record(rollouts, rollout, action)
                     return GenericRescueOutcome(
@@ -568,6 +724,7 @@ class DirectRescueRunner:
                         proposals,
                         tuple(attempts),
                         RescueTermination.PROGRESS,
+                        generations=tuple(generations),
                     )
                     self._record(rollouts, rollout, action)
                     return GenericRescueOutcome(
@@ -588,6 +745,7 @@ class DirectRescueRunner:
                 proposals,
                 tuple(attempts),
                 termination,
+                generations=tuple(generations),
             )
             self._record(rollouts, rollout, action)
             if termination is RescueTermination.BUDGET_EXHAUSTED:

@@ -160,7 +160,12 @@ class RescueRunWriter:
         (path / "checkpoints").mkdir()
         writer = cls(path)
         writer.write_json("config.json", resolved_config)
-        for name in ("rollouts.jsonl", "problems.jsonl", "metrics.jsonl"):
+        for name in (
+            "rollouts.jsonl",
+            "generations.jsonl",
+            "problems.jsonl",
+            "metrics.jsonl",
+        ):
             (path / name).touch(exist_ok=False)
         return writer
 
@@ -528,6 +533,18 @@ def _persist_episode(
         writer.append_jsonl(
             "rollouts.jsonl", {"epoch": epoch, "phase": phase, **asdict(rollout)}
         )
+        for generation_index, generation in enumerate(rollout.generations):
+            writer.append_jsonl(
+                "generations.jsonl",
+                {
+                    "epoch": epoch,
+                    "phase": phase,
+                    "problem_id": episode.problem_id,
+                    "rollout_id": rollout.rollout_id,
+                    "generation_index": generation_index,
+                    **asdict(generation),
+                },
+            )
     writer.append_jsonl(
         "problems.jsonl",
         {

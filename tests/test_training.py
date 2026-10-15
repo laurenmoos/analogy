@@ -11,6 +11,8 @@ from analogy.config import load_config
 from analogy.lean_gym.models import Problem
 from analogy.records import CandidateOrigin, TacticCandidate, TacticResult, TacticStatus
 from analogy.rescue import (
+    GenerationAttempt,
+    GenerationStatus,
     PolicyActionRecord,
     RescueAttempt,
     RescueProposal,
@@ -122,6 +124,7 @@ def test_run_writer_is_non_overwriting_and_flushes_jsonl(tmp_path: Path) -> None
     writer.append_jsonl("rollouts.jsonl", {"id": 2})
 
     assert [json.loads(line)["id"] for line in (writer.path / "rollouts.jsonl").read_text().splitlines()] == [1, 2]
+    assert (writer.path / "generations.jsonl").exists()
     with pytest.raises(FileExistsError):
         RescueRunWriter.create(tmp_path, "fixed-run", {"seed": 7})
 

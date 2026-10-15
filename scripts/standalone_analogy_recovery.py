@@ -275,6 +275,231 @@ class TransformationRecord:
         object.__setattr__(self, "domain_neutral_summary", summary)
 
 
+_EXPRESSION_ROOTS = frozenset(
+    {
+        "target",
+        "implication",
+        "forall",
+        "and",
+        "or",
+        "iff",
+        "equality",
+        "not",
+        "exists",
+        "false",
+        "application",
+        "atom",
+        "opaque",
+    }
+)
+
+
+def _parse_expression_shape(value: Any, *, depth: int = 0) -> ExpressionShape:
+    if depth > 8 or not isinstance(value, Mapping) or set(value) != {"root", "children"}:
+        raise ExperimentError("expression shape must use exactly root and children")
+    root = value["root"]
+    children = value["children"]
+    if not isinstance(root, str) or root not in _EXPRESSION_ROOTS:
+        raise ExperimentError("expression shape root is invalid")
+    if not isinstance(children, list):
+        raise ExperimentError("expression shape children must be an array")
+    return ExpressionShape(
+        root,
+        tuple(_parse_expression_shape(child, depth=depth + 1) for child in children),
+    )
+
+
+def _shape_payload(shape: ExpressionShape) -> dict[str, Any]:
+    return {
+        "root": shape.root,
+        "children": [_shape_payload(child) for child in shape.children],
+    }
+
+
+def _shape_key(shape: ExpressionShape) -> str:
+    return json.dumps(_shape_payload(shape), sort_keys=True, separators=(",", ":"))
+
+
+def _target_paths(shape: ExpressionShape, prefix: str) -> tuple[str, ...]:
+    paths: list[str] = []
+    if shape.root == "target":
+        paths.append(prefix)
+    labels = ("first", "second")
+    for index, child in enumerate(shape.children):
+        label = labels[index] if index < len(labels) else f"child_{index + 1}"
+        paths.extend(_target_paths(child, f"{prefix}.{label}"))
+    return tuple(paths)
+
+
+def _enum_tuple(enum_type: type[Enum], values: set[Enum]) -> tuple[Any, ...]:
+    return tuple(item for item in enum_type if item in values)
+
+
+def parse_proof_signature(payload: Mapping[str, Any]) -> ProofSignature:
+    """Validate Lean's name-free shape payload and derive retrieval features."""
+    if not isinstance(payload, Mapping) or set(payload) != {"goal_count", "target", "hypotheses"}:
+        raise ModelOutputError("proof structure must contain exactly goal_count, target, and hypotheses")
+    goal_count = payload["goal_count"]
+    hypotheses_raw = payload["hypotheses"]
+    if isinstance(goal_count, bool) or not isinstance(goal_count, int) or goal_count <= 0:
+        raise ModelOutputError("proof structure goal_count must be a positive integer")
+    if not isinstance(hypotheses_raw, list):
+        raise ModelOutputError("proof structure hypotheses must be an array")
+    try:
+        target = _parse_expression_shape(payload["target"])
+        hypotheses = tuple(sorted(
+            (_parse_expression_shape(item) for item in hypotheses_raw),
+            key=lambda shape: (shape.root, _shape_key(shape)),
+        ))
+    except (ExperimentError, TypeError, ValueError) as error:
+        raise ModelOutputError(f"invalid proof structure: {error}") from error
+
+    operations: set[OperationClass] = set()
+    flow: set[InformationFlow] = set()
+    input_arity = Arity.ONE
+    output_arity = Arity.ONE
+    permutation = Permutation.NONE
+
+    if target.root in {"implication", "forall"}:
+        operations.add(OperationClass.INTRODUCE)
+        flow.add(InformationFlow.ADD)
+    if target.root == "and":
+        operations.add(OperationClass.COMBINE)
+        input_arity = Arity.TWO
+        flow.update({InformationFlow.ADD, InformationFlow.RESTRUCTURE})
+    if target.root == "or":
+        operations.add(OperationClass.SELECT_BRANCH)
+        flow.add(InformationFlow.SELECT)
+
+    occurrence_paths: list[str] = []
+    for index, hypothesis in enumerate(hypotheses):
+        occurrence_paths.extend(_target_paths(hypothesis, f"hypothesis_{index + 1}"))
+        if hypothesis.root == "target":
+            operations.add(OperationClass.REUSE)
+            flow.add(InformationFlow.PRESERVE)
+        if hypothesis.root in {"and", "or", "iff", "exists"} and _target_paths(
+            hypothesis, f"hypothesis_{index + 1}"
+        ):
+            operations.add(OperationClass.DECOMPOSE)
+            if hypothesis.root == "and":
+                operations.add(OperationClass.SELECT)
+                input_arity = Arity.TWO
+                output_arity = Arity.ONE
+                flow.update({InformationFlow.SELECT, InformationFlow.DISCARD})
+            else:
+                flow.add(InformationFlow.RESTRUCTURE)
+        if hypothesis.root == "equality":
+            operations.add(OperationClass.REWRITE)
+            flow.add(InformationFlow.RESTRUCTURE)
+        if (
+            target.root == "and"
+            and hypothesis.root == "and"
+            and len(target.children) == len(hypothesis.children) == 2
+            and hypothesis.children == tuple(reversed(target.children))
+            and hypothesis.children != target.children
+        ):
+            operations.add(OperationClass.REORDER)
+            permutation = Permutation.SWAP
+            flow.add(InformationFlow.RESTRUCTURE)
+        if (
+            hypothesis.root in {"implication", "forall"}
+            and len(hypothesis.children) == 2
+            and hypothesis.children[1].root == "target"
+        ):
+            operations.add(OperationClass.SPECIALIZE)
+            flow.update({InformationFlow.SELECT, InformationFlow.PRESERVE})
+
+    if not operations:
+        operations.add(OperationClass.UNKNOWN)
+    if not flow:
+        flow.add(InformationFlow.PRESERVE)
+
+    return ProofSignature(
+        target_root=target.root,
+        target_shape=target,
+        hypothesis_roots=tuple(shape.root for shape in hypotheses),
+        hypothesis_shapes=hypotheses,
+        target_occurrence_paths=tuple(sorted(set(occurrence_paths))),
+        candidate_operations=_enum_tuple(OperationClass, operations),
+        input_arity=input_arity,
+        output_arity=output_arity,
+        permutation=permutation,
+        information_flow=_enum_tuple(InformationFlow, flow),
+        failed_operation_classes=(),
+        goal_count=goal_count,
+    )
+
+
+_ROOT_DESCRIPTIONS = {
+    "atom": "atomic",
+    "application": "an application",
+    "implication": "an implication",
+    "forall": "universally quantified",
+    "and": "a conjunction",
+    "or": "a disjunction",
+    "iff": "a biconditional",
+    "equality": "an equality",
+    "not": "a negation",
+    "exists": "existential",
+    "false": "falsehood",
+    "opaque": "structurally opaque",
+    "target": "identical to the target",
+}
+
+
+def render_proof_signature(signature: ProofSignature) -> str:
+    if not isinstance(signature, ProofSignature):
+        raise ExperimentError("render_proof_signature requires a ProofSignature")
+    clauses = [f"The target is {_ROOT_DESCRIPTIONS.get(signature.target_root, signature.target_root)}."]
+    if len(signature.hypothesis_shapes) == 1:
+        hypothesis = signature.hypothesis_shapes[0]
+        paths = signature.target_occurrence_paths
+        if hypothesis.root == "and" and paths == ("hypothesis_1.second",):
+            clauses.append("A conjunction hypothesis contains the target as its second component.")
+    operation_words = [item.value.replace("_", " ") for item in signature.candidate_operations]
+    if operation_words == ["decompose", "select"] and signature.information_flow == (
+        InformationFlow.SELECT,
+        InformationFlow.DISCARD,
+    ):
+        clauses.append(
+            "Plausible operations decompose or select a component, selecting information "
+            "and discarding the remainder."
+        )
+    else:
+        joined = ", ".join(operation_words[:-1]) + (
+            f" or {operation_words[-1]}" if len(operation_words) > 1 else operation_words[0]
+        )
+        clauses.append(f"Plausible operations: {joined}.")
+    if signature.goal_count > 1:
+        clauses.append(f"There are {signature.goal_count} open goals.")
+    return " ".join(clauses)
+
+
+def proof_signature_fingerprint(signature: ProofSignature) -> str:
+    payload = json.dumps(
+        _jsonable(signature), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return sha256_text(payload)
+
+
+def classify_failed_tactic(tactic: str) -> OperationClass | None:
+    normalized = " ".join(tactic.strip().split()).casefold()
+    rules = (
+        (r"^(intro|rintro)\b", OperationClass.INTRODUCE),
+        (r"^(cases|rcases|obtain)\b", OperationClass.DECOMPOSE),
+        (r"^(exact|assumption)\b.*\.(left|right|1|2)\b", OperationClass.SELECT),
+        (r"^(constructor|refine\s+⟨)", OperationClass.COMBINE),
+        (r"^(left|right)\b", OperationClass.SELECT_BRANCH),
+        (r"^(rw|rewrite|simp)\b", OperationClass.REWRITE),
+        (r"^(exact|assumption)\b", OperationClass.REUSE),
+        (r"^(apply|specialize|have)\b", OperationClass.SPECIALIZE),
+    )
+    for pattern, operation in rules:
+        if re.search(pattern, normalized):
+            return operation
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class Message:
     role: str
@@ -1366,18 +1591,25 @@ class LeanResult:
     diagnostics: tuple[str, ...]
     exit_code: int | None
     duration_ms: int
+    signature: ProofSignature | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, LeanStatus) or not isinstance(self.accepted, bool):
             raise ExperimentError("Lean result status or acceptance is invalid")
         diagnostics = tuple(str(item) for item in self.diagnostics)
         object.__setattr__(self, "diagnostics", diagnostics)
-        if self.status is LeanStatus.OPEN and (not self.accepted or not self.state):
-            raise ExperimentError("open Lean results require an accepted state")
-        if self.status is LeanStatus.COMPLETE and (not self.accepted or self.state is not None):
-            raise ExperimentError("complete Lean results require acceptance and no state")
+        if self.status is LeanStatus.OPEN and (
+            not self.accepted or not self.state or not isinstance(self.signature, ProofSignature)
+        ):
+            raise ExperimentError("open Lean results require an accepted state and proof signature")
+        if self.status is LeanStatus.COMPLETE and (
+            not self.accepted or self.state is not None or self.signature is not None
+        ):
+            raise ExperimentError("complete Lean results require acceptance, no state, and no signature")
         if self.status not in {LeanStatus.OPEN, LeanStatus.COMPLETE} and self.accepted:
             raise ExperimentError("failed Lean results cannot be accepted")
+        if self.status is not LeanStatus.OPEN and self.signature is not None:
+            raise ExperimentError("only open Lean results may carry proof signatures")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1398,6 +1630,59 @@ class _LeanRun:
 
 
 _TEMP_LEAN_PATH = re.compile(r"(?:/[A-Za-z0-9_.-]+)+/(?:Current|current_problem)\.lean(?::\d+:\d+)?")
+_PROOF_STRUCTURE_MARKER = "ANALOGY_PROOF_STRUCTURE:"
+
+
+LEAN_STRUCTURE_PRELUDE = r'''import Lean
+open Lean Meta Elab Tactic
+
+partial def analogyExprShape (needle : Option Expr) (expression : Expr)
+    (depth : Nat := 0) : MetaM Json := do
+  if depth >= 8 then
+    return Json.mkObj [("root", Json.str "opaque"), ("children", Json.arr #[])]
+  let expression ← instantiateMVars expression
+  if let some target := needle then
+    if expression == target then
+      return Json.mkObj [("root", Json.str "target"), ("children", Json.arr #[])]
+  match expression with
+  | .forallE _ domain body _ =>
+      let root := if body.hasLooseBVar 0 then "forall" else "implication"
+      let left ← analogyExprShape needle domain (depth + 1)
+      let right ← analogyExprShape needle body (depth + 1)
+      return Json.mkObj [("root", Json.str root), ("children", Json.arr #[left, right])]
+  | _ =>
+      let root := match expression.getAppFn.constName? with
+        | some ``And => "and"
+        | some ``Or => "or"
+        | some ``Iff => "iff"
+        | some ``Eq => "equality"
+        | some ``Not => "not"
+        | some ``Exists => "exists"
+        | some ``False => "false"
+        | _ => if expression.isApp then "application" else "atom"
+      let children ← expression.getAppArgs.mapM fun child =>
+        analogyExprShape needle child (depth + 1)
+      return Json.mkObj [("root", Json.str root), ("children", Json.arr children)]
+
+elab "trace_proof_structure" : tactic => do
+  let goals ← getGoals
+  match goals[0]? with
+  | none => pure ()
+  | some goal => goal.withContext do
+      let target ← instantiateMVars (← goal.getType)
+      let targetJson ← analogyExprShape none target
+      let mut hypotheses : Array Json := #[]
+      for declaration in (← getLCtx) do
+        if !declaration.isImplementationDetail && (← isProp declaration.type) then
+          let shape ← analogyExprShape (some target) declaration.type
+          hypotheses := hypotheses.push shape
+      let payload := Json.mkObj [
+        ("goal_count", toJson goals.length),
+        ("target", targetJson),
+        ("hypotheses", Json.arr hypotheses)
+      ]
+      logInfo m!"ANALOGY_PROOF_STRUCTURE:{payload.compress}"
+'''
 
 
 def normalize_lean_text(value: str) -> str:
@@ -1467,6 +1752,9 @@ class LeanVerifier:
             for item in run.diagnostics
             if item.kind == "trace" and item.line == trace_line
         ]
+        structure_diagnostics = [
+            item for item in run.diagnostics if _PROOF_STRUCTURE_MARKER in item.message
+        ]
         if not errors and run.exit_code == 0 and len(traces) == 1 and not traces[0].message.strip():
             remaining = (
                 None if local_deadline is None else local_deadline - time.monotonic()
@@ -1487,11 +1775,44 @@ class LeanVerifier:
                 internal_error=True,
             )
             return self._result(LeanStatus.INTERNAL_ERROR, False, None, altered)
+        if len(structure_diagnostics) != 1:
+            altered = _LeanRun(
+                run.exit_code,
+                run.diagnostics + (
+                    _LeanDiagnostic(
+                        "error",
+                        "protocol",
+                        f"protocol: expected one {_PROOF_STRUCTURE_MARKER} marker",
+                        None,
+                    ),
+                ),
+                run.duration_ms,
+                internal_error=True,
+            )
+            return self._result(LeanStatus.INTERNAL_ERROR, False, None, altered)
+        marker_text = structure_diagnostics[0].message
+        encoded = marker_text.split(_PROOF_STRUCTURE_MARKER, 1)[1].strip()
+        try:
+            payload = json.loads(encoded)
+            signature = parse_proof_signature(payload)
+        except (json.JSONDecodeError, ModelOutputError, TypeError, ValueError) as error:
+            altered = _LeanRun(
+                run.exit_code,
+                run.diagnostics + (
+                    _LeanDiagnostic(
+                        "error", "protocol", f"protocol: invalid proof structure marker: {error}", None
+                    ),
+                ),
+                run.duration_ms,
+                internal_error=True,
+            )
+            return self._result(LeanStatus.INTERNAL_ERROR, False, None, altered)
         return self._result(
             LeanStatus.OPEN,
             True,
             normalize_lean_text(traces[0].message),
             run,
+            signature=signature,
         )
 
     def _verify_complete(
@@ -1535,8 +1856,9 @@ class LeanVerifier:
 
     @staticmethod
     def _render_probe(problem: Problem, tactics: tuple[str, ...]) -> tuple[str, int]:
-        lines = [problem.theorem_header()]
+        lines = LEAN_STRUCTURE_PRELUDE.rstrip().splitlines() + ["", problem.theorem_header()]
         lines.extend(f"  {tactic}" for tactic in tactics)
+        lines.append("  trace_proof_structure")
         trace_line = len(lines) + 1
         lines.append("  trace_state")
         lines.append("  all_goals sorry")
@@ -1636,9 +1958,13 @@ class LeanVerifier:
         accepted: bool,
         state: str | None,
         run: _LeanRun,
+        *,
+        signature: ProofSignature | None = None,
     ) -> LeanResult:
         messages = tuple(item.message for item in run.diagnostics if item.message.strip())
-        return LeanResult(status, accepted, state, messages, run.exit_code, run.duration_ms)
+        return LeanResult(
+            status, accepted, state, messages, run.exit_code, run.duration_ms, signature
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1799,8 +2125,8 @@ def search_problem(
     insertion_order = 0
     initial_state = normalize_lean_text(initial.state)
     initial_fingerprint = state_fingerprint(problem, initial_state)
-    frontier: list[tuple[int, int, str, tuple[str, ...]]] = [
-        (0, insertion_order, initial_state, ())
+    frontier: list[tuple[int, int, str, ProofSignature, tuple[str, ...]]] = [
+        (0, insertion_order, initial_state, initial.signature, ())
     ]
     seen = {initial_fingerprint}
     failed_by_state: dict[str, list[str]] = {}
@@ -1820,7 +2146,7 @@ def search_problem(
             status = "budget_exhausted"
             failure = "search budget exhausted"
             break
-        _, _, state, prefix = heapq.heappop(frontier)
+        _, _, state, signature, prefix = heapq.heappop(frontier)
         fingerprint = state_fingerprint(problem, state)
         expansions += 1
         failed = tuple(failed_by_state.get(fingerprint, ()))
@@ -1922,6 +2248,10 @@ def search_problem(
                     time.monotonic() - started,
                 )
             if result.status is LeanStatus.OPEN and result.accepted and result.state:
+                if result.signature is None:
+                    status = "verifier_failure"
+                    failure = "open Lean result omitted proof signature"
+                    break
                 successor = normalize_lean_text(result.state)
                 successor_fingerprint = state_fingerprint(problem, successor)
                 if successor_fingerprint in seen:
@@ -1935,7 +2265,13 @@ def search_problem(
                     successor_prefix = prefix + (candidate,)
                     heapq.heappush(
                         frontier,
-                        (-len(successor_prefix), insertion_order, successor, successor_prefix),
+                        (
+                            -len(successor_prefix),
+                            insertion_order,
+                            successor,
+                            result.signature,
+                            successor_prefix,
+                        ),
                     )
             else:
                 disposition = result.status.value

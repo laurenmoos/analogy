@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -147,6 +148,119 @@ def test_transformation_prompt_declares_closed_schema() -> None:
     assert "select_branch" in rendered
     assert "Lean tactic" in rendered
     assert "exactly one JSON object" in rendered
+
+
+def test_proof_signature_is_name_free_and_alpha_invariant() -> None:
+    module = load_script()
+    payload = {
+        "goal_count": 1,
+        "target": {"root": "atom", "children": []},
+        "hypotheses": [{
+            "root": "and",
+            "children": [
+                {"root": "atom", "children": []},
+                {"root": "target", "children": []},
+            ],
+        }],
+    }
+    first = module.parse_proof_signature(payload)
+    second = module.parse_proof_signature(json.loads(json.dumps(payload)))
+
+    assert first == second
+    assert first.candidate_operations == (
+        module.OperationClass.DECOMPOSE,
+        module.OperationClass.SELECT,
+    )
+    assert module.render_proof_signature(first) == (
+        "The target is atomic. A conjunction hypothesis contains the target as "
+        "its second component. Plausible operations decompose or select a "
+        "component, selecting information and discarding the remainder."
+    )
+    assert module.proof_signature_fingerprint(first) == module.proof_signature_fingerprint(second)
+
+
+@pytest.mark.parametrize(
+    ("target", "hypotheses", "expected"),
+    [
+        ({"root": "implication", "children": []}, [], "introduce"),
+        ({"root": "and", "children": []}, [], "combine"),
+        ({"root": "atom", "children": []}, [{"root": "target", "children": []}], "reuse"),
+        ({"root": "atom", "children": []}, [{"root": "equality", "children": []}], "rewrite"),
+        ({"root": "application", "children": []}, [], "unknown"),
+    ],
+)
+def test_proof_signature_infers_documented_operations(target, hypotheses, expected) -> None:
+    module = load_script()
+    signature = module.parse_proof_signature({
+        "goal_count": 2,
+        "target": target,
+        "hypotheses": list(reversed(hypotheses)),
+    })
+
+    assert module.OperationClass(expected) in signature.candidate_operations
+    assert signature.goal_count == 2
+
+
+def test_proof_signature_detects_swapped_conjunction_and_sorts_hypotheses() -> None:
+    module = load_script()
+    atom = {"root": "atom", "children": []}
+    other = {"root": "application", "children": []}
+    target = {"root": "and", "children": [atom, other]}
+    hypotheses = [
+        {"root": "or", "children": []},
+        {"root": "and", "children": [other, atom]},
+    ]
+
+    first = module.parse_proof_signature({"goal_count": 1, "target": target, "hypotheses": hypotheses})
+    second = module.parse_proof_signature({"goal_count": 1, "target": target, "hypotheses": list(reversed(hypotheses))})
+
+    assert first == second
+    assert module.OperationClass.REORDER in first.candidate_operations
+    assert first.permutation is module.Permutation.SWAP
+
+
+def test_classify_failed_tactic_maps_only_known_operation_classes() -> None:
+    module = load_script()
+    assert module.classify_failed_tactic("intro h") is module.OperationClass.INTRODUCE
+    assert module.classify_failed_tactic("exact h.right") is module.OperationClass.SELECT
+    assert module.classify_failed_tactic("omega") is None
+
+
+def test_malformed_signature_marker_is_protocol_error() -> None:
+    module = load_script()
+    verifier = module.LeanVerifier(Path("."))
+    problem = module.Problem("p", "(P : Prop) (h : P)", "P")
+    _, trace_line = verifier._render_probe(problem, ())
+    verifier._run_lean = lambda source, timeout_seconds=None: module._LeanRun(
+        0,
+        (
+            module._LeanDiagnostic("information", "trace", "P\n⊢ P", trace_line),
+            module._LeanDiagnostic("information", None, "ANALOGY_PROOF_STRUCTURE:{bad", trace_line - 1),
+            module._LeanDiagnostic("warning", "hasSorry", "declaration uses 'sorry'", trace_line + 1),
+        ),
+        1,
+    )
+
+    result = verifier.initial_state(problem)
+
+    assert result.status is module.LeanStatus.INTERNAL_ERROR
+    assert any("protocol" in item for item in result.diagnostics)
+
+
+@pytest.mark.skipif(shutil.which("lake") is None, reason="Lean lake executable is unavailable")
+def test_real_lean_emits_signature(tmp_path: Path) -> None:
+    module = load_script()
+    verifier = module.LeanVerifier(
+        module.REPOSITORY_ROOT / "src/analogy/lean_gym/lean_project",
+        lake_executable=shutil.which("lake") or "lake",
+    )
+    problem = module.Problem("sig", "(P Q : Prop) (h : P ∧ Q)", "Q", difficulty=1)
+
+    result = verifier.initial_state(problem)
+
+    assert result.status is module.LeanStatus.OPEN
+    assert result.signature is not None
+    assert module.OperationClass.SELECT in result.signature.candidate_operations
 
 
 @pytest.mark.parametrize(
@@ -542,7 +656,12 @@ def test_generation_operations_receive_difficulty_and_json_contract(tmp_path: Pa
 
 
 def open_result(module, state: str):
-    return module.LeanResult(module.LeanStatus.OPEN, True, state, (), 0, 1)
+    signature = module.parse_proof_signature({
+        "goal_count": 1,
+        "target": {"root": "atom", "children": []},
+        "hypotheses": [],
+    })
+    return module.LeanResult(module.LeanStatus.OPEN, True, state, (), 0, 1, signature)
 
 
 def complete_result(module):

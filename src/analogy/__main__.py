@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--audit-max-calls",
         type=int,
         default=100,
-        help="maximum logged iterations to judge",
+        help="maximum total judge model calls, including schema repairs",
     )
     parser.add_argument(
         "--audit-max-repair-calls",

@@ -173,6 +173,27 @@ def test_load_normalizes_accepted_rejected_and_completed_analogy_rows(
     assert json.loads(loaded[0].analogy_card) == rows[0]["hop"]
 
 
+def test_load_preserves_each_executed_repair_with_its_result(tmp_path: Path) -> None:
+    row = iteration_row(status="error", actual=None)
+    repair = iteration_row(status="accepted")["attempts"][0]
+    repair["proposal"]["candidate"]["source"] = "apply h2 at h1"
+    repair["result"]["candidate"]["source"] = "apply h2 at h1"
+    repair["result"]["state"]["expression"] = "h1 : Q\n⊢ P"
+    row["attempts"].append(repair)
+    source, corpus = write_source(tmp_path / "source", [row])
+
+    loaded = load_audit_iterations(source, corpus)[0]
+
+    assert loaded.tactics == ("apply h.mp", "apply h2 at h1")
+    assert [attempt.source for attempt in loaded.lean_attempts] == [
+        "apply h.mp",
+        "apply h2 at h1",
+    ]
+    assert loaded.lean_attempts[0].diagnostics == ("type mismatch",)
+    assert loaded.lean_attempts[1].status == "accepted"
+    assert loaded.lean_attempts[1].successor == "h1 : Q\n⊢ P"
+
+
 @pytest.mark.parametrize("missing", ("config.json", "summary.json", "analogy_iterations.jsonl"))
 def test_load_requires_each_source_artifact(tmp_path: Path, missing: str) -> None:
     source, corpus = write_source(tmp_path / "source", [iteration_row()])
@@ -334,8 +355,52 @@ def test_audit_preserves_failed_judge_output_and_counts_failure(tmp_path: Path) 
     assert summary.judged == 0
     assert summary.failures == 1
     row = read_jsonl(tmp_path / "audit" / "judgments.jsonl")[0]
-    assert row["raw_outputs"] == ["bad", "still bad"]
+    assert row["raw_outputs"] == ["bad"]
     assert "JSON" in row["failure"]
+    assert generator.call_count == 1
+
+
+@pytest.mark.parametrize("tail_kind", ("truncated", "valid_without_newline"))
+def test_audit_resume_recovers_unterminated_journal_tail(
+    tmp_path: Path, tail_kind: str
+) -> None:
+    source, corpus = write_source(
+        tmp_path / "source",
+        [iteration_row(index=index, status="error", actual=None) for index in range(2)],
+    )
+    output = tmp_path / "audit"
+    audit_analogy_run(
+        source,
+        output,
+        SequenceGenerator((judgment("lean_execution", -0.7),)),
+        corpus,
+        seed=2,
+        max_calls=1,
+    )
+    journal = output / "judgments.jsonl"
+    if tail_kind == "truncated":
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write('{"problem_id":"p1"')
+    else:
+        journal.write_text(journal.read_text().rstrip("\n"), encoding="utf-8")
+
+    summary = audit_analogy_run(
+        source,
+        output,
+        SequenceGenerator((judgment("working", 0.7),)),
+        corpus,
+        seed=2,
+        max_calls=2,
+    )
+
+    rows = read_jsonl(journal)
+    assert len(rows) == 2
+    assert journal.read_bytes().endswith(b"\n")
+    assert summary.model_calls == 2
+    if tail_kind == "truncated":
+        assert (output / "judgments.jsonl.truncated").read_text() == (
+            '{"problem_id":"p1"'
+        )
 
 
 def test_audit_rejects_resume_when_source_or_seed_changes(tmp_path: Path) -> None:

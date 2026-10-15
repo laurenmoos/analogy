@@ -8,6 +8,7 @@ from analogy.progress_judge import (
     AuditIteration,
     AuditStage,
     LLMProcessJudge,
+    LeanAttemptEvidence,
     parse_audit_judgment,
 )
 
@@ -58,6 +59,22 @@ def iteration(
         actual_transition=actual,
         surprise=0.2,
         stop_decision="continue",
+        lean_attempts=(
+            LeanAttemptEvidence(
+                source="exact h.mp",
+                status="error",
+                diagnostics=("application type mismatch",),
+                discard_reason=None,
+                successor=None,
+            ),
+            LeanAttemptEvidence(
+                source="apply h.mp",
+                status="accepted",
+                diagnostics=(),
+                discard_reason=None,
+                successor=actual,
+            ),
+        ),
     )
 
 
@@ -74,6 +91,12 @@ def test_parser_rejects_extra_keys_invalid_stage_and_out_of_range_scores() -> No
         parse_audit_judgment(payload(analogy_quality=float("nan")))
     with pytest.raises(ValueError, match="confidence"):
         parse_audit_judgment(payload(confidence=-0.01))
+    duplicate = payload().replace(
+        '"stage": "proof_progress",',
+        '"stage": "working", "stage": "proof_progress",',
+    )
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        parse_audit_judgment(duplicate)
 
 
 def test_prompt_contains_process_evidence_for_accepted_and_rejected_iterations() -> None:
@@ -96,6 +119,7 @@ def test_prompt_contains_process_evidence_for_accepted_and_rejected_iterations()
         "status is `complete`, stage must be `working`",
         "accepted successor",
         "stage must be `working` or `proof_progress`",
+        "Executed Lean attempts",
     ):
         assert fragment in prompt
     assert "reference proof" not in prompt.lower()
@@ -148,6 +172,35 @@ def test_persistent_malformed_output_preserves_raw_attempts_and_failure() -> Non
     assert attempt.failure is not None
     assert "JSON" in attempt.failure
     assert len(generator.calls) == 2
+
+
+def test_numeric_overflow_is_repaired_instead_of_escaping_failure_accounting() -> None:
+    generator = SequenceGenerator(
+        (payload(progress_score=10**400), payload(stage="working", progress_score=1))
+    )
+
+    attempt = LLMProcessJudge(
+        generator, base_seed=5, max_repair_calls=1
+    ).evaluate(iteration())
+
+    assert attempt.judgment is not None
+    assert attempt.judgment.progress_score == 1
+    assert len(attempt.raw_outputs) == 2
+    assert "finite number" in "\n".join(
+        message.content for message in generator.calls[1][0]
+    )
+
+
+def test_call_budget_includes_repair_attempts() -> None:
+    generator = SequenceGenerator(("bad", payload()))
+
+    attempt = LLMProcessJudge(
+        generator, base_seed=5, max_repair_calls=1
+    ).evaluate(iteration(), max_calls=1)
+
+    assert attempt.judgment is None
+    assert attempt.raw_outputs == ("bad",)
+    assert len(generator.calls) == 1
 
 
 def test_judge_validates_constructor_and_text_lengths() -> None:

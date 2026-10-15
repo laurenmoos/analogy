@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .lean_gym.corpus import CorpusValidationError, load_problems
-from .progress_judge import AuditIteration, LLMProcessJudge
+from .progress_judge import AuditIteration, LeanAttemptEvidence, LLMProcessJudge
 
 
 class AuditRunError(ValueError):
@@ -113,16 +113,16 @@ def audit_analogy_run(
     judge = LLMProcessJudge(
         generator, base_seed=seed, max_repair_calls=max_repair_calls
     )
-    target_count = min(len(iterations), max_calls)
     rows = list(existing_rows)
+    model_calls = sum(len(row.get("raw_outputs", ())) for row in rows)
     with judgments_path.open("a", encoding="utf-8", newline="\n") as handle:
         for item in iterations:
-            if len(rows) >= target_count:
+            if model_calls >= max_calls:
                 break
             key = _iteration_key(item)
             if key in completed_keys:
                 continue
-            attempt = judge.evaluate(item)
+            attempt = judge.evaluate(item, max_calls=max_calls - model_calls)
             row = {
                 "problem_id": item.problem_id,
                 "phase": item.phase,
@@ -140,10 +140,11 @@ def audit_analogy_run(
             handle.flush()
             rows.append(row)
             completed_keys.add(key)
+            model_calls += len(attempt.raw_outputs)
 
     if _tree_hash(source) != source_hash:
         raise AuditRunError("source run changed while it was being audited")
-    run_complete = len(rows) >= target_count
+    run_complete = len(rows) >= len(iterations) or model_calls >= max_calls
     summary = _summarize(
         source,
         output,
@@ -236,13 +237,27 @@ def _normalize_iteration(
     attempts = row["attempts"]
     if not isinstance(attempts, list):
         raise ValueError("attempts must be an array")
+    evidence: list[LeanAttemptEvidence] = []
+    tactics: list[str] = []
     outcomes: list[str] = []
     diagnostics: list[str] = []
     discard_reasons: list[str] = []
     for attempt_index, attempt_value in enumerate(attempts):
         attempt = _object(attempt_value, f"attempts[{attempt_index}]")
+        proposal = _object(
+            attempt["proposal"], f"attempts[{attempt_index}].proposal"
+        )
+        candidate = _object(
+            proposal["candidate"], f"attempts[{attempt_index}].proposal.candidate"
+        )
+        source = _text(
+            candidate["source"],
+            f"attempts[{attempt_index}].proposal.candidate.source",
+        )
         result = _object(attempt["result"], f"attempts[{attempt_index}].result")
-        outcomes.append(_text(result["status"], f"attempts[{attempt_index}].status"))
+        status = _text(result["status"], f"attempts[{attempt_index}].status")
+        tactics.append(source)
+        outcomes.append(status)
         raw_diagnostics = result.get("diagnostics", [])
         if not isinstance(raw_diagnostics, list) or not all(
             isinstance(item, str) for item in raw_diagnostics
@@ -252,18 +267,37 @@ def _normalize_iteration(
             )
         diagnostics.extend(raw_diagnostics)
         discarded = attempt.get("discarded")
+        discard_reason = None
         if discarded is not None:
             discarded_object = _object(
                 discarded, f"attempts[{attempt_index}].discarded"
             )
-            discard_reasons.append(
-                _text(
-                    discarded_object["reason"],
-                    f"attempts[{attempt_index}].discarded.reason",
-                )
+            discard_reason = _text(
+                discarded_object["reason"],
+                f"attempts[{attempt_index}].discarded.reason",
             )
-    tactics = tactic_plan["tactics"]
-    if not isinstance(tactics, list) or not all(isinstance(item, str) for item in tactics):
+            discard_reasons.append(discard_reason)
+        successor = None
+        state = result.get("state")
+        if state is not None:
+            state_object = _object(state, f"attempts[{attempt_index}].result.state")
+            successor = _text(
+                state_object["expression"],
+                f"attempts[{attempt_index}].result.state.expression",
+            )
+        evidence.append(
+            LeanAttemptEvidence(
+                source=source,
+                status=status,
+                diagnostics=tuple(raw_diagnostics),
+                discard_reason=discard_reason,
+                successor=successor,
+            )
+        )
+    planned_tactics = tactic_plan["tactics"]
+    if not isinstance(planned_tactics, list) or not all(
+        isinstance(item, str) for item in planned_tactics
+    ):
         raise ValueError("tactic_plan.tactics must be a string array")
     actual = row.get("actual_transition")
     if actual is not None:
@@ -294,6 +328,7 @@ def _normalize_iteration(
         actual_transition=actual,
         surprise=surprise,
         stop_decision=_text(reason, "decision.reason"),
+        lean_attempts=tuple(evidence),
     )
 
 
@@ -345,13 +380,32 @@ def _mean(rows: list[dict[str, Any]], key: str) -> float | None:
 
 
 def _read_judgment_rows(path: Path) -> list[dict[str, Any]]:
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise AuditRunError(f"could not read judgments.jsonl: {error}") from error
+    terminated = not content or content.endswith(b"\n")
+    raw_lines = content.splitlines(keepends=True)
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        is_unterminated_tail = line_number == len(raw_lines) and not terminated
+        try:
+            line = raw_line.decode("utf-8").rstrip("\r\n")
+        except UnicodeDecodeError as error:
+            if is_unterminated_tail:
+                _quarantine_truncated_tail(path, content, raw_line)
+                break
+            raise AuditRunError(
+                f"judgments.jsonl line {line_number}: invalid UTF-8"
+            ) from error
         if not line.strip():
             continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError as error:
+            if is_unterminated_tail:
+                _quarantine_truncated_tail(path, content, raw_line)
+                break
             raise AuditRunError(
                 f"judgments.jsonl line {line_number}: {error.msg}"
             ) from error
@@ -364,7 +418,29 @@ def _read_judgment_rows(path: Path) -> list[dict[str, Any]]:
                 f"judgments.jsonl line {line_number}: invalid key: {error}"
             ) from error
         rows.append(row)
+    if content and not terminated and len(rows) == len(raw_lines):
+        _append_newline(path)
     return rows
+
+
+def _quarantine_truncated_tail(path: Path, content: bytes, tail: bytes) -> None:
+    quarantine = path.with_suffix(path.suffix + ".truncated")
+    safe_prefix = content[: len(content) - len(tail)]
+    try:
+        quarantine.write_bytes(tail)
+        path.write_bytes(safe_prefix)
+    except OSError as error:
+        raise AuditRunError(f"could not recover judgments.jsonl: {error}") from error
+
+
+def _append_newline(path: Path) -> None:
+    try:
+        with path.open("ab") as handle:
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as error:
+        raise AuditRunError(f"could not repair judgments.jsonl boundary: {error}") from error
 
 
 def _iteration_key(item: AuditIteration) -> tuple[str, str, str, int]:

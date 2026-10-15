@@ -191,9 +191,11 @@ conventional, and shuffled-control phases are excluded. Each separate audit
 writes `config.json`, append-only `judgments.jsonl`, and `summary.json`. A row
 classifies the earliest apparent failure as analogy choice, tactic translation,
 Lean execution, or proof progress (or `working`) and preserves the raw model
-output. The judge never sees reference proofs and its scores are descriptive—not
-rewards. Re-running the same output directory resumes by iteration key without
-duplicating completed rows.
+output plus every executed tactic/result pair, including repair tactics. The
+judge never sees reference proofs and its scores are descriptive—not rewards.
+`--audit-max-calls` bounds total judge calls, including schema repairs. Re-running
+the same output directory resumes by iteration key without duplicating completed
+rows; an interrupted final JSONL record is quarantined before resumption.
 
 Run the complete preservation suite with:
 

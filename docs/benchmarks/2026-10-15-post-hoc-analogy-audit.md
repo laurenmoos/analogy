@@ -33,21 +33,23 @@ policy updates, stopping, or the source metrics.
   `d7ab4397fb29ba4e3961cb7b7eb50ff8bca310bb8ea41db9cff1011a366bfdbe`.
 - Both hashes matched after auditing.
 - Final audit artifacts:
-  `runs-fast/post-hoc-audit-20261015-v4/train` and
-  `runs-fast/post-hoc-audit-20261015-v4/test`.
-- Approximate command wall time: `49s` for training/validation and `73s` for
-  held-out test, including model loading.
+  `runs-fast/post-hoc-audit-20261015-v6/train` and
+  `runs-fast/post-hoc-audit-20261015-v6/test`.
+- Approximate command wall time: `63s` for training/validation and `110s` for
+  held-out test, including model loading. The audit-only generation timeout was
+  raised from 45s to 120s after the largest structured trace timed out; solver
+  settings and source runs were unchanged.
 
 ## Coverage
 
 | Source | Eligible | Judged | Parse failures | Mean progress | Mean analogy quality | Mean confidence |
 |---|---:|---:|---:|---:|---:|---:|
-| Train + validation | 3 | 3 | 0 | -0.33 | 0.40 | 0.63 |
-| Held-out test | 3 | 3 | 0 | -0.50 | 0.30 | 0.57 |
+| Train + validation | 3 | 3 | 0 | -0.33 | 0.17 | 0.43 |
+| Held-out test | 3 | 3 | 0 | -0.33 | 0.40 | 0.77 |
 
-The judge labeled training examples as one `working`, one `tactic_translation`,
-and one `lean_execution`; it labeled test examples as one `proof_progress` and
-two `lean_execution`. These labels are opinions, not ground truth. In particular,
+The judge labeled training examples as one `working` and two `lean_execution`;
+it gave the same distribution on held-out test. These labels are opinions, not
+ground truth. In particular,
 the judge sometimes blamed Lean when the objective record more precisely showed a
 bad analogy orientation or tactic translation. Lean statuses, successor states,
 and discard reasons below take precedence.
@@ -73,7 +75,7 @@ and discard reasons below take precedence.
 - Analogy: an implication chain ending in “Apply the final implication.”
 - First tactic: `exact p`.
 - Lean: `complete`; the remaining candidates were never needed.
-- Judge: `working`, progress `1.0`, quality `1.0`, confidence `1.0`.
+- Judge: `working`, progress `1.0`, quality `0.5`, confidence `0.9`.
 - Objective diagnosis: this is a valid solve, but it is weak evidence for analogy
   quality. The direct local hypothesis completed the residual goal; the card's
   implication-chain story was unnecessary.
@@ -85,7 +87,7 @@ and discard reasons below take precedence.
 - Tactics included `apply h2.mp h1`, `apply not.intro`, and `apply h1.mp h2`.
 - Lean: all rejected; functions/negations do not expose `.mp`, and
   `not.intro` resolved to no valid Lean constant.
-- Judge: `tactic_translation`, progress `-1.0`, quality `0.2`, confidence `0.7`.
+- Judge: `lean_execution`, progress `-1.0`, quality `0.0`, confidence `0.2`.
 - Objective diagnosis: the line of reasoning was good, but the decoder could not
   express it as `intro hB; exact h2 (h1 hB)` or equivalent Lean.
 
@@ -101,8 +103,8 @@ three audited rows are every analogy iteration present, not a sampled subset.
 - Tactic: `apply h1.mpr`.
 - Lean: accepted; successor was `⊢ R`, which exactly matched `a✝ : R`.
 - Controller: surprise `0.0909`, then `surprise_converged`.
-- Judge: `proof_progress`, progress `0.5`, quality `0.7`, confidence `0.8`, but
-  incorrectly called the successor a detour.
+- Judge: `working`, progress `1.0`, quality `0.8`, confidence `0.9`, but still
+  questioned whether the valid successor aligned with the original target.
 - Objective diagnosis: the analogy and tactic were useful. The missing behavior
   was a cheap conventional finish on the accepted successor.
 
@@ -122,7 +124,8 @@ three audited rows are every analogy iteration present, not a sampled subset.
 - State: a nested equivalence over `L`, with `h1 : L ↔ P` and a corresponding
   theorem `h2` over `P`.
 - Analogy: map `L` and `P`, then apply `h2` to the matching structure.
-- Tactics: `apply h2`, `rw h1 at h2`, `exact h2`, `apply h2` plus repair.
+- Tactics: `apply h2`, `rw h1 at h2`, `exact h2`, `apply h2`, then the repair
+  `apply h2 at h1`.
 - Lean: direct applications had type mismatches; rewrite syntax was rejected
   (`rw [h1] at h2` would at least be syntactically valid); the six-call Lean
   budget was exhausted.

@@ -8,7 +8,7 @@ model:
   device: mps
   hidden_layer: -1
   max_new_tokens: 256
-  timeout_seconds: 45.0
+  timeout_seconds: 120.0
   do_sample: false
   temperature: 0.3
   top_p: 0.9

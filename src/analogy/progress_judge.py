@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
@@ -23,6 +23,34 @@ class AuditStage(str, Enum):
     LEAN_EXECUTION = "lean_execution"
     PROOF_PROGRESS = "proof_progress"
     WORKING = "working"
+
+
+@dataclass(frozen=True, slots=True)
+class LeanAttemptEvidence:
+    source: str
+    status: str
+    diagnostics: tuple[str, ...]
+    discard_reason: str | None
+    successor: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source", _nonblank(self.source, "source"))
+        object.__setattr__(self, "status", _nonblank(self.status, "status"))
+        if isinstance(self.diagnostics, (str, bytes)) or any(
+            not isinstance(item, str) for item in self.diagnostics
+        ):
+            raise ValueError("diagnostics must be a sequence of strings")
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        if self.discard_reason is not None:
+            object.__setattr__(
+                self,
+                "discard_reason",
+                _nonblank(self.discard_reason, "discard_reason"),
+            )
+        if self.successor is not None:
+            object.__setattr__(
+                self, "successor", _nonblank(self.successor, "successor")
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +71,7 @@ class AuditIteration:
     actual_transition: str | None
     surprise: float | None
     stop_decision: str
+    lean_attempts: tuple[LeanAttemptEvidence, ...]
 
     def __post_init__(self) -> None:
         for name in (
@@ -76,6 +105,11 @@ class AuditIteration:
             if any(not isinstance(item, str) for item in normalized):
                 raise ValueError(f"{name} must contain only strings")
             object.__setattr__(self, name, normalized)
+        if isinstance(self.lean_attempts, (str, bytes)) or any(
+            not isinstance(item, LeanAttemptEvidence) for item in self.lean_attempts
+        ):
+            raise ValueError("lean_attempts must contain LeanAttemptEvidence values")
+        object.__setattr__(self, "lean_attempts", tuple(self.lean_attempts))
         if self.actual_transition is not None:
             _nonblank(self.actual_transition, "actual_transition")
         if self.surprise is not None:
@@ -143,8 +177,8 @@ _JUDGMENT_KEYS = {
 
 def parse_audit_judgment(raw: str) -> AuditJudgment:
     try:
-        payload = json.loads(raw)
-    except (TypeError, json.JSONDecodeError) as error:
+        payload = json.loads(raw, object_pairs_hook=_unique_object)
+    except (TypeError, json.JSONDecodeError, RecursionError) as error:
         raise ValueError("audit judgment must be exactly one JSON object") from error
     if not isinstance(payload, dict) or set(payload) != _JUDGMENT_KEYS:
         raise ValueError("audit judgment must contain exactly the required keys")
@@ -179,14 +213,23 @@ class LLMProcessJudge:
         self.base_seed = base_seed
         self.max_repair_calls = max_repair_calls
 
-    def evaluate(self, iteration: AuditIteration) -> JudgeAttempt:
+    def evaluate(
+        self, iteration: AuditIteration, *, max_calls: int | None = None
+    ) -> JudgeAttempt:
         if not isinstance(iteration, AuditIteration):
             raise ValueError("iteration must be an AuditIteration")
+        if max_calls is not None and (
+            isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls <= 0
+        ):
+            raise ValueError("max_calls must be a positive integer")
         messages = _judge_messages(iteration)
         raw_outputs: list[str] = []
         seeds: list[int] = []
         failure = "audit judgment must be exactly one JSON object"
-        for attempt_index in range(self.max_repair_calls + 1):
+        attempt_limit = self.max_repair_calls + 1
+        if max_calls is not None:
+            attempt_limit = min(attempt_limit, max_calls)
+        for attempt_index in range(attempt_limit):
             seed = _operation_seed(self.base_seed, iteration, attempt_index)
             active_messages = (
                 messages
@@ -233,6 +276,7 @@ def _judge_messages(iteration: AuditIteration) -> tuple[Message, ...]:
         f"State before:\n{iteration.state_before}\n"
         f"Analogy card:\n{iteration.analogy_card}\n"
         f"Predicted transition:\n{iteration.predicted_transition}\n"
+        f"Executed Lean attempts: {json.dumps([asdict(item) for item in iteration.lean_attempts])}\n"
         f"Proposed tactics: {json.dumps(iteration.tactics)}\n"
         f"Lean outcomes: {json.dumps(iteration.lean_outcomes)}\n"
         f"Lean diagnostics: {json.dumps(iteration.lean_diagnostics)}\n"
@@ -292,10 +336,22 @@ def _nonblank(value: object, name: str) -> str:
 def _finite_number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be a finite number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite number") from error
     if not math.isfinite(normalized):
         raise ValueError(f"{name} must be a finite number")
     return normalized
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
 
 
 __all__ = [
@@ -303,6 +359,7 @@ __all__ = [
     "AuditJudgment",
     "AuditStage",
     "JudgeAttempt",
+    "LeanAttemptEvidence",
     "LLMProcessJudge",
     "parse_audit_judgment",
 ]

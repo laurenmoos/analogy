@@ -29,6 +29,7 @@ from .loop import (
 )
 from .model import QwenProofEncoder, QwenTacticRanker
 from .records import SearchStatus, SymbolicState
+from .replay import JsonlStuckStateStore, StuckStateRecord, proof_state_fingerprint
 from .rescue import DirectRescueRunner, RescueRollout, RescueTermination, RolloutCollector
 from .rl import (
     DirectRescuePolicy,
@@ -166,6 +167,7 @@ class RescueRunWriter:
             "generations.jsonl",
             "problems.jsonl",
             "metrics.jsonl",
+            "stuck_states.jsonl",
         ):
             (path / name).touch(exist_ok=False)
         return writer
@@ -301,7 +303,12 @@ def train_direct_rescue(
     writer = RescueRunWriter.create(
         config.run.output_dir / "rescue", identifier, _run_metadata(config, generator, problem_split)
     )
-    run_problem = problem_runner or _default_problem_runner(config, generator, verifier)
+    run_problem = problem_runner or _default_problem_runner(
+        config,
+        generator,
+        verifier,
+        JsonlStuckStateStore(writer.path / "stuck_states.jsonl"),
+    )
     all_metrics: list[TrainingMetrics] = []
     best_score = -1
     best_checkpoint: Path | None = None
@@ -436,10 +443,13 @@ def evaluate_direct_rescue(
 
 
 def _default_problem_runner(
-    config: AppConfig, generator: Any, verifier: Any
+    config: AppConfig,
+    generator: Any,
+    verifier: Any,
+    stuck_store: JsonlStuckStateStore | None = None,
 ) -> ProblemRunner:
     return lambda problem, phase, policy: _execute_problem(
-        config, generator, verifier, problem, phase, policy
+        config, generator, verifier, problem, phase, policy, stuck_store
     )
 
 
@@ -450,8 +460,8 @@ def _execute_problem(
     problem: Problem,
     phase: str,
     policy: torch.nn.Module | None,
+    stuck_store: JsonlStuckStateStore | None = None,
 ) -> ProblemEpisode:
-    del phase
     collector = RolloutCollector()
     try:
         adapter = LeanGymAdapter(problem, verifier)
@@ -486,6 +496,11 @@ def _execute_problem(
             cancellation=NeverCancelled(),
             ordinary_width=config.search.top_k,
             max_expansions=config.search.max_steps,
+            stuck_state_sink=(
+                _TrainingStuckStateSink(problem, phase, stuck_store)
+                if stuck_store is not None
+                else None
+            ),
         )
         result = search.search(
             adapter.initial_state(),
@@ -528,6 +543,29 @@ def _execute_problem(
             0,
             sum(len(rollout.attempts) for rollout in preserved),
             f"{type(error).__name__}: {error}",
+        )
+
+
+class _TrainingStuckStateSink:
+    def __init__(
+        self, problem: Problem, split: str, store: JsonlStuckStateStore
+    ) -> None:
+        self.problem = problem
+        self.split = split
+        self.store = store
+
+    def capture(self, state: Any, goal: Any, outcome: Any, decision: Any) -> None:
+        del goal, decision
+        self.store.add(
+            StuckStateRecord(
+                self.problem,
+                self.split,
+                tuple(state.context),
+                state.expression,
+                proof_state_fingerprint(state.expression),
+                tuple(item.source for item in outcome.candidate_pool),
+                tuple(item.candidate.source for item in outcome.attempts),
+            )
         )
 
 

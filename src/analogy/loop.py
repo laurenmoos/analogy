@@ -77,6 +77,16 @@ class ProgressPolicy(Protocol):
     def accepts(self, before: SymbolicState, after: SymbolicState, goal: SymbolicState) -> bool: ...
 
 
+class StuckStateSink(Protocol):
+    def capture(
+        self,
+        state: SymbolicState,
+        goal: SymbolicState,
+        outcome: ExpansionOutcome,
+        decision: StucknessDecision,
+    ) -> None: ...
+
+
 class ObservableStucknessPolicy:
     """Declare stuckness from a completed ordinary top-one attempt."""
 
@@ -154,6 +164,7 @@ class LocalRescueSearch:
         ordinary_width: int = 1,
         max_expansions: int | None = None,
         rollout_rescue: GenericRescueRunner | None = None,
+        stuck_state_sink: StuckStateSink | None = None,
     ) -> None:
         if isinstance(ordinary_width, bool) or not isinstance(ordinary_width, int) or ordinary_width <= 0:
             raise ValueError("ordinary_width must be a positive integer")
@@ -179,6 +190,7 @@ class LocalRescueSearch:
         self._cancellation = cancellation
         self._ordinary_width = ordinary_width
         self._max_expansions = max_expansions
+        self._stuck_state_sink = stuck_state_sink
 
     def search(self, initial_state: SymbolicState, goal: SymbolicState) -> SearchResult:
         frontier = _PriorityFrontier()
@@ -215,6 +227,8 @@ class LocalRescueSearch:
             decisions.append(decision)
             if not decision.is_stuck:
                 continue
+            if self._stuck_state_sink is not None:
+                self._stuck_state_sink.capture(node.state, goal, ordinary, decision)
 
             if self._rollout_rescue is not None:
                 rescue = self._rollout_rescue.search(

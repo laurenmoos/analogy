@@ -238,6 +238,7 @@ class RescueRollout:
     termination: RescueTermination
     reward: float | None = None
     generations: tuple[GenerationAttempt, ...] = ()
+    analogy_stream: Any | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.rollout_id, "rollout_id")

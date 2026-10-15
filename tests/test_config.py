@@ -79,6 +79,24 @@ data:
 """
 
 
+@pytest.mark.parametrize("strategy", [None, "legacy", "generated_domain"])
+def test_analogy_strategy_defaults_to_legacy_and_accepts_generated_domain(tmp_path, strategy):
+    path = tmp_path / "config.yaml"
+    text = _valid_yaml()
+    if strategy is not None:
+        text = text.replace("analogy:\n", f"analogy:\n  strategy: {strategy}\n")
+    path.write_text(text)
+    assert _config_module().load_config(path).analogy.strategy == (strategy or "legacy")
+
+
+@pytest.mark.parametrize("strategy", ["unknown", "true", "7", "null"])
+def test_analogy_strategy_rejects_unknown_or_non_string_values(tmp_path, strategy):
+    path = tmp_path / "config.yaml"
+    path.write_text(_valid_yaml().replace("analogy:\n", f"analogy:\n  strategy: {strategy}\n"))
+    with pytest.raises(_config_module().ConfigError, match="analogy.strategy"):
+        _config_module().load_config(path)
+
+
 def test_load_config_resolves_paths_from_config_file(tmp_path: Path) -> None:
     module = _config_module()
     path = tmp_path / "config.yaml"

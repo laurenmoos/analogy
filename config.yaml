@@ -22,6 +22,7 @@ search:
   stuck_after: 3
 
 analogy:
+  strategy: legacy
   enabled: false
   samples: 4
   min_iterations: 1

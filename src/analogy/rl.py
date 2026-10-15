@@ -527,11 +527,14 @@ def discounted_iteration_samples(
 ) -> tuple[TrainingSample, ...]:
     """Propagate one verified outcome back through every analogy refinement."""
     from .analogy_loop import AnalogyLoopTrace
+    from .analogy_transfer_loop import GeneratedAnalogyTrace
 
-    if not isinstance(trace, AnalogyLoopTrace):
-        raise ValueError("trace must be an AnalogyLoopTrace")
+    if not isinstance(trace, (AnalogyLoopTrace, GeneratedAnalogyTrace)):
+        raise ValueError("trace must be an AnalogyLoopTrace or GeneratedAnalogyTrace")
     normalized_actions = tuple(actions)
-    if len(normalized_actions) != len(trace.iterations):
+    action_count = (sum(iteration.action is not None for iteration in trace.iterations)
+                    if isinstance(trace, GeneratedAnalogyTrace) else len(trace.iterations))
+    if len(normalized_actions) != action_count:
         raise ValueError("trace iterations and live actions must have equal length")
     for value, name in (
         (verified_reward, "verified_reward"),

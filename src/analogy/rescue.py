@@ -229,6 +229,7 @@ class RescueAttempt:
     result: TacticResult
     discarded: DiscardedSuccessor | None = None
     prediction_distance: float | None = None
+    stage: str = "rescue"
 
     def __post_init__(self) -> None:
         if not isinstance(self.proposal, RescueProposal):

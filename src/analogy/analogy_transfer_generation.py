@@ -199,7 +199,7 @@ class _TransferGenerator:
         self.max_repair_calls = min(max_repair_calls, 1)
 
     def _generate(self, prompt, instruction, *, delta, analogy_index, offset,
-                  max_attempts, parser, result_type):
+                  max_attempts, parser, result_type, cancellation=None):
         if (isinstance(analogy_index, bool) or not isinstance(analogy_index, int)
                 or analogy_index < 0):
             raise ValueError("analogy_index must be a non-negative integer")
@@ -211,13 +211,14 @@ class _TransferGenerator:
             max_repair_calls=self.max_repair_calls, max_attempts=max_attempts,
             parser=parser, result_type=result_type,
             schema_errors=(TransferOutputError,), preserve_repair_context=True,
+            cancellation=cancellation,
         )
 
 
 class SourceAnalogyGenerator(_TransferGenerator):
     def generate(
         self, observation: AnalogyObservation, need: ProofNeed, action: PolicyAction,
-        *, analogy_index: int, max_attempts: int | None = None,
+        *, analogy_index: int, max_attempts: int | None = None, cancellation=None,
     ) -> GeneratedSourceAnalogy:
         return self._generate(
             render_source_prompt(observation, need),
@@ -226,14 +227,14 @@ class SourceAnalogyGenerator(_TransferGenerator):
             max_attempts=max_attempts,
             parser=lambda raw: parse_source_analogy(
                 raw, analogy_id=f"source-{analogy_index}", need=need),
-            result_type=GeneratedSourceAnalogy,
+            result_type=GeneratedSourceAnalogy, cancellation=cancellation,
         )
 
 
 class AlignmentGenerator(_TransferGenerator):
     def generate(
         self, observation: AnalogyObservation, need: ProofNeed, source: SourceAnalogy,
-        *, analogy_index: int, max_attempts: int | None = None,
+        *, analogy_index: int, max_attempts: int | None = None, cancellation=None,
     ) -> GeneratedAlignment:
         return self._generate(
             render_alignment_prompt(observation, need, source),
@@ -241,14 +242,14 @@ class AlignmentGenerator(_TransferGenerator):
             delta=None, analogy_index=analogy_index, offset=10, max_attempts=max_attempts,
             parser=lambda raw: parse_alignment(
                 raw, source=source, need=need, alignment_id=f"alignment-{analogy_index}"),
-            result_type=GeneratedAlignment,
+            result_type=GeneratedAlignment, cancellation=cancellation,
         )
 
 
 class ProofTransferGenerator(_TransferGenerator):
     def generate(
         self, observation: AnalogyObservation, need: ProofNeed, source: SourceAnalogy,
-        alignment: AnalogyAlignment, *, analogy_index: int, max_attempts: int | None = None,
+        alignment: AnalogyAlignment, *, analogy_index: int, max_attempts: int | None = None, cancellation=None,
     ) -> GeneratedProofTransfer:
         _validate_chain(source, alignment)
         return self._generate(
@@ -257,7 +258,7 @@ class ProofTransferGenerator(_TransferGenerator):
             delta=None, analogy_index=analogy_index, offset=20, max_attempts=max_attempts,
             parser=lambda raw: parse_proof_reasoning_transfer(
                 raw, need=need, alignment=alignment, transfer_id=f"transfer-{analogy_index}"),
-            result_type=GeneratedProofTransfer,
+            result_type=GeneratedProofTransfer, cancellation=cancellation,
         )
 
 
@@ -265,7 +266,7 @@ class TransferredTacticGenerator(_TransferGenerator):
     def generate(
         self, state: SymbolicState, structure: ProofStructure, source: SourceAnalogy,
         alignment: AnalogyAlignment, transfer: ProofReasoningTransfer, *,
-        candidate_count: int, max_attempts: int | None = None, analogy_index: int = 0,
+        candidate_count: int, max_attempts: int | None = None, analogy_index: int = 0, cancellation=None,
     ) -> GeneratedTransferredTacticPlan:
         prompt = render_transferred_tactic_prompt(
             state, structure, source, alignment, transfer, candidate_count=candidate_count)
@@ -279,7 +280,7 @@ class TransferredTacticGenerator(_TransferGenerator):
         return self._generate(
             prompt, "Decode the cited proof reasoning transfer into Lean 4 tactics as strict JSON.",
             delta=None, analogy_index=analogy_index, offset=30, max_attempts=max_attempts,
-            parser=parse, result_type=GeneratedTransferredTacticPlan,
+            parser=parse, result_type=GeneratedTransferredTacticPlan, cancellation=cancellation,
         )
 
 

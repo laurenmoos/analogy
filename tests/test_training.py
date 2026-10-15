@@ -51,6 +51,166 @@ from analogy.replay import StuckStateRecord, proof_state_fingerprint
 ROOT = Path(__file__).parents[1]
 
 
+def generated_config():
+    config = load_config(ROOT / "config.yaml")
+    return replace(config, analogy=replace(config.analogy, enabled=True, strategy="generated_domain"))
+
+
+def test_generated_conditions_share_all_budgets_and_preserve_legacy_control():
+    conditions = build_evaluation_conditions(generated_config())
+    assert [item.name for item in conditions] == [
+        "conventional", "learned_direct", "analogy_loop", "generated_unsteered",
+        "generated_random", "generated_learned", "generated_shuffled",
+    ]
+    assert len({item.budget for item in conditions}) == 1
+
+
+def test_generated_factory_uses_full_observation_and_zero_delta_only_for_unsteered():
+    from analogy.training import _new_analogy_runner, _new_policy
+    from analogy.analogy_transfer_loop import GeneratedDomainAnalogyLoopRunner
+    from analogy.analogy_loop import AnalogyLoopRunner
+    from analogy.proof_views import ProofStructure
+    from test_analogy_transfer_loop import Encoder, Evaluator, outputs, state
+    from test_analogy_transfer_generation import RecordingBackend
+    from analogy.loop import NeverCancelled
+
+    config = generated_config()
+    config = replace(config, analogy=replace(config.analogy, tactics_per_iteration=1))
+
+    class Backend(RecordingBackend, Encoder):
+        hidden_size = 2
+
+    backend = Backend(outputs())
+    policy = _new_policy(config, backend)
+    adapter = SimpleNamespace(proof_structure_for=lambda state: ProofStructure(1, '{"root":"atom"}', ('{"root":"target"}',)))
+    runner = _new_analogy_runner(config, backend, adapter, policy, condition="generated_unsteered")
+    assert isinstance(runner, GeneratedDomainAnalogyLoopRunner)
+    outcome = runner.search(state(), SymbolicState("goal", "C → S", "lean4"), (), (), Evaluator(finish=True), NeverCancelled())
+    assert outcome.completed_proof
+    assert torch.equal(backend.calls[0][2], torch.zeros(2))
+    assert all(call[2] is None for call in backend.calls[1:])
+    assert isinstance(_new_analogy_runner(config, backend, adapter, policy, condition="analogy_loop"), AnalogyLoopRunner)
+    assert isinstance(_new_analogy_runner(config, backend, adapter, policy), GeneratedDomainAnalogyLoopRunner)
+
+
+def test_generated_random_policy_is_seeded_untrained_and_learned_modes_keep_checkpoint():
+    from analogy.training import _evaluation_policy, _new_policy
+    config = generated_config()
+    generator = SimpleNamespace(hidden_size=2)
+    learned = _new_policy(config, generator)
+    with torch.no_grad():
+        for parameter in learned.parameters():
+            parameter.add_(10)
+    first = _evaluation_policy("generated_random", config, generator, learned)
+    second = _evaluation_policy("generated_random", config, generator, learned)
+    assert first is not learned
+    assert all(torch.equal(a, b) for a, b in zip(first.parameters(), second.parameters()))
+    assert any(not torch.equal(a, b) for a, b in zip(first.parameters(), learned.parameters()))
+    for mode in ("generated_learned", "generated_shuffled", "generated_unsteered"):
+        assert _evaluation_policy(mode, config, generator, learned) is learned
+
+
+def test_source_shuffle_requires_another_problem_with_the_same_structural_need():
+    from analogy.training import GeneratedSourceRecord, shuffle_generated_source
+    from test_analogy_transfer_generation import records, NEED, observation
+    source = records()[0]
+    donor = GeneratedSourceRecord("other", "different proof state", NEED, source)
+    selected = shuffle_generated_source(source, NEED, observation(), (donor,), problem_id="target", seed=7)
+    assert selected.domain == source.domain
+    assert selected.analogy_id.startswith("shuffled-other-")
+    donor_with_id = replace(donor, source=replace(source, analogy_id="donor-source-7"))
+    selected = shuffle_generated_source(source, NEED, observation(), (donor_with_id,), problem_id="target", seed=7)
+    assert selected.analogy_id == "shuffled-other-donor-source-7"
+    with pytest.raises(ValueError, match="compatible"):
+        shuffle_generated_source(source, NEED, observation(), (donor,), problem_id="other", seed=7)
+    with pytest.raises(ValueError, match="compatible"):
+        shuffle_generated_source(source, replace(NEED, proof_roles=("active_subgoal",)), observation(), (donor,), problem_id="target", seed=7)
+
+
+def test_generated_trace_uses_existing_verifier_reward_discounting():
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import runner, run, Evaluator
+    result, _, _ = runner()
+    rollout = run(result, Evaluator(finish=True)).rollouts[0]
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=1.0, discount=0.95, iteration_cost=0.01)
+    assert len(samples) == 1
+    assert samples[0].reward == 1.0
+
+
+def test_generated_pre_action_failure_after_progress_keeps_prior_action_trainable():
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import runner, run, STRUCTURE
+    result, _, _ = runner()
+    def structure(current):
+        if current.id == "D":
+            raise RuntimeError("Lean unavailable")
+        return STRUCTURE
+    result.structure_builder = structure
+    rollout = run(result).rollouts[0]
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=0.1, discount=0.95, iteration_cost=0.01)
+    assert len(samples) == 1
+    assert samples[0].reward == 0.1
+    assert rollout.analogy_trace.iterations[1].action is None
+
+
+def test_generated_repeated_state_is_not_counted_as_a_successor_in_summary():
+    from test_analogy_transfer_loop import runner, run, Evaluator
+    result, _, _ = runner()
+    rollout = run(result, Evaluator(repeat=True)).rollouts[0]
+    summary = _summarize_condition("generated_learned", (
+        ProblemEpisode("fixture", False, (rollout,), (), 0, 2),
+    ), set())
+    assert summary.successor_rate == 0.0
+
+
+@pytest.mark.parametrize("phase,trainable", [
+    ("train", True), ("validation", True), ("generated_learned", True),
+    ("generated_unsteered", False), ("generated_random", False), ("generated_shuffled", False),
+])
+def test_execute_problem_integrates_generated_loop_and_keeps_controls_out_of_training(monkeypatch, phase, trainable):
+    import analogy.training as training
+    from test_analogy_transfer_loop import Encoder, Evaluator, outputs, state, STRUCTURE
+    from test_analogy_transfer_generation import RecordingBackend, NEED, records
+    config = generated_config()
+    config = replace(config, analogy=replace(config.analogy, tactics_per_iteration=1))
+    class Backend(RecordingBackend, Encoder):
+        hidden_size = 2
+    backend = Backend(outputs())
+    evaluator = Evaluator(finish=True)
+    class Adapter:
+        def initial_state(self):
+            return state()
+        def failed_tactics_for(self, current):
+            return ()
+        def proof_structure_for(self, current):
+            return STRUCTURE
+        def run_tactic(self, current, candidate):
+            if candidate.origin is CandidateOrigin.ORDINARY:
+                return TacticResult(candidate, TacticStatus.ERROR, diagnostics=("unknown identifier",))
+            return evaluator.evaluate_at(current, candidate).result
+    class Ranker:
+        def rank(self, current, goal):
+            return (TacticCandidate("ordinary_bad", 1.0, CandidateOrigin.ORDINARY),)
+    monkeypatch.setattr(training, "LeanGymAdapter", lambda *args: Adapter())
+    monkeypatch.setattr(training, "QwenTacticRanker", lambda *args, **kwargs: Ranker())
+    learned = training._new_policy(config, backend)
+    policy = training._evaluation_policy(phase, config, backend, learned)
+    source_record = training.GeneratedSourceRecord("donor", "another state", NEED, records()[0])
+    episode = training._execute_problem(config, backend, object(), problem("fixture", "iff"), phase,
+                                        policy, generated_sources=(source_record,))
+    assert episode.failure is None
+    assert episode.completed
+    assert episode.verifier_calls == 4  # ordinary rejection + structure + transferred tactic + finisher
+    assert len(episode.rollouts) == 1
+    assert bool(episode.training_samples) is trainable
+    if trainable:
+        assert episode.training_samples[0].action.log_probability.requires_grad
+        assert torch.count_nonzero(backend.calls[0][2]) > 0
+    assert all(call[2] is None for call in backend.calls[1:])
+
+
 def problem(identifier, connective, difficulty=1):
     return Problem(identifier, identifier, "(P : Prop)", "P → P", "x", "x", connective, difficulty)
 

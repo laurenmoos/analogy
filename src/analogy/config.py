@@ -62,6 +62,7 @@ class AnalogyConfig:
     discount: float
     iteration_cost: float
     rerank_tactics: bool
+    strategy: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,7 @@ _SCHEMA: dict[str, frozenset[str]] = {
             "min_surprise_improvement", "improvement_patience",
             "tactics_per_iteration", "max_model_calls", "max_lean_calls",
             "transition_embedding_layer", "discount", "iteration_cost",
-            "rerank_tactics",
+            "rerank_tactics", "strategy",
         }
     ),
     "rl": frozenset(
@@ -291,6 +292,8 @@ def load_config(path: Path) -> AppConfig:
     sections: dict[str, dict[str, Any]] = {}
     for name, keys in _SCHEMA.items():
         section = _mapping(root[name], f"config.{name}")
+        if name == "analogy":
+            section = {"strategy": "legacy", **section}
         _validate_keys(section, keys, f"config.{name}")
         sections[name] = section
 
@@ -299,6 +302,9 @@ def load_config(path: Path) -> AppConfig:
     benchmark = sections["benchmark"]
     search = sections["search"]
     analogy = sections["analogy"]
+    strategy = _string(analogy["strategy"], "config.analogy.strategy")
+    if strategy not in {"legacy", "generated_domain"}:
+        raise ConfigError("config.analogy.strategy must be legacy or generated_domain")
     rl = sections["rl"]
     run = sections["run"]
     data = sections["data"]
@@ -404,6 +410,7 @@ def load_config(path: Path) -> AppConfig:
             stuck_after=_positive_integer(search["stuck_after"], "config.search.stuck_after"),
         ),
         analogy=AnalogyConfig(
+            strategy=strategy,
             enabled=_boolean(analogy["enabled"], "config.analogy.enabled"),
             samples=_positive_integer(analogy["samples"], "config.analogy.samples"),
             min_iterations=min_iterations,

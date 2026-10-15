@@ -23,6 +23,11 @@ from .analogy_generation import (
     render_tactic_prompt,
 )
 from .analogy_loop import AnalogyLoopRunner
+from .analogy_transfer_loop import GeneratedDomainAnalogyLoopRunner
+from .analogy_transfer import ProofNeed, SourceAnalogy
+from .analogy_transfer_generation import (
+    SourceAnalogyGenerator, AlignmentGenerator, ProofTransferGenerator, TransferredTacticGenerator,
+)
 from .analogy_stream import AnalogyHop, AnalogyTacticPlan
 from .config import AppConfig
 from .lean_gym.corpus import load_problems
@@ -37,7 +42,7 @@ from .loop import (
     WhitespaceTacticCanonicalizer,
 )
 from .model import QwenProofEncoder, QwenTacticRanker
-from .proof_views import build_proof_views, compare_transitions
+from .proof_views import build_proof_views, build_policy_representation, compare_transitions
 from .records import Message, SearchStatus, SymbolicState, TacticStatus
 from .replay import (
     JsonlStuckStateStore,
@@ -128,6 +133,14 @@ class EvaluationCondition:
 class AnalogyAssignment:
     source: StuckStateRecord
     target: StuckStateRecord
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedSourceRecord:
+    problem_id: str
+    state: str
+    need: ProofNeed
+    source: SourceAnalogy
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +389,12 @@ def build_evaluation_conditions(config: AppConfig) -> tuple[EvaluationCondition,
     )
     if not config.analogy.enabled:
         return conditions
+    if config.analogy.strategy == "generated_domain":
+        return conditions + (EvaluationCondition("analogy_loop", "analogy_loop", **common),) + tuple(
+            EvaluationCondition(name, name, **common) for name in (
+                "generated_unsteered", "generated_random", "generated_learned", "generated_shuffled"
+            )
+        )
     return conditions + (
         EvaluationCondition("analogy_loop", "analogy_loop", **common),
         EvaluationCondition("shuffled_analogy", "shuffled_analogy", **common),
@@ -405,6 +424,30 @@ def shuffle_analogy_assignments(
             for source, target in zip(sources, targets)
         )
     return tuple(assignments)
+
+
+def shuffle_generated_source(source, need, observation, records, *, problem_id, seed):
+    """Substitute a different theorem's compatible source before target alignment."""
+    def signature(item):
+        return (item.operation, item.input_arity, item.output_arity, item.permutation,
+                item.information_flow, item.proof_roles)
+    eligible = sorted((item for item in records if item.problem_id != problem_id
+                       and signature(item.need) == signature(need)),
+                      key=lambda item: (item.problem_id, item.state, item.source.analogy_id))
+    if not eligible:
+        raise ValueError("shuffled source evaluation lacks a structurally compatible other theorem")
+    selected = random.Random(seed + observation.iteration_index).choice(eligible)
+    return replace(selected.source, analogy_id=f"shuffled-{selected.problem_id}-{selected.source.analogy_id}")
+
+
+def _evaluation_policy(condition, config, generator, learned):
+    if condition == "conventional":
+        return None
+    if condition == "generated_random":
+        with torch.random.fork_rng():
+            torch.manual_seed(config.run.seed)
+            return _new_policy(config, generator)
+    return learned
 
 
 ProblemRunner = Callable[[Problem, str, torch.nn.Module], ProblemEpisode]
@@ -631,11 +674,9 @@ def evaluate_direct_rescue(
     conventional_solved: set[str] = set()
     analogy_hops_by_problem: dict[str, tuple[AnalogyHop, ...]] = {}
     analogy_records_by_problem: dict[str, StuckStateRecord] = {}
+    generated_sources: list[GeneratedSourceRecord] = []
     for condition in build_evaluation_conditions(config):
-        if condition.name == "conventional":
-            condition_policy = None
-        else:
-            condition_policy = learned
+        condition_policy = _evaluation_policy(condition.name, config, generator, learned)
         shuffled_sources: dict[str, tuple[AnalogyHop, ...]] = {}
         if condition.name == "shuffled_analogy" and config.analogy.enabled:
             assignments = shuffle_analogy_assignments(
@@ -673,6 +714,7 @@ def evaluate_direct_rescue(
                 condition.name,
                 condition_policy,
                 analogy_hops=shuffled_sources.get(item.id),
+                generated_sources=tuple(generated_sources),
                 iteration_sink=_live_iteration_sink(
                     writer, epoch=0, phase=condition.name, problem_id=item.id
                 ),
@@ -711,6 +753,14 @@ def evaluate_direct_rescue(
                             for attempt in first.attempts
                         ),
                     )
+        if condition.name == "generated_learned":
+            generated_sources.extend(
+                GeneratedSourceRecord(episode.problem_id, iteration.state_before.expression,
+                                      iteration.need, iteration.source)
+                for episode in episodes for rollout in episode.rollouts
+                if rollout.analogy_trace is not None
+                for iteration in rollout.analogy_trace.iterations if iteration.source is not None
+            )
         for episode in episodes:
             _persist_episode(writer, episode, 0, condition.name)
         solved_ids = {item.problem_id for item in episodes if item.completed}
@@ -767,12 +817,14 @@ def _summarize_condition(
         for attempt in lean_attempts
     )
     successors = sum(
-        iteration.actual_transition is not None for iteration in iterations
+        any(attempt.result.status is TacticStatus.ACCEPTED and attempt.discarded is None
+            for attempt in iteration.attempts)
+        for iteration in iterations
     )
     repair_attempts = sum(
-        bool(iteration.repair_generation_attempts) for iteration in iterations
+        bool(getattr(iteration, "repair_generation_attempts", ())) for iteration in iterations
     )
-    repair_successes = sum(iteration.repair_succeeded for iteration in iterations)
+    repair_successes = sum(getattr(iteration, "repair_succeeded", False) for iteration in iterations)
     surprise_observations = sum(
         iteration.surprise is not None for iteration in iterations
     )
@@ -838,6 +890,7 @@ def _execute_problem(
     analogy_hops: tuple[AnalogyHop, ...] | None = None,
     initial_state: SymbolicState | None = None,
     iteration_sink: Callable[[str, Any], None] | None = None,
+    generated_sources: tuple[GeneratedSourceRecord, ...] = (),
 ) -> ProblemEpisode:
     collector = RolloutCollector()
     cancellation = _DeadlineCancellation(
@@ -869,6 +922,9 @@ def _execute_problem(
                     policy,
                     analogy_hops=analogy_hops,
                     iteration_sink=iteration_sink,
+                    condition=(phase if phase in {"analogy_loop", "shuffled_analogy"} or phase.startswith("generated_") else None),
+                    generated_sources=generated_sources,
+                    problem_id=problem.id,
                 )
             else:
                 rescue = DirectRescueRunner(
@@ -930,12 +986,13 @@ def _execute_problem(
         )
         rewarded: list[RescueRollout] = []
         samples: list[TrainingSample] = []
-        if isinstance(rescue, AnalogyLoopRunner):
+        if isinstance(rescue, (AnalogyLoopRunner, GeneratedDomainAnalogyLoopRunner)):
             for rollout, actions in rescue.drain_trajectories():
                 reward = verifier_reward(rollout, weights).total
                 record = with_reward(rollout, reward)
                 rewarded.append(record)
-                if actions and rollout_is_trainable(rollout.termination):
+                if (actions and rollout_is_trainable(rollout.termination)
+                        and (not phase.startswith("generated_") or phase == "generated_learned")):
                     samples.extend(
                         discounted_iteration_samples(
                             rollout.analogy_trace,
@@ -992,8 +1049,15 @@ def _new_analogy_runner(
     *,
     analogy_hops: tuple[AnalogyHop, ...] | None = None,
     iteration_sink: Callable[[str, Any], None] | None = None,
-) -> AnalogyLoopRunner:
+    condition: str | None = None,
+    generated_sources: tuple[GeneratedSourceRecord, ...] = (),
+    problem_id: str = "",
+) -> AnalogyLoopRunner | GeneratedDomainAnalogyLoopRunner:
     """Compose the readable loop from the same frozen model and policy head."""
+    if config.analogy.strategy == "generated_domain" and condition not in {"analogy_loop", "shuffled_analogy"}:
+        return _new_generated_runner(config, generator, adapter, policy,
+            condition=condition or "generated_learned", iteration_sink=iteration_sink,
+            generated_sources=generated_sources, problem_id=problem_id)
     representations: dict[int, ProofRepresentation] = {}
     model_calls = 0
     lean_calls = 0
@@ -1119,6 +1183,66 @@ def _new_analogy_runner(
         tactic_reranker=(rerank_tactics if config.analogy.rerank_tactics else None),
         tactic_repairer=tactic_generator,
         iteration_sink=record_iteration,
+    )
+
+
+def _new_generated_runner(config, generator, adapter, policy, *, condition,
+                          iteration_sink, generated_sources, problem_id):
+    if condition not in {"generated_unsteered", "generated_random", "generated_learned", "generated_shuffled"}:
+        raise ValueError(f"unknown generated evaluation condition: {condition}")
+    lean_budget = min(config.analogy.max_lean_calls, config.rl.max_rescue_verifier_calls)
+
+    def build_observation(observation, structure, context):
+        transition = None
+        if observation.previous_state is not None:
+            transition = json.dumps({name: getattr(observation, name) for name in (
+                "previous_state", "current_state", "last_tactic", "predicted_transition",
+                "actual_transition", "surprise", "surprise_delta",
+            )}, ensure_ascii=False, sort_keys=True)
+        diagnostic_context = replace(context, failed_tactics=tuple(
+            f"{tactic}: {'; '.join(diagnostics)}" for tactic, diagnostics in observation.rejected_tactics
+        ))
+        return build_policy_representation(
+            diagnostic_context, structure, generator, config.model.hidden_layer,
+            previous_state=observation.previous_state, last_tactic=observation.last_tactic,
+            verified_transition=transition, latest_source=observation.latest_source,
+            latest_alignment=observation.latest_alignment, latest_transfer=observation.latest_transfer,
+            scalar_features=(
+                observation.iteration_index / max(config.analogy.max_iterations - 1, 1),
+                observation.remaining_model_calls / config.analogy.max_model_calls,
+                observation.remaining_lean_calls / lean_budget,
+                float(observation.repeated_state),
+            ),
+        )
+
+    def sample_action(observation, index):
+        parameter = next(policy.parameters())
+        if condition == "generated_unsteered":
+            zero = parameter.new_zeros(())
+            return PolicyAction(parameter.new_zeros(generator.hidden_size), zero, zero)
+        rng = torch.Generator(device=parameter.device).manual_seed(config.run.seed + index)
+        return policy.sample(observation, rng)
+
+    options = dict(hidden_layer=config.model.hidden_layer, base_seed=config.run.seed, max_repair_calls=1)
+    return GeneratedDomainAnalogyLoopRunner(
+        structure_builder=adapter.proof_structure_for,
+        observation_builder=build_observation, action_sampler=sample_action,
+        source_generator=SourceAnalogyGenerator(generator, **options),
+        alignment_generator=AlignmentGenerator(generator, **options),
+        transfer_generator=ProofTransferGenerator(generator, **options),
+        tactic_generator=TransferredTacticGenerator(generator, **options),
+        transition_comparator=lambda before, predicted, actual: compare_transitions(
+            before, predicted, actual, generator, config.analogy.transition_embedding_layer),
+        controller=SurpriseController(SurpriseConfig(
+            config.analogy.min_iterations, config.analogy.max_iterations,
+            config.analogy.surprise_threshold, config.analogy.surprise_patience,
+            config.analogy.min_surprise_improvement, config.analogy.improvement_patience)),
+        tactics_per_iteration=config.analogy.tactics_per_iteration,
+        max_model_calls=config.analogy.max_model_calls, max_lean_calls=lean_budget,
+        structure_lean_cost=1, iteration_sink=iteration_sink, base_seed=config.run.seed,
+        source_transform=(lambda source, need, observation: shuffle_generated_source(
+            source, need, observation, generated_sources, problem_id=problem_id,
+            seed=config.run.seed)) if condition == "generated_shuffled" else None,
     )
 
 

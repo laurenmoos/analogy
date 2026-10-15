@@ -268,9 +268,14 @@ class GeneratedDomainAnalogyLoopRunner:
                             accepted += (last_tactic,)
                             latest_successor = finished.successor
                             seen.add(proof_state_fingerprint(current.expression))
+                            # The next observation and controller compare the
+                            # most recent verified transition, including a
+                            # finisher that closes only part of the obligation.
+                            predicted = finished.attempts[-1].proposal.predicted_state
+                            actual = current.expression
                     if not cancellation.is_cancelled() and completed is None:
                         active_stage = "comparison"
-                        comparison = self.transition_comparator(before.expression, predicted, actual)
+                        comparison = self.transition_comparator(previous, predicted, actual)
                 active_stage = "controller"
                 decision = self.controller.decide(controller_state, SurpriseObservation(
                     index, None if comparison is None else comparison.surprise,

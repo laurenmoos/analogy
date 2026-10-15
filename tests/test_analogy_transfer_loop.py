@@ -120,6 +120,95 @@ def test_conventional_finisher_closes_before_low_surprise_stop_or_new_analogy():
     assert outcome.rollouts[0].analogy_trace.stop_reason is StopReason.COMPLETE
 
 
+def test_partial_finisher_refreshes_transition_surprise_and_controller_before_next_action():
+    raw = outputs()
+    raw[6] = json.dumps(dict(json.loads(raw[6]), active_subgoal="E"))
+    raw[7] = json.dumps(dict(json.loads(raw[7]), predicted_state="F"))
+    result, backend, observations = runner(raw, min_iterations=1)
+    comparisons = []
+
+    def compare(before, predicted, actual):
+        comparisons.append((before, predicted, actual))
+        comparison = compare_transitions(before, predicted, actual, Encoder(), -1)
+        # Partial finishing leaves an unexpected open goal. The stale analogy
+        # transition would instead appear converged and stop before action two.
+        return replace(comparison, surprise=0.8 if predicted == "no goals" else 0.1)
+
+    class PartialFinisher(Evaluator):
+        def evaluate_at(self, current, candidate):
+            target = None
+            if current.id == "D" and candidate.source == "assumption":
+                target = state("E")
+            elif current.id == "E" and candidate.source != "assumption":
+                target = state("F")
+            if target is None:
+                return super().evaluate_at(current, candidate)
+            self.calls.append((current.expression, candidate.source))
+            checked = TacticResult(candidate, TacticStatus.ACCEPTED, state=target)
+            return TacticEvaluation(checked, successor=SearchNode(target, 1.0, current.id, candidate.source))
+
+    result.transition_comparator = compare
+    outcome = run(result, PartialFinisher())
+    assert len(observations) == 2
+    second = observations[1]
+    assert (second.previous_state, second.current_state, second.last_tactic) == (
+        "h : D\n⊢ D", "h : E\n⊢ E", "assumption",
+    )
+    assert second.predicted_transition == "no goals"
+    assert second.actual_transition == "h : E\n⊢ E"
+    assert second.accepted_tactics == ("apply h0.mpr", "assumption")
+    assert second.latest_transfer.transfer_id == "transfer-0"
+    assert second.surprise == 0.8
+    assert second.surprise_delta is None
+    assert second.repeated_state is False
+    assert (second.remaining_model_calls, second.remaining_lean_calls) == (16, 4)
+    assert comparisons == [
+        ("h : D\n⊢ D", "no goals", "h : E\n⊢ E"),
+        ("h : E\n⊢ E", "F", "h : F\n⊢ F"),
+    ]
+    trace = outcome.rollouts[0].analogy_trace
+    assert trace.iterations[0].decision.continue_loop
+    assert trace.iterations[0].decision.state.values == (0.8,)
+    assert trace.iterations[0].tactic_plan.predicted_state == "D"
+    assert trace.iterations[0].attempts[-1].stage == "conventional_finisher"
+    assert trace.iterations[1].surprise_delta == pytest.approx(0.7)
+    assert trace.iterations[1].decision.state.values == (0.8, 0.1)
+    assert outcome.successor.state.id == "F"
+    assert (trace.model_calls, trace.lean_calls, len(backend.calls)) == (8, 6, 8)
+
+
+def test_repeated_finisher_preserves_the_last_novel_transition_for_next_observation():
+    result, _, observations = runner()
+    comparisons = []
+
+    def compare(before, predicted, actual):
+        comparisons.append((before, predicted, actual))
+        return compare_transitions(before, predicted, actual, Encoder(), -1)
+
+    class RepeatedFinisher(Evaluator):
+        def evaluate_at(self, current, candidate):
+            if current.id == "D" and candidate.source == "assumption":
+                checked = TacticResult(candidate, TacticStatus.ACCEPTED, state=state("C"))
+                return TacticEvaluation(checked, successor=SearchNode(state("C"), 1.0, current.id, "assumption"))
+            return super().evaluate_at(current, candidate)
+
+    result.transition_comparator = compare
+    outcome = run(result, RepeatedFinisher())
+    second = observations[1]
+    assert (second.previous_state, second.current_state, second.last_tactic) == (
+        "h : C\n⊢ C", "h : D\n⊢ D", "apply h0.mpr",
+    )
+    assert (second.predicted_transition, second.actual_transition) == ("D", "h : D\n⊢ D")
+    assert second.accepted_tactics == ("apply h0.mpr",)
+    assert second.repeated_state is True
+    assert second.surprise == 0.0
+    assert comparisons[0] == ("h : C\n⊢ C", "D", "h : D\n⊢ D")
+    first = outcome.rollouts[0].analogy_trace.iterations[0]
+    assert first.attempts[-1].discarded.reason is DiscardReason.REPEATED_STATE
+    assert first.decision.continue_loop
+    assert first.decision.state.values == (0.0,)
+
+
 @pytest.mark.parametrize("stage", range(4))
 def test_failed_stage_records_repairs_and_never_calls_downstream(stage):
     result, backend, _ = runner(outputs()[:stage] + ["invalid", "still invalid"])

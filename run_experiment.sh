@@ -30,7 +30,12 @@ fi
 exec "$PYTHON" "$SCRIPT_DIR/scripts/standalone_analogy_recovery.py" \
     --poetry-limit 8 \
     --physics-limit 8 \
+    --device mps \
     --retrieval-count 4 \
+    --structural-shortlist-size 16 \
+    --pair-margin-threshold 0.0 \
+    --max-batch-tokens 4096 \
+    --rescue-count 2 \
     --candidate-count 4 \
     --max-expansions 8 \
     --max-verifier-calls 32 \

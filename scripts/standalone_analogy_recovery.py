@@ -592,6 +592,7 @@ PROOF_NEED_PROMPT_VERSION = "proof-need-v1"
 TRANSFORMATION_PROMPT_VERSION = "transformation-v1"
 RANKING_PROMPT_VERSION = "ranking-v1"
 PAIR_SCORING_PROMPT_VERSION = "pair-scoring-v1"
+TACTIC_SCORING_PROMPT_VERSION = "tactic-scoring-v1"
 RESCUE_PROMPT_VERSION = "rescue-v1"
 PROMPT_VERSIONS = MappingProxyType(
     {
@@ -600,6 +601,7 @@ PROMPT_VERSIONS = MappingProxyType(
         "transformation": TRANSFORMATION_PROMPT_VERSION,
         "ranking": RANKING_PROMPT_VERSION,
         "pair_scoring": PAIR_SCORING_PROMPT_VERSION,
+        "tactic_scoring": TACTIC_SCORING_PROMPT_VERSION,
         "rescue": RESCUE_PROMPT_VERSION,
     }
 )
@@ -741,7 +743,8 @@ def tactic_scoring_prompt(
     return (
         Message(
             "system",
-            "Score the supplied completion as the next Lean 4 tactic. The proof state "
+            f"Prompt {TACTIC_SCORING_PROMPT_VERSION}. Score the supplied completion "
+            "as the next Lean 4 tactic. The proof state "
             "and any retrieved cross-domain transformations are fixed context.",
         ),
         Message(
@@ -1029,6 +1032,29 @@ class _ThinkingCompleteStoppingCriteria:
         return "</think>" in text
 
 
+def resolve_model_device(torch_module: Any, requested: str) -> str:
+    normalized = _nonblank(requested, "model device").casefold()
+    if normalized == "auto":
+        if torch_module.cuda.is_available():
+            return "cuda"
+        mps = getattr(getattr(torch_module, "backends", None), "mps", None)
+        if mps is not None and mps.is_built() and mps.is_available():
+            return "mps"
+        return "cpu"
+    if normalized == "cuda":
+        if not torch_module.cuda.is_available():
+            raise ModelConfigurationError("configured cuda device is unavailable")
+        return "cuda"
+    if normalized == "mps":
+        mps = getattr(getattr(torch_module, "backends", None), "mps", None)
+        if mps is None or not mps.is_built() or not mps.is_available():
+            raise ModelConfigurationError("configured mps device is unavailable")
+        return "mps"
+    if normalized == "cpu":
+        return "cpu"
+    raise ModelConfigurationError(f"unknown model device {requested!r}")
+
+
 class QwenModel:
     """Frozen local Qwen boundary for deterministic generation and embeddings."""
 
@@ -1072,20 +1098,7 @@ class QwenModel:
             import transformers
         except ImportError as error:
             raise ModelConfigurationError("torch and transformers are required") from error
-        normalized = device.casefold()
-        if normalized == "auto":
-            if torch.cuda.is_available():
-                normalized = "cuda"
-            elif torch.backends.mps.is_available():
-                normalized = "mps"
-            else:
-                normalized = "cpu"
-        if normalized not in {"cpu", "cuda", "mps"}:
-            raise ModelConfigurationError(f"unknown model device {device!r}")
-        if normalized == "cuda" and not torch.cuda.is_available():
-            raise ModelConfigurationError("configured cuda device is unavailable")
-        if normalized == "mps" and not torch.backends.mps.is_available():
-            raise ModelConfigurationError("configured mps device is unavailable")
+        normalized = resolve_model_device(torch, device)
         tokenizer = transformers.AutoTokenizer.from_pretrained(name)
         model = transformers.AutoModelForCausalLM.from_pretrained(name, torch_dtype="auto")
         model.to(normalized)
@@ -1754,8 +1767,12 @@ def _model_generate(
 
 
 def _parse_rescue_candidates(
-    text: str, shared_candidates: tuple[str, ...]
+    text: str, shared_candidates: tuple[str, ...], limit: int
 ) -> tuple[str, ...]:
+    if not 0 <= limit <= 2:
+        raise ExperimentError("rescue candidate limit must be between zero and two")
+    if limit == 0:
+        return ()
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError) as error:
@@ -1777,7 +1794,7 @@ def _parse_rescue_candidates(
         filtered.append(canonical)
     if not filtered:
         return ()
-    return parse_candidates(json.dumps(filtered), top_k=2)
+    return parse_candidates(json.dumps(filtered), top_k=limit)
 
 
 def generate_rescue_candidates(
@@ -1790,6 +1807,7 @@ def generate_rescue_candidates(
     hits: tuple[RetrievalHit, ...],
     *,
     seed: int,
+    rescue_count: int = 2,
     rescue_max_new_tokens: int = 32,
     rescue_timeout_seconds: float = 20.0,
 ) -> RescueDecision:
@@ -1811,7 +1829,7 @@ def generate_rescue_candidates(
         max_new_tokens=rescue_max_new_tokens,
     )
     return RescueDecision(
-        _parse_rescue_candidates(generated, shared_candidates), True, None
+        _parse_rescue_candidates(generated, shared_candidates, rescue_count), True, None
     )
 
 
@@ -3228,6 +3246,14 @@ class ExperimentConfig:
     device: str = "auto"
     max_new_tokens: int = 256
     model_timeout_seconds: float = 60.0
+    structural_shortlist_size: int = 16
+    pair_margin_threshold: float = 0.0
+    max_batch_tokens: int = 4096
+    rescue_count: int = 2
+    rescue_max_new_tokens: int = 32
+    rescue_timeout_seconds: float = 20.0
+    counterbalance_conditions: bool = True
+    capture_diagnostic_embeddings: bool = False
     input_manifest: Mapping[str, Any] = field(default_factory=dict)
     lean_configuration: Mapping[str, Any] = field(default_factory=dict)
 
@@ -3249,6 +3275,34 @@ class ExperimentConfig:
             raise ExperimentError("retrieval conditions require transitions")
         if self.retrieval_count <= 0:
             raise ExperimentError("retrieval_count must be positive")
+        if (
+            isinstance(self.structural_shortlist_size, bool)
+            or not isinstance(self.structural_shortlist_size, int)
+            or self.structural_shortlist_size <= 0
+        ):
+            raise ExperimentError("structural shortlist size must be positive")
+        if self.structural_shortlist_size < self.retrieval_count:
+            raise ExperimentError("structural shortlist size must be at least retrieval count")
+        if not math.isfinite(self.pair_margin_threshold):
+            raise ExperimentError("pair margin threshold must be finite")
+        if (
+            isinstance(self.max_batch_tokens, bool)
+            or not isinstance(self.max_batch_tokens, int)
+            or self.max_batch_tokens <= 0
+        ):
+            raise ExperimentError("max batch tokens must be positive")
+        if (
+            isinstance(self.rescue_count, bool)
+            or not isinstance(self.rescue_count, int)
+            or not 0 <= self.rescue_count <= 2
+        ):
+            raise ExperimentError("rescue count must be between zero and two")
+        if self.rescue_max_new_tokens <= 0 or self.rescue_timeout_seconds <= 0:
+            raise ExperimentError("rescue token and timeout budgets must be positive")
+        if not isinstance(self.counterbalance_conditions, bool) or not isinstance(
+            self.capture_diagnostic_embeddings, bool
+        ):
+            raise ExperimentError("experiment feature flags must be booleans")
         if any(condition is not Condition.NONE for condition in conditions) and self.retrieval_count > len(transitions):
             raise ExperimentError("retrieval_count exceeds transition count")
         _nonblank(self.model_name, "model_name")
@@ -3443,11 +3497,19 @@ def _run_config_payload(
     model_revision: str | None = None,
     operational_failures: Sequence[Mapping[str, Any]] = (),
     transformation_index: Mapping[str, Any] | None = None,
+    model_provenance: Mapping[str, Any] | None = None,
+    warmup_status: Mapping[str, Any] | None = None,
+    condition_orders: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     return {
         "run_complete": complete,
         "problems": [_jsonable(item) for item in config.problems],
         "conditions": [item.value for item in config.conditions],
+        "condition_labels": {
+            "none": "no_retrieval_v1",
+            "random": "structurally_matched_random_v1",
+            "analogy": "pair_scored_analogy_v1",
+        },
         "seeds": list(config.seeds),
         "transition_count": len(config.transitions),
         "transition_counts": {
@@ -3485,8 +3547,29 @@ def _run_config_payload(
                 "separate_reasoning_and_answer_phases": True,
                 "structured_early_stop": True,
             },
+            "provenance": dict(model_provenance or {}),
         },
         "retrieval_count": config.retrieval_count,
+        "hybrid": {
+            "structural_shortlist_size": config.structural_shortlist_size,
+            "pair_margin_threshold": config.pair_margin_threshold,
+            "max_batch_tokens": config.max_batch_tokens,
+            "rescue_count": config.rescue_count,
+            "rescue_max_new_tokens": config.rescue_max_new_tokens,
+            "rescue_timeout_seconds": config.rescue_timeout_seconds,
+            "counterbalance_conditions": config.counterbalance_conditions,
+            "capture_diagnostic_embeddings": config.capture_diagnostic_embeddings,
+        },
+        "representation_versions": {
+            "proof_signature": "proof-signature-v1",
+            "transformation_schema": TRANSFORMATION_SCHEMA_VERSION,
+            "structural_compatibility": STRUCTURAL_COMPATIBILITY_VERSION,
+            "pair_prompt": PAIR_SCORING_PROMPT_VERSION,
+            "tactic_prompt": TACTIC_SCORING_PROMPT_VERSION,
+            "rescue_prompt": RESCUE_PROMPT_VERSION,
+        },
+        "warmup": dict(warmup_status or {"status": "pending"}),
+        "condition_execution_orders": list(condition_orders),
         "transformation_index": dict(
             transformation_index
             or {
@@ -3502,6 +3585,48 @@ def _run_config_payload(
     }
 
 
+def _model_provenance(model: TextModel, config: ExperimentConfig) -> dict[str, Any]:
+    raw_model = getattr(model, "_model", None)
+    parameters = getattr(raw_model, "parameters", None)
+    dtype = None
+    sample: list[float] = []
+    frozen = True
+    if callable(parameters):
+        for parameter in parameters():
+            if dtype is None:
+                dtype = str(getattr(parameter, "dtype", "unknown"))
+            frozen = frozen and not bool(getattr(parameter, "requires_grad", False))
+            remaining = 4096 - len(sample)
+            if remaining <= 0:
+                break
+            values = parameter.detach().reshape(-1)[:remaining].to(dtype=getattr(model, "_torch").float32).cpu().tolist()
+            sample.extend(float(item) for item in values)
+    norm = math.sqrt(sum(value * value for value in sample)) if sample else None
+    raw_config = getattr(raw_model, "config", None)
+    hidden_dimension = getattr(raw_config, "hidden_size", None)
+    return {
+        "resolved_revision": model.model_revision,
+        "device": getattr(model, "_device", config.device),
+        "dtype": dtype,
+        "hidden_dimension": hidden_dimension,
+        "weights_frozen": frozen,
+        "parameter_sample_count": len(sample),
+        "first_4096_parameter_l2": norm,
+        "first_4096_parameter_l2_fingerprint": (
+            None if norm is None else sha256_text(f"{norm:.12e}")
+        ),
+    }
+
+
+def condition_execution_order(
+    conditions: tuple[Condition, ...], problem_id: str, seed: int, *, counterbalance: bool
+) -> tuple[Condition, ...]:
+    order = list(conditions)
+    if counterbalance:
+        random.Random(derived_seed(seed, problem_id, "condition-order")).shuffle(order)
+    return tuple(order)
+
+
 def run_experiment(
     config: ExperimentConfig,
     model_factory: Callable[[ExperimentConfig], TextModel],
@@ -3514,15 +3639,25 @@ def run_experiment(
     _atomic_json(output / "config.json", _run_config_payload(config, complete=False))
     model = model_factory(config)
     verifier = verifier_factory(config)
+    warmup_scores = model.score_completions(
+        (Message("user", "Unmeasured scoring warm-up."),),
+        ("assumption",),
+        max_batch_tokens=config.max_batch_tokens,
+    )
+    warmup_status = {
+        "status": "complete",
+        "completion_count": len(warmup_scores),
+        "measured": False,
+    }
+    model_provenance = _model_provenance(model, config)
     trials: list[TrialResult] = []
     index_stats: dict[str, Any] = {
         "input_count": len(config.transitions),
         "valid_count": 0,
         "exclusions": {},
     }
-    condition_order = [Condition.NONE] + [
-        condition for condition in config.conditions if condition is not Condition.NONE
-    ]
+    condition_orders: list[dict[str, Any]] = []
+    fallback_counts: dict[str, int] = {}
 
     with (
         JsonlSink(output / "transitions.jsonl") as transition_sink,
@@ -3543,7 +3678,7 @@ def run_experiment(
                 model,
                 config.cache_dir,
                 config.hidden_layer,
-                capture_diagnostic_embeddings=False,
+                capture_diagnostic_embeddings=config.capture_diagnostic_embeddings,
             )
             index_stats = {
                 "input_count": len(config.transitions),
@@ -3553,7 +3688,14 @@ def run_experiment(
         else:
             index = ()
         pool_store = CandidatePoolStore(model)
-        ranker = ConditionRanker(model, index, config.retrieval_count, config.hidden_layer)
+        ranker = HybridConditionRanker(
+            model=model,
+            index=index,
+            retrieval_count=config.retrieval_count,
+            structural_shortlist_size=config.structural_shortlist_size,
+            pair_margin_threshold=config.pair_margin_threshold,
+            max_batch_tokens=config.max_batch_tokens,
+        )
         for item in index:
             transition_sink.write(
                 {
@@ -3577,13 +3719,30 @@ def run_experiment(
                 }
             )
         for seed in config.seeds:
-            for condition in condition_order:
-                for problem in config.problems:
+            for problem in config.problems:
+                order = condition_execution_order(
+                    config.conditions,
+                    problem.id,
+                    seed,
+                    counterbalance=config.counterbalance_conditions,
+                )
+                condition_orders.append(
+                    {
+                        "problem_id": problem.id,
+                        "seed": seed,
+                        "conditions": [condition.value for condition in order],
+                    }
+                )
+                for condition in order:
                     trial_attempts: list[AttemptRecord] = []
 
                     def record_attempt(record: AttemptRecord) -> None:
                         trial_attempts.append(record)
                         attempt_sink.write(record)
+                        if record.fallback_reason:
+                            fallback_counts[record.fallback_reason] = (
+                                fallback_counts.get(record.fallback_reason, 0) + 1
+                            )
 
                     result = search_problem(
                         problem,
@@ -3594,15 +3753,22 @@ def run_experiment(
                         verifier,
                         config.search_limits,
                         record_attempt,
-                        rescue_generator=lambda **kwargs: generate_rescue_candidates(
-                            model,
-                            kwargs["condition"],
-                            kwargs["problem"],
-                            kwargs["state"],
-                            kwargs["signature"],
-                            kwargs["shared_candidates"],
-                            kwargs["hits"],
-                            seed=kwargs["seed"],
+                        rescue_generator=(
+                            None
+                            if config.rescue_count == 0
+                            else lambda **kwargs: generate_rescue_candidates(
+                                model,
+                                kwargs["condition"],
+                                kwargs["problem"],
+                                kwargs["state"],
+                                kwargs["signature"],
+                                kwargs["shared_candidates"],
+                                kwargs["hits"],
+                                seed=kwargs["seed"],
+                                rescue_count=config.rescue_count,
+                                rescue_max_new_tokens=config.rescue_max_new_tokens,
+                                rescue_timeout_seconds=config.rescue_timeout_seconds,
+                            )
                         ),
                     )
                     reference = config.reference_proofs[problem.id]
@@ -3621,6 +3787,9 @@ def run_experiment(
                     )
                     trial_sink.write(finalized)
                     trials.append(finalized)
+                    if finalized.rescue_failure:
+                        key = "rescue_failure"
+                        fallback_counts[key] = fallback_counts.get(key, 0) + 1
     expected = {
         (problem.id, seed, condition.value)
         for problem in config.problems
@@ -3632,6 +3801,14 @@ def run_experiment(
         raise ExperimentError("run did not produce exactly one result per requested trial")
     summary = summarize_trials(trials)
     summary["transformation_index"] = index_stats
+    summary["fallback_counts"] = dict(sorted(fallback_counts.items()))
+    summary["warmup"] = warmup_status
+    summary["condition_execution_orders"] = condition_orders
+    summary["model_provenance"] = model_provenance
+    summary["hybrid"] = _run_config_payload(config, complete=False)["hybrid"]
+    summary["representation_versions"] = _run_config_payload(config, complete=False)[
+        "representation_versions"
+    ]
     _atomic_json(output / "summary.json", summary)
     failures = summary["operational_failures"]
     complete = bool(summary["run_complete"])
@@ -3643,6 +3820,9 @@ def run_experiment(
             model_revision=model.model_revision,
             operational_failures=failures,
             transformation_index=index_stats,
+            model_provenance=model_provenance,
+            warmup_status=warmup_status,
+            condition_orders=condition_orders,
         ),
     )
     if not complete:
@@ -3689,6 +3869,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poetry-limit", type=int, default=64)
     parser.add_argument("--physics-limit", type=int, default=64)
     parser.add_argument("--retrieval-count", type=int, default=4)
+    parser.add_argument("--structural-shortlist-size", type=int, default=16)
+    parser.add_argument("--pair-margin-threshold", type=float, default=0.0)
+    parser.add_argument("--max-batch-tokens", type=int, default=4096)
+    parser.add_argument("--rescue-count", type=int, default=2)
+    parser.add_argument("--rescue-max-new-tokens", type=int, default=32)
+    parser.add_argument("--rescue-timeout", type=float, default=20.0)
+    parser.add_argument("--diagnostic-embeddings", action="store_true")
+    parser.add_argument(
+        "--no-counterbalance-conditions",
+        action="store_false",
+        dest="counterbalance_conditions",
+        default=True,
+    )
     parser.add_argument("--candidate-count", type=int, default=8)
     parser.add_argument("--max-expansions", type=int, default=32)
     parser.add_argument("--max-verifier-calls", type=int, default=256)
@@ -3696,7 +3889,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lean-timeout", type=float, default=10.0)
     parser.add_argument("--lake-executable", default="lake")
     parser.add_argument("--model-name", default="Qwen/Qwen3-8B")
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--hidden-layer", type=int, default=-1)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--model-timeout", type=float, default=60.0)
@@ -3749,6 +3942,10 @@ def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str,
         (args.poetry_limit, "poetry-limit"),
         (args.physics_limit, "physics-limit"),
         (args.retrieval_count, "retrieval-count"),
+        (args.structural_shortlist_size, "structural-shortlist-size"),
+        (args.max_batch_tokens, "max-batch-tokens"),
+        (args.rescue_max_new_tokens, "rescue-max-new-tokens"),
+        (args.rescue_timeout, "rescue-timeout"),
         (args.candidate_count, "candidate-count"),
         (args.max_expansions, "max-expansions"),
         (args.max_verifier_calls, "max-verifier-calls"),
@@ -3758,6 +3955,12 @@ def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str,
         (args.model_timeout, "model-timeout"),
     ):
         _require_positive(value, field)
+    if args.structural_shortlist_size < args.retrieval_count:
+        raise ExperimentError("structural-shortlist-size must be at least retrieval-count")
+    if not math.isfinite(args.pair_margin_threshold):
+        raise ExperimentError("pair-margin-threshold must be finite")
+    if not 0 <= args.rescue_count <= 2:
+        raise ExperimentError("rescue-count must be between zero and two")
     if args.problem_ids and len(set(args.problem_ids)) != len(args.problem_ids):
         raise ExperimentError("problem selections must be unique")
     requested_conditions = args.condition or [item.value for item in Condition]
@@ -3848,6 +4051,14 @@ def _resolve_cli(args: argparse.Namespace) -> tuple[ExperimentConfig, Path, str,
         device=args.device,
         max_new_tokens=args.max_new_tokens,
         model_timeout_seconds=args.model_timeout,
+        structural_shortlist_size=args.structural_shortlist_size,
+        pair_margin_threshold=args.pair_margin_threshold,
+        max_batch_tokens=args.max_batch_tokens,
+        rescue_count=args.rescue_count,
+        rescue_max_new_tokens=args.rescue_max_new_tokens,
+        rescue_timeout_seconds=args.rescue_timeout,
+        counterbalance_conditions=args.counterbalance_conditions,
+        capture_diagnostic_embeddings=args.diagnostic_embeddings,
         input_manifest={
             "problems": _file_manifest(args.problems),
             "reference_proofs": _file_manifest(args.reference_proofs),

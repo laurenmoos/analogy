@@ -1530,6 +1530,13 @@ def test_run_experiment_writes_parseable_outputs_without_reference_leakage(tmp_p
     }
     saved_config = json.loads((output / "config.json").read_text(encoding="utf-8"))
     assert saved_config["transformation_index"] == summary["transformation_index"]
+    assert saved_config["warmup"] == {"completion_count": 1, "measured": False, "status": "complete"}
+    assert saved_config["hybrid"]["structural_shortlist_size"] == 16
+    assert saved_config["condition_labels"]["random"] == "structurally_matched_random_v1"
+    assert saved_config["representation_versions"]["tactic_prompt"] == "tactic-scoring-v1"
+    assert len(saved_config["condition_execution_orders"]) == len(problems)
+    assert summary["condition_execution_orders"] == saved_config["condition_execution_orders"]
+    assert "first_4096_parameter_l2_fingerprint" in saved_config["model"]["provenance"]
     transition_row = json.loads(
         (output / "transitions.jsonl").read_text(encoding="utf-8").splitlines()[0]
     )
@@ -1595,6 +1602,80 @@ def test_dry_run_validates_real_inputs_without_loading_model(
     assert output["transition_counts"] == {"physics": 2, "poetry": 2}
     assert output["condition_count"] == 3
     assert output["lean_available"] is True
+
+
+class FakeMpsBackend:
+    def __init__(self, built: bool, available: bool) -> None:
+        self._built = built
+        self._available = available
+
+    def is_built(self) -> bool:
+        return self._built
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class FakeTorchForDevice:
+    def __init__(self, *, mps_built: bool, mps_available: bool) -> None:
+        self.backends = SimpleNamespace(mps=FakeMpsBackend(mps_built, mps_available))
+        self.cuda = SimpleNamespace(is_available=lambda: False)
+
+
+def test_explicit_mps_does_not_fall_back_to_cpu() -> None:
+    module = load_script()
+    fake_torch = FakeTorchForDevice(mps_built=True, mps_available=False)
+
+    with pytest.raises(module.ModelConfigurationError, match="mps device is unavailable"):
+        module.resolve_model_device(fake_torch, "mps")
+
+
+def test_cli_validates_hybrid_limits() -> None:
+    module = load_script()
+    parser = module.build_parser()
+    args = parser.parse_args([
+        "--structural-shortlist-size", "8",
+        "--retrieval-count", "4",
+        "--pair-margin-threshold", "0.0",
+        "--max-batch-tokens", "4096",
+        "--rescue-count", "2",
+    ])
+
+    assert args.structural_shortlist_size == 8
+    assert args.rescue_count == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("structural_shortlist_size", 1, "shortlist"),
+        ("rescue_count", 3, "rescue"),
+        ("pair_margin_threshold", float("nan"), "finite"),
+        ("max_batch_tokens", 0, "positive"),
+    ],
+)
+def test_experiment_config_rejects_invalid_hybrid_limits(field, value, match, tmp_path: Path) -> None:
+    module = load_script()
+    kwargs = {
+        "problems": (module.Problem("p", "(P : Prop) (h : P)", "P"),),
+        "reference_proofs": {"p": module.ReferenceProof("p", ("exact h",))},
+        "transitions": tuple(
+            module.Transition(str(index), "poetry", "a", f"b{index}", {})
+            for index in range(4)
+        ),
+        "conditions": (module.Condition.NONE, module.Condition.ANALOGY),
+        "seeds": (0,),
+        "output_dir": tmp_path / "run",
+        "cache_dir": None,
+        "hidden_layer": -1,
+        "retrieval_count": 2,
+        "search_limits": module.SearchLimits(1, 1, 1.0),
+        "model_name": "fake",
+        field: value,
+    }
+
+    with pytest.raises(module.ExperimentError, match=match):
+        module.ExperimentConfig(**kwargs)
 
 
 @pytest.mark.parametrize(

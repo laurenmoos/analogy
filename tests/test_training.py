@@ -4,11 +4,13 @@ import json
 import random
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from analogy.config import load_config
+from analogy.analogy_loop import AnalogyLoopTrace
 from analogy.lean_gym.models import Problem
 from analogy.records import (
     CandidateOrigin,
@@ -39,7 +41,9 @@ from analogy.training import (
     train_direct_rescue,
     rollout_is_trainable,
     shuffle_analogy_assignments,
+    _summarize_condition,
 )
+from analogy.surprise import StopReason
 from analogy.replay import StuckStateRecord, proof_state_fingerprint
 
 
@@ -269,6 +273,92 @@ def test_shuffled_analogies_change_assignment_without_crossing_split() -> None:
     assert {item.target.problem.id for item in shuffled} == {"test-a", "test-b"}
     assert all(item.source.problem.id != item.target.problem.id for item in shuffled)
     assert all(item.source.split == item.target.split == "test" for item in shuffled)
+
+
+def test_condition_summary_reports_verifier_backed_repair_and_transition_metrics():
+    def attempt(source, status, diagnostics=()):
+        candidate = TacticCandidate(source, 1.0, CandidateOrigin.ANALOGICAL)
+        proposal = RescueProposal(candidate, "predicted")
+        state_after = SymbolicState("next", "⊢ Q", "lean4")
+        result = TacticResult(
+            candidate,
+            status,
+            state=state_after if status is TacticStatus.ACCEPTED else None,
+            proof="by exact h" if status is TacticStatus.COMPLETE else None,
+            diagnostics=diagnostics,
+        )
+        return RescueAttempt(proposal, result)
+
+    rejected = attempt("bad", TacticStatus.ERROR, ("unknown identifier",))
+    repair_error = attempt("almost", TacticStatus.ERROR, ("type mismatch",))
+    repaired_progress = attempt("fixed", TacticStatus.ACCEPTED)
+    completed = attempt("exact h", TacticStatus.COMPLETE)
+    repair_generation = GenerationAttempt(
+        1, "{}", GenerationStatus.VALID, repair=True
+    )
+
+    def trace(iteration):
+        return AnalogyLoopTrace((iteration,), StopReason.NO_SUCCESSOR, 0, 0)
+
+    rejected_iteration = SimpleNamespace(
+        attempts=(rejected,),
+        repair_generation_attempts=(),
+        repair_succeeded=False,
+        actual_transition=None,
+        surprise=None,
+    )
+    repaired_iteration = SimpleNamespace(
+        attempts=(repair_error, repaired_progress),
+        repair_generation_attempts=(repair_generation,),
+        repair_succeeded=True,
+        actual_transition="⊢ Q",
+        surprise=0.4,
+    )
+    completed_iteration = SimpleNamespace(
+        attempts=(completed,),
+        repair_generation_attempts=(),
+        repair_succeeded=False,
+        actual_transition=None,
+        surprise=None,
+    )
+    action = PolicyActionRecord(0, 0.0, 0.0, 0.0)
+    rollouts = (
+        RescueRollout(
+            "rejected", "s1", action, (rejected.proposal,), (rejected,),
+            RescueTermination.REJECTED, analogy_trace=trace(rejected_iteration),
+        ),
+        RescueRollout(
+            "progress", "s2", action,
+            (repair_error.proposal, repaired_progress.proposal),
+            (repair_error, repaired_progress), RescueTermination.PROGRESS,
+            generations=(repair_generation,), analogy_trace=trace(repaired_iteration),
+        ),
+        RescueRollout(
+            "complete", "s3", action, (completed.proposal,), (completed,),
+            RescueTermination.COMPLETE, analogy_trace=trace(completed_iteration),
+        ),
+    )
+    episodes = tuple(
+        ProblemEpisode(
+            f"p{index}",
+            rollout.termination is RescueTermination.COMPLETE,
+            (rollout,),
+            (),
+            0,
+            len(rollout.attempts),
+        )
+        for index, rollout in enumerate(rollouts)
+    )
+
+    summary = _summarize_condition("analogy_loop", episodes, set())
+
+    assert summary.lean_accepted_tactic_rate == pytest.approx(0.5)
+    assert summary.successor_rate == pytest.approx(1 / 3)
+    assert summary.diagnostic_repair_attempts == 1
+    assert summary.diagnostic_repair_successes == 1
+    assert summary.diagnostic_repair_success_rate == pytest.approx(1.0)
+    assert summary.non_null_surprise_rate == pytest.approx(1 / 3)
+    assert summary.completion_per_lean_call == pytest.approx(0.25)
 
 
 def test_training_updates_train_only_and_persists_untrainable_rollouts(tmp_path: Path) -> None:

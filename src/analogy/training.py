@@ -38,7 +38,7 @@ from .loop import (
 )
 from .model import QwenProofEncoder, QwenTacticRanker
 from .proof_views import build_proof_views, compare_transitions
-from .records import Message, SearchStatus, SymbolicState
+from .records import Message, SearchStatus, SymbolicState, TacticStatus
 from .replay import (
     JsonlStuckStateStore,
     StuckStateRecord,
@@ -142,6 +142,12 @@ class ConditionSummary:
     newly_solved_ids: tuple[str, ...] = ()
     regressed_ids: tuple[str, ...] = ()
     completion_per_lean_call: float = 0.0
+    lean_accepted_tactic_rate: float = 0.0
+    successor_rate: float = 0.0
+    diagnostic_repair_attempts: int = 0
+    diagnostic_repair_successes: int = 0
+    diagnostic_repair_success_rate: float = 0.0
+    non_null_surprise_rate: float = 0.0
     valid_generation_rate: float = 0.0
     repaired_generation_rate: float = 0.0
     mean_iteration_count: float = 0.0
@@ -722,6 +728,12 @@ def _summarize_condition(
     generations = tuple(
         generation for rollout in rollouts for generation in rollout.generations
     )
+    lean_attempts = tuple(
+        attempt for rollout in rollouts for attempt in rollout.attempts
+    )
+    iterations = tuple(
+        iteration for trace in traces for iteration in trace.iterations
+    )
     solved_ids = tuple(sorted(item.problem_id for item in episodes if item.completed))
     solved_set = set(solved_ids)
     verifier_calls = sum(item.verifier_calls for item in episodes)
@@ -744,6 +756,20 @@ def _summarize_condition(
         trace.stop_reason.value in {"surprise_converged", "improvement_stalled"}
         for trace in traces
     )
+    accepted_tactics = sum(
+        attempt.result.status in {TacticStatus.ACCEPTED, TacticStatus.COMPLETE}
+        for attempt in lean_attempts
+    )
+    successors = sum(
+        iteration.actual_transition is not None for iteration in iterations
+    )
+    repair_attempts = sum(
+        bool(iteration.repair_generation_attempts) for iteration in iterations
+    )
+    repair_successes = sum(iteration.repair_succeeded for iteration in iterations)
+    surprise_observations = sum(
+        iteration.surprise is not None for iteration in iterations
+    )
     return ConditionSummary(
         name=name,
         attempted=len(episodes),
@@ -755,6 +781,18 @@ def _summarize_condition(
         newly_solved_ids=tuple(sorted(solved_set - conventional_solved)),
         regressed_ids=tuple(sorted(conventional_solved - solved_set)),
         completion_per_lean_call=(len(solved_ids) / verifier_calls if verifier_calls else 0.0),
+        lean_accepted_tactic_rate=(
+            accepted_tactics / len(lean_attempts) if lean_attempts else 0.0
+        ),
+        successor_rate=(successors / len(iterations) if iterations else 0.0),
+        diagnostic_repair_attempts=repair_attempts,
+        diagnostic_repair_successes=repair_successes,
+        diagnostic_repair_success_rate=(
+            repair_successes / repair_attempts if repair_attempts else 0.0
+        ),
+        non_null_surprise_rate=(
+            surprise_observations / len(iterations) if iterations else 0.0
+        ),
         valid_generation_rate=(valid / generation_count if generation_count else 0.0),
         repaired_generation_rate=(repaired / generation_count if generation_count else 0.0),
         mean_iteration_count=(

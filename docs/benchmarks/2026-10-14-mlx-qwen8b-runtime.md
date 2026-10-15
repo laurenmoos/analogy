@@ -83,3 +83,24 @@ cards spent most tokens on prose. The final profile therefore keeps 256 tokens,
 allows 45 seconds for long iff prompts, and asks for a 120-word structured card
 with explicit per-field limits. This both completed the strict schema and made
 the associative stream easier to inspect.
+
+## Follow-up measurement protocol
+
+Future analogy-rescue runs report verifier-backed intermediate behavior in
+addition to solved counts:
+
+- Lean-accepted tactic rate counts only `accepted` and `complete` verifier
+  results;
+- successor rate is the fraction of analogy iterations that produce a new
+  proof state;
+- diagnostic repair attempts, successes, and success rate measure the bounded
+  Lean-feedback repair pass;
+- non-null-surprise rate shows how often a verified transition made surprise
+  measurement possible; and
+- completions per Lean call retains the end-to-end efficiency measure.
+
+The first ablation keeps the same seed, six hard problems, model, search width,
+and resource limits. Compare baseline, Lean-4 prompt only, diagnostic repair
+only, and both changes. Any later easy/medium mechanics suite must be reported
+separately from this hard suite so it supplies debugging signal without
+weakening the benchmark.

@@ -84,6 +84,71 @@ def test_prompts_cannot_receive_reference_proof() -> None:
     assert "exact hidden" not in rendered
 
 
+def valid_transformation_payload() -> dict[str, object]:
+    return {
+        "operation": "select",
+        "input_arity": "two",
+        "output_arity": "one",
+        "permutation": "none",
+        "information_flow": ["select", "discard"],
+        "focus_before": "a composite object",
+        "focus_after": "its second component",
+        "domain_neutral_summary": "Select one component from a two-part object.",
+    }
+
+
+def test_transformation_record_parser_accepts_only_exact_schema() -> None:
+    module = load_script()
+    parsed = module.parse_transformation_record(json.dumps(valid_transformation_payload()))
+
+    assert parsed.operation is module.OperationClass.SELECT
+    assert parsed.information_flow == (
+        module.InformationFlow.SELECT,
+        module.InformationFlow.DISCARD,
+    )
+
+    invalid = valid_transformation_payload()
+    invalid["domain_neutral_summary"] = "Use exact h.right."
+    invalid["extra"] = True
+    with pytest.raises(module.ModelOutputError):
+        module.parse_transformation_record(json.dumps(invalid))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.pop("operation"),
+        lambda value: value.update(operation="invented"),
+        lambda value: value.update(information_flow=["select", "select"]),
+        lambda value: value.update(information_flow=["discard", "select"]),
+        lambda value: value.update(focus_before="  "),
+        lambda value: value.update(domain_neutral_summary="Apply cases to split the object."),
+        lambda value: value.update(domain_neutral_summary="x" * 241),
+    ],
+)
+def test_transformation_record_parser_rejects_invalid_fields(mutation) -> None:
+    module = load_script()
+    payload = valid_transformation_payload()
+    mutation(payload)
+
+    with pytest.raises(module.ModelOutputError):
+        module.parse_transformation_record(json.dumps(payload))
+
+
+def test_transformation_prompt_declares_closed_schema() -> None:
+    module = load_script()
+    transition = module.Transition("p1", "poetry", "whole", "part", {})
+
+    rendered = "\n".join(
+        message.content for message in module.render_transformation_prompt(transition)
+    )
+
+    assert '"operation"' in rendered
+    assert "select_branch" in rendered
+    assert "Lean tactic" in rendered
+    assert "exactly one JSON object" in rendered
+
+
 @pytest.mark.parametrize(
     "text",
     ["{}", "[]", '["intro h", "intro h"]', '["bad\\nline"]'],
@@ -370,7 +435,16 @@ class SpyModel:
         if "proof-need-v1" in system:
             return "make a hidden element available"
         if "transformation-v1" in system:
-            return '{"transformation":"one element becomes available"}'
+            return json.dumps({
+                "operation": "select",
+                "input_arity": "two",
+                "output_arity": "one",
+                "permutation": "none",
+                "information_flow": ["select", "discard"],
+                "focus_before": "a composite object",
+                "focus_after": "one component",
+                "domain_neutral_summary": "One component becomes available from a composite object.",
+            })
         return "[0]"
 
     def embed(self, text: str, layer: int):
@@ -664,7 +738,7 @@ class ExperimentModel(SpyModel):
         if "proof-need-v1" in system:
             return "make the available element satisfy the goal"
         if "transformation-v1" in system:
-            return '{"transformation":"one element becomes available"}'
+            return json.dumps(valid_transformation_payload())
         return "[0]"
 
     def embed(self, text: str, layer: int):

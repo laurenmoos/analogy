@@ -114,6 +114,167 @@ class Condition(str, Enum):
     ANALOGY = "analogy"
 
 
+# Proof structure
+
+
+class OperationClass(str, Enum):
+    INTRODUCE = "introduce"
+    DECOMPOSE = "decompose"
+    SELECT = "select"
+    COMBINE = "combine"
+    SELECT_BRANCH = "select_branch"
+    REORDER = "reorder"
+    SPECIALIZE = "specialize"
+    REWRITE = "rewrite"
+    REUSE = "reuse"
+    REPLACE = "replace"
+    REMOVE = "remove"
+    RESTRUCTURE = "restructure"
+    UNKNOWN = "unknown"
+
+
+class Arity(str, Enum):
+    ZERO = "zero"
+    ONE = "one"
+    TWO = "two"
+    MANY = "many"
+    UNKNOWN = "unknown"
+
+
+class Permutation(str, Enum):
+    NONE = "none"
+    SWAP = "swap"
+    GENERAL = "general"
+    UNKNOWN = "unknown"
+
+
+class InformationFlow(str, Enum):
+    PRESERVE = "preserve"
+    SELECT = "select"
+    ADD = "add"
+    DISCARD = "discard"
+    RESTRUCTURE = "restructure"
+
+
+def _require_canonical_enum_tuple(
+    values: tuple[Enum, ...], enum_type: type[Enum], field_name: str, *, nonempty: bool = False
+) -> None:
+    if nonempty and not values:
+        raise ExperimentError(f"{field_name} must be nonempty")
+    if any(not isinstance(item, enum_type) for item in values):
+        raise ExperimentError(f"{field_name} contains an invalid value")
+    if len(set(values)) != len(values):
+        raise ExperimentError(f"{field_name} must contain unique values")
+    enum_order = {item: index for index, item in enumerate(enum_type)}
+    if tuple(sorted(values, key=enum_order.__getitem__)) != values:
+        raise ExperimentError(f"{field_name} must use canonical enum order")
+
+
+@dataclass(frozen=True, slots=True)
+class ExpressionShape:
+    root: str
+    children: tuple["ExpressionShape", ...] = ()
+
+    def __post_init__(self) -> None:
+        _nonblank(self.root, "expression_shape.root")
+        children = tuple(self.children)
+        if any(not isinstance(child, ExpressionShape) for child in children):
+            raise ExperimentError("expression_shape.children must contain ExpressionShape values")
+        object.__setattr__(self, "children", children)
+
+
+@dataclass(frozen=True, slots=True)
+class ProofSignature:
+    target_root: str
+    target_shape: ExpressionShape
+    hypothesis_roots: tuple[str, ...]
+    hypothesis_shapes: tuple[ExpressionShape, ...]
+    target_occurrence_paths: tuple[str, ...]
+    candidate_operations: tuple[OperationClass, ...]
+    input_arity: Arity
+    output_arity: Arity
+    permutation: Permutation
+    information_flow: tuple[InformationFlow, ...]
+    failed_operation_classes: tuple[OperationClass, ...]
+    goal_count: int
+    version: str = "proof-signature-v1"
+
+    def __post_init__(self) -> None:
+        _nonblank(self.target_root, "proof_signature.target_root")
+        _nonblank(self.version, "proof_signature.version")
+        if not isinstance(self.target_shape, ExpressionShape):
+            raise ExperimentError("proof_signature.target_shape must be an ExpressionShape")
+        hypothesis_roots = tuple(self.hypothesis_roots)
+        hypothesis_shapes = tuple(self.hypothesis_shapes)
+        occurrence_paths = tuple(self.target_occurrence_paths)
+        candidate_operations = tuple(self.candidate_operations)
+        information_flow = tuple(self.information_flow)
+        failed_operations = tuple(self.failed_operation_classes)
+        if len(hypothesis_roots) != len(hypothesis_shapes):
+            raise ExperimentError("proof signature hypothesis roots and shapes must align")
+        if hypothesis_roots != tuple(sorted(hypothesis_roots)):
+            raise ExperimentError("proof signature hypothesis roots must be sorted")
+        if occurrence_paths != tuple(sorted(set(occurrence_paths))):
+            raise ExperimentError("proof signature occurrence paths must be sorted and unique")
+        _require_canonical_enum_tuple(
+            candidate_operations, OperationClass, "proof_signature.candidate_operations", nonempty=True
+        )
+        _require_canonical_enum_tuple(
+            information_flow, InformationFlow, "proof_signature.information_flow", nonempty=True
+        )
+        _require_canonical_enum_tuple(
+            failed_operations, OperationClass, "proof_signature.failed_operation_classes"
+        )
+        if isinstance(self.goal_count, bool) or not isinstance(self.goal_count, int) or self.goal_count < 0:
+            raise ExperimentError("proof_signature.goal_count must be a nonnegative integer")
+        object.__setattr__(self, "hypothesis_roots", hypothesis_roots)
+        object.__setattr__(self, "hypothesis_shapes", hypothesis_shapes)
+        object.__setattr__(self, "target_occurrence_paths", occurrence_paths)
+        object.__setattr__(self, "candidate_operations", candidate_operations)
+        object.__setattr__(self, "information_flow", information_flow)
+        object.__setattr__(self, "failed_operation_classes", failed_operations)
+
+
+# Transformation schema
+
+
+@dataclass(frozen=True, slots=True)
+class TransformationRecord:
+    operation: OperationClass
+    input_arity: Arity
+    output_arity: Arity
+    permutation: Permutation
+    information_flow: tuple[InformationFlow, ...]
+    focus_before: str
+    focus_after: str
+    domain_neutral_summary: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation, OperationClass):
+            raise ExperimentError("transformation.operation is invalid")
+        if not isinstance(self.input_arity, Arity) or not isinstance(self.output_arity, Arity):
+            raise ExperimentError("transformation arity is invalid")
+        if not isinstance(self.permutation, Permutation):
+            raise ExperimentError("transformation.permutation is invalid")
+        information_flow = tuple(self.information_flow)
+        _require_canonical_enum_tuple(
+            information_flow, InformationFlow, "transformation.information_flow", nonempty=True
+        )
+        focus_before = " ".join(_nonblank(self.focus_before, "transformation.focus_before").split())
+        focus_after = " ".join(_nonblank(self.focus_after, "transformation.focus_after").split())
+        summary = " ".join(
+            _nonblank(self.domain_neutral_summary, "transformation.domain_neutral_summary").split()
+        )
+        if len(summary) > 240:
+            raise ExperimentError("transformation.domain_neutral_summary exceeds 240 characters")
+        if _TACTIC_WORDS.search(summary) or _TACTIC_WORDS.search(focus_before) or _TACTIC_WORDS.search(focus_after):
+            raise ExperimentError("transformation text must not contain Lean tactic names")
+        object.__setattr__(self, "information_flow", information_flow)
+        object.__setattr__(self, "focus_before", focus_before)
+        object.__setattr__(self, "focus_after", focus_after)
+        object.__setattr__(self, "domain_neutral_summary", summary)
+
+
 @dataclass(frozen=True, slots=True)
 class Message:
     role: str
@@ -233,19 +394,37 @@ def proof_need_prompt(
     )
 
 
-def transformation_prompt(transition: Transition) -> tuple[Message, ...]:
+def render_transformation_prompt(transition: Transition) -> tuple[Message, ...]:
+    operation_values = ", ".join(item.value for item in OperationClass)
+    arity_values = ", ".join(item.value for item in Arity)
+    permutation_values = ", ".join(item.value for item in Permutation)
+    flow_values = ", ".join(item.value for item in InformationFlow)
     return (
         Message(
             "system",
-            f"Prompt {TRANSFORMATION_PROMPT_VERSION}. State only the domain-neutral "
-            "structural change from before to after. Do not use Lean syntax or tactic "
-            "names. Return exactly one JSON object with key transformation.",
+            f"Prompt {TRANSFORMATION_PROMPT_VERSION}. Extract the domain-neutral "
+            "structural change from before to after. Return exactly one JSON object "
+            "with exactly these keys: \"operation\", \"input_arity\", \"output_arity\", "
+            "\"permutation\", \"information_flow\", \"focus_before\", \"focus_after\", "
+            "and \"domain_neutral_summary\". "
+            f"operation must be one of: {operation_values}. "
+            f"input_arity and output_arity must be one of: {arity_values}. "
+            f"permutation must be one of: {permutation_values}. "
+            f"information_flow must be a nonempty unique list in canonical order from: {flow_values}. "
+            "Focus values must be short noun-role phrases. The summary must be one concise "
+            "sentence of at most 240 characters. Do not use Lean syntax, Lean tactic names, "
+            "or source-specific proper nouns.",
         ),
         Message(
             "user",
             f"Domain: {transition.domain}\nBefore: {transition.before}\nAfter: {transition.after}",
         ),
     )
+
+
+def transformation_prompt(transition: Transition) -> tuple[Message, ...]:
+    """Compatibility alias for the versioned strict extraction prompt."""
+    return render_transformation_prompt(transition)
 
 
 def ranking_prompt(
@@ -346,20 +525,44 @@ def parse_candidates(text: str, top_k: int) -> tuple[str, ...]:
 _TACTIC_WORDS = re.compile(r"\b(?:intro|exact|apply|cases|constructor|simp|aesop|assumption|rfl)\b", re.IGNORECASE)
 
 
-def parse_transformation(text: str) -> str:
+def parse_transformation_record(text: str) -> TransformationRecord:
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError) as error:
         raise ModelOutputError("transformation output must be valid JSON") from error
-    if not isinstance(value, dict) or set(value) != {"transformation"}:
-        raise ModelOutputError("transformation output must contain exactly transformation")
-    transformation = value["transformation"]
-    if not isinstance(transformation, str) or not transformation.strip():
-        raise ModelOutputError("transformation must be a nonblank string")
-    normalized = " ".join(transformation.split())
-    if _TACTIC_WORDS.search(normalized):
-        raise ModelOutputError("transformation must not contain Lean tactic names")
-    return normalized
+    expected = {
+        "operation",
+        "input_arity",
+        "output_arity",
+        "permutation",
+        "information_flow",
+        "focus_before",
+        "focus_after",
+        "domain_neutral_summary",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ModelOutputError("transformation output must contain exactly the documented schema")
+    flows = value["information_flow"]
+    if not isinstance(flows, list):
+        raise ModelOutputError("transformation information_flow must be an array")
+    try:
+        return TransformationRecord(
+            operation=OperationClass(value["operation"]),
+            input_arity=Arity(value["input_arity"]),
+            output_arity=Arity(value["output_arity"]),
+            permutation=Permutation(value["permutation"]),
+            information_flow=tuple(InformationFlow(item) for item in flows),
+            focus_before=value["focus_before"],
+            focus_after=value["focus_after"],
+            domain_neutral_summary=value["domain_neutral_summary"],
+        )
+    except (ExperimentError, TypeError, ValueError) as error:
+        raise ModelOutputError(f"invalid transformation record: {error}") from error
+
+
+def parse_transformation(text: str) -> TransformationRecord:
+    """Compatibility alias for callers migrating from the free-form schema."""
+    return parse_transformation_record(text)
 
 
 def parse_ranking(text: str, candidate_count: int) -> tuple[int, ...]:
@@ -951,7 +1154,8 @@ def build_index(
             difficulty=1,
             expected_json="object",
         )
-        transformation = parse_transformation(generated)
+        transformation_record = parse_transformation_record(generated)
+        transformation = transformation_record.domain_neutral_summary
         embedding = model.embed(transformation, layer)
         item = IndexedTransition(transition, transformation, embedding, key)
         if cache_path is not None:

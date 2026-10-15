@@ -187,6 +187,29 @@ evaluation, copy the profile, set `experiment.stage: evaluate_rescue`, and set
 `rl.checkpoint` to that checkpoint; the original training profile remains an
 immutable record of the run.
 
+The generated-domain profile uses the same model and call caps, with a minimum
+of two analogy iterations (when budgets, schema validation, and completion
+permit):
+
+```bash
+PYTHONPATH=src python -m analogy --config config.mlx-8b-generated-analogy.yaml
+```
+
+It separates concrete source generation, structural alignment, tactic-free
+proof reasoning, tactic decoding, and Lean verification. Only source generation
+receives the policy delta. A verified open successor gets an `assumption`
+finishing attempt before another analogy. `legacy` remains the default strategy.
+When used with `evaluate_rescue`, the generated profile evaluates conventional
+search, learned direct rescue,
+legacy cards, and generated unsteered, random, learned, and shuffled-source
+controls with matched configured call budgets. Actual calls can differ because
+of validation failure, early completion, or unavailable compatible shuffle donors.
+
+The [five-example generated-domain smoke report](docs/benchmarks/2026-10-15-generated-domain-analogy-smoke.md)
+records the exact configuration, immutable artifacts, relative control metrics,
+and connected traces. Its held-out results concern only two iff examples;
+the additional training/validation comparisons are in-sample diagnostics.
+
 See the [quality and stream design](docs/superpowers/specs/2026-10-14-rescue-quality-and-analogy-stream-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-rescue-quality-and-analogy-stream.md).
 
 ### Post-hoc LLM audit

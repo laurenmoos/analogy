@@ -11,6 +11,100 @@ from analogy.records import BaselineProblemResult, BaselineStatus, BenchmarkRun,
 ROOT = Path(__file__).parents[1]
 
 
+def test_generated_profile_cli_writes_connected_trace(monkeypatch, tmp_path, capsys):
+    """Catch broken generated-profile composition or missing trace finalization."""
+    import json
+    from dataclasses import replace
+    import analogy.training as training
+    from analogy.config import load_config
+    from analogy.records import CandidateOrigin, TacticCandidate, TacticResult, TacticStatus
+    from test_analogy_transfer_loop import Encoder, Evaluator, outputs, state, STRUCTURE
+    from test_analogy_transfer_generation import RecordingBackend
+    from test_training import problem
+
+    profile = ROOT / "config.mlx-8b-generated-analogy.yaml"
+    assert profile.exists(), "generated-domain CLI profile is required"
+    config = load_config(profile)
+    config = replace(config, run=replace(config.run, output_dir=tmp_path),
+                     analogy=replace(config.analogy, tactics_per_iteration=1))
+
+    class Backend(RecordingBackend, Encoder):
+        hidden_size = 2
+
+    backend = Backend(outputs(1) * 2)
+    evaluator = Evaluator(finish=True)
+
+    class Adapter:
+        def initial_state(self):
+            return state()
+
+        def failed_tactics_for(self, current):
+            return ()
+
+        def proof_structure_for(self, current):
+            return STRUCTURE
+
+        def run_tactic(self, current, candidate):
+            if candidate.origin is CandidateOrigin.ORDINARY:
+                return TacticResult(candidate, TacticStatus.ERROR, diagnostics=("unknown identifier",))
+            return evaluator.evaluate_at(current, candidate).result
+
+    class Ranker:
+        def rank(self, current, goal):
+            return (TacticCandidate("ordinary_bad", 1.0, CandidateOrigin.ORDINARY),)
+
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "load_model_backend", lambda config: backend)
+    monkeypatch.setattr(cli, "LeanSubprocessVerifier", lambda root: object())
+    monkeypatch.setattr(training, "load_problems", lambda path: (
+        problem("train", "implication"), problem("validation", "not"), problem("test", "iff")))
+    monkeypatch.setattr(training, "LeanGymAdapter", lambda *args: Adapter())
+    monkeypatch.setattr(training, "QwenTacticRanker", lambda *args, **kwargs: Ranker())
+
+    assert cli.main(["--config", str(profile)]) == 0
+    run = next((tmp_path / "rescue").iterdir())
+    episodes = [json.loads(line) for line in (run / "problems.jsonl").read_text().splitlines()]
+    assert all(episode["completed"] for episode in episodes)
+    trace = (run / "readable_traces.md").read_text()
+    assert "SOURCE ANALOGY" in trace
+    assert "TRANSFERRED PROOF REASONING" in trace
+    assert "conventional_finisher" in trace
+    assert "train_rescue: 1 epochs" in capsys.readouterr().out
+
+
+def test_generated_strategy_does_not_construct_rescue_for_conventional(monkeypatch):
+    import analogy.training as training
+    from analogy.config import load_config
+    from analogy.records import CandidateOrigin, SymbolicState, TacticCandidate, TacticResult, TacticStatus
+    from test_training import problem
+
+    profile = ROOT / "config.mlx-8b-generated-analogy.yaml"
+    assert profile.exists(), "generated-domain CLI profile is required"
+    config = load_config(profile)
+
+    class Adapter:
+        def initial_state(self):
+            return SymbolicState("initial", "h : P\n⊢ P", "lean4")
+
+        def failed_tactics_for(self, current):
+            return ()
+
+        def run_tactic(self, current, candidate):
+            return TacticResult(candidate, TacticStatus.COMPLETE, proof="by assumption")
+
+    class Ranker:
+        def rank(self, current, goal):
+            return (TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),)
+
+    monkeypatch.setattr(training, "LeanGymAdapter", lambda *args: Adapter())
+    monkeypatch.setattr(training, "QwenTacticRanker", lambda *args, **kwargs: Ranker())
+    monkeypatch.setattr(training, "_new_analogy_runner", lambda *args, **kwargs:
+                        (_ for _ in ()).throw(AssertionError("unexpected analogy construction")))
+    episode = training._execute_problem(config, object(), object(), problem("ordinary", "iff"), "conventional", None)
+    assert episode.completed
+    assert not episode.rollouts
+
+
 def test_model_load_error_names_exact_identifier(monkeypatch, capsys) -> None:
     identifier = "mlx-community/Qwen3-8B-4bit"
     monkeypatch.setattr(

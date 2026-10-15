@@ -1230,11 +1230,13 @@ class ScriptedVerifier:
     def __init__(self, module, attempts):
         self.module = module
         self.attempts = attempts
+        self.timeouts = []
 
-    def initial_state(self, problem):
+    def initial_state(self, problem, timeout_seconds=None):
         return open_result(self.module, f"⊢ {problem.target}")
 
-    def try_tactic(self, problem, prefix, candidate):
+    def try_tactic(self, problem, prefix, candidate, timeout_seconds=None):
+        self.timeouts.append(timeout_seconds)
         return self.attempts.get(
             (prefix, candidate),
             self.module.LeanResult(
@@ -1358,6 +1360,9 @@ def test_rescue_verifies_candidates_after_exhaustion() -> None:
     assert result.rescue_candidates == ("exact h",)
     assert result.rescue_solved is True
     assert result.solved is True
+    assert result.verifier_call_count == 2
+    assert len(verifier.timeouts) == 2
+    assert all(timeout is not None and 0 < timeout <= 5.0 for timeout in verifier.timeouts)
 
 
 def test_rescue_timeout_preserves_completed_reranking_result() -> None:

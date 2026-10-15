@@ -3236,8 +3236,15 @@ def search_problem(
             )[:2]
             rescue_failure = rescue.failure
             for candidate in rescue_candidates:
-                result = verifier.try_tactic(
-                    problem, terminal_prefix, candidate
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("theorem timeout")
+                verifier_calls += 1
+                result = _call_with_remaining(
+                    verifier.try_tactic,
+                    problem,
+                    terminal_prefix,
+                    candidate,
+                    deadline=deadline,
                 )
                 if (
                     rescue_tactic is None
@@ -3246,6 +3253,9 @@ def search_problem(
                 ):
                     rescue_tactic = candidate
                     rescue_solved = True
+                if result.status is LeanStatus.TIMEOUT:
+                    rescue_failure = "theorem timeout"
+                    break
         except Exception as error:
             rescue_failure = f"{type(error).__name__}: {error}"
 

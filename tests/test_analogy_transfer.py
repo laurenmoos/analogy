@@ -367,3 +367,75 @@ def test_multiline_ordinary_prose_still_normalizes_without_becoming_a_command():
     result = parse_proof_reasoning_transfer(json.dumps(transfer_payload), need=proof_need(),
                                           alignment=alignment(), transfer_id="transfer-1")
     assert result.reasoning_steps == ("The derived condition and its negation yield a contradiction.",)
+
+
+def pinned_negation_structure():
+    # NotIntro/5: B → S, ¬S ⊢ ¬B. Atom shapes intentionally omit names.
+    atom = shape("atom")
+    return structure(shape("not", atom), shape("implication", atom, atom), shape("not", atom))
+
+
+def pinned_biconditional_structure():
+    # IffIntro/5: the same nested connective shapes occur on distinct atoms.
+    # Only Lean's explicit `target` marker denotes a matching hypothesis.
+    atom = shape("atom")
+    negated = shape("not", atom)
+    nested = shape("iff", shape("not", shape("implication",
+        shape("and", shape("implication", atom, shape("or", atom, negated)),
+              shape("implication", shape("or", atom, atom), negated)),
+        shape("implication", atom, atom))),
+        shape("and", atom, shape("and", atom, negated)))
+    return structure(nested, shape("iff", atom, atom), nested)
+
+
+@pytest.mark.parametrize("proof_structure,active_subgoal,operation,role,input_arity,flow", [
+    (pinned_negation_structure(), "¬B", OperationClass.INTRODUCE,
+     "introduced_assumption", Arity.ONE, (InformationFlow.ADD,)),
+    (pinned_biconditional_structure(),
+     "¬((A → C ∨ ¬L) ∧ (L ∨ A → ¬C) → (L → C)) ↔ A ∧ C ∧ ¬L",
+     OperationClass.COMBINE, "biconditional_constructor", Arity.TWO,
+     (InformationFlow.ADD, InformationFlow.RESTRUCTURE)),
+])
+def test_pinned_not_and_iff_goals_derive_a_structural_need_that_can_align(
+    proof_structure, active_subgoal, operation, role, input_arity, flow,
+):
+    need = derive_proof_need(proof_structure, active_subgoal)
+    assert need.operation is operation
+    assert need.proof_roles == ("active_subgoal", role)
+    assert need.input_arity is input_arity
+    assert need.output_arity is Arity.ONE
+    assert need.information_flow == flow
+    assert need.permutation is Permutation.NONE
+
+    payload = valid_alignment_payload()
+    payload["mapping"]["shelved wheel"] = role
+    aligned = parse_alignment(json.dumps(payload), source=source_analogy(), need=need,
+                              alignment_id="constructor-alignment")
+    assert aligned.mapping == (("requested wheel", "active_subgoal"), ("shelved wheel", role))
+
+
+@pytest.mark.parametrize("target", [shape("not", shape("atom")),
+                                    shape("iff", shape("atom"), shape("atom"))])
+@pytest.mark.parametrize("hypothesis,operation,role", [
+    (shape("target"), OperationClass.REUSE, "matching_hypothesis"),
+    (shape("equality", shape("atom"), shape("atom")), OperationClass.REWRITE, "equality_hypothesis"),
+    (shape("and", shape("atom"), shape("target")), OperationClass.SELECT, "structured_hypothesis"),
+    (shape("implication", shape("atom"), shape("target")), OperationClass.SPECIALIZE, "conditional_hypothesis"),
+])
+def test_not_and_iff_structural_fallbacks_preserve_existing_operation_precedence(
+    target, hypothesis, operation, role,
+):
+    need = derive_proof_need(structure(target, hypothesis), "private_proposition")
+    assert need.operation is operation
+    assert need.proof_roles == ("active_subgoal", role)
+
+
+@pytest.mark.parametrize("target,operation,role", [
+    (shape("not", shape("atom")), OperationClass.INTRODUCE, "introduced_assumption"),
+    (shape("iff", shape("atom"), shape("atom")), OperationClass.COMBINE, "biconditional_constructor"),
+])
+def test_target_constructor_roles_do_not_require_or_fabricate_hypotheses(target, operation, role):
+    need = derive_proof_need(structure(target), "private_proposition")
+    assert need.operation is operation
+    assert need.proof_roles == ("active_subgoal", role)
+    assert all("hypothesis" not in declared for declared in need.proof_roles)

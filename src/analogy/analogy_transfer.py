@@ -491,6 +491,19 @@ def derive_proof_need(structure: ProofStructure, active_subgoal: str, *,
         flow = (InformationFlow.PRESERVE, InformationFlow.SELECT)
         before, after = "conditional resource", "resource for the required outcome"
         summary = "Supply the input needed by an available conditional resource."
+    # These target constructors extend the previously unknown cases without
+    # overriding reuse, rewriting, or other existing hypothesis-based choices.
+    elif root == "not":
+        operation, role = OperationClass.INTRODUCE, "introduced_assumption"
+        flow = (InformationFlow.ADD,)
+        before, after = "negated requirement", "local assumed input and impossible outcome"
+        summary = "Expose the negated input and derive an impossible outcome."
+    elif root == "iff":
+        operation, role = OperationClass.COMBINE, "biconditional_constructor"
+        inputs = Arity.TWO
+        flow = (InformationFlow.ADD, InformationFlow.RESTRUCTURE)
+        before, after = "two directional requirements", "one bidirectional relation"
+        summary = "Combine the forward and reverse directions into one bidirectional relation."
 
     return ProofNeed(
         fixed_target=active_subgoal if fixed_target is None else fixed_target,

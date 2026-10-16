@@ -52,8 +52,9 @@ _OPAQUE = '{"children":[],"root":"opaque"}'
 _IDENTIFIER_TEXT = r"«[^»]+»|[^\s«»:]+"
 _IDENTIFIER = re.compile(_IDENTIFIER_TEXT)
 _DECLARATION = re.compile(
-    rf"(?P<names>(?:{_IDENTIFIER_TEXT})(?:\s+(?:{_IDENTIFIER_TEXT}))*) : (?P<proposition>.*)"
+    rf"(?P<names>(?:{_IDENTIFIER_TEXT})(?:\s+(?:{_IDENTIFIER_TEXT}))*) :(?![=]) ?(?P<proposition>.*)"
 )
+_WORD = re.compile(r"[\w']+")
 _SORT = re.compile(r"(?:Prop|Type(?:\s+\S+)?|Sort\s+\S+)")
 
 
@@ -69,7 +70,7 @@ def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], st
 
     def flush() -> None:
         if pending_names:
-            proposition = "\n".join(pending_type)
+            proposition = "\n".join(pending_type).strip()
             definition = _split_component(proposition, ":=")
             if definition is not None:
                 proposition = definition[0]
@@ -80,16 +81,14 @@ def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], st
     for line in lines[:goal_line]:
         if not line.strip() or line.startswith("case "):
             continue
-        # Lean prints declaration starts at column zero; indented lines belong
-        # to the preceding type, including any colons within that type.
-        if line[:1].isspace():
+        # A type or initializer can continue at column zero (notably let bodies).
+        # Only a new printed declaration header ends the preceding declaration.
+        declaration = _DECLARATION.fullmatch(line) if not line[:1].isspace() else None
+        if declaration is None:
             if not pending_names:
-                raise InventoryError("unattached local declaration continuation")
+                raise InventoryError(f"cannot parse local declaration {line!r}")
             pending_type.append(line)
             continue
-        declaration = _DECLARATION.fullmatch(line)
-        if declaration is None:
-            raise InventoryError(f"cannot parse local declaration {line!r}")
         flush()
         pending_names = _IDENTIFIER.findall(declaration["names"])
         pending_type = [declaration["proposition"]]
@@ -97,8 +96,6 @@ def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], st
     target_lines = [lines[goal_line].lstrip()[1:].lstrip()]
     for line in lines[goal_line + 1:]:
         if not line.strip() or line.startswith("case ") or line.lstrip().startswith("⊢"):
-            break
-        if not line[:1].isspace():
             break
         target_lines.append(line)
     target = "\n".join(target_lines)
@@ -108,20 +105,67 @@ def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], st
 
 
 def _split_component(expression: str, operator: str) -> tuple[str, str] | None:
-    """Split a printed logical connective without splitting nested terms."""
+    """Split syntax outside literals, quoted names, nested terms, and let binders.
+
+    Incomplete literals, comments, and mismatched delimiters return no split.
+    Delimiter-looking characters in a printed literal never become proof syntax.
+    """
     text = expression.strip()
-    pairs = {"(": ")", "[": "]", "{": "}", "⟨": "⟩", "«": "»"}
+    pairs = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
     stack: list[str] = []
-    for index, char in enumerate(text):
+    index = 0
+    split_at: int | None = None
+    pending_lets = 0
+    enclosing_parentheses = text.startswith("(")
+    while index < len(text):
+        char = text[index]
+        is_prime = char == "'" and index > 0 and (text[index - 1].isalnum() or text[index - 1] in "_'✝")
+        if char == '"' or (char == "'" and not is_prime):
+            quote = char
+            index += 1
+            while index < len(text) and text[index] != quote:
+                index += 2 if text[index] == "\\" else 1
+            if index >= len(text):
+                return None
+            index += 1
+            continue
+        if char == "«":
+            end = text.find("»", index + 1)
+            if end < 0:
+                return None
+            index = end + 1
+            continue
+        if text.startswith(("/-", "--"), index):
+            return None
         if char in pairs:
             stack.append(pairs[char])
-        elif stack and char == stack[-1]:
+        elif char in pairs.values():
+            if not stack or char != stack[-1]:
+                return None
             stack.pop()
-            if index == len(text) - 1 and text.startswith("(") and not stack:
-                return _split_component(text[1:-1], operator)
-        elif not stack and text.startswith(operator, index):
-            left, right = text[:index].strip(), text[index + len(operator):].strip()
-            return (left, right) if left and right else None
+            if not stack and index != len(text) - 1:
+                enclosing_parentheses = False
+        elif not stack:
+            word = _WORD.match(text, index)
+            if word is not None:
+                if word[0] == "let":
+                    pending_lets += 1
+                index = word.end()
+                continue
+            if text.startswith(":=", index) and pending_lets:
+                pending_lets -= 1
+                index += 2
+                continue
+            if split_at is None and text.startswith(operator, index):
+                split_at = index
+        index += 1
+    if stack:
+        return None
+    if split_at is not None:
+        left, right = text[:split_at].strip(), text[split_at + len(operator):].strip()
+        return (left, right) if left and right else None
+    if enclosing_parentheses:
+        return _split_component(text[1:-1], operator)
     return None
 
 

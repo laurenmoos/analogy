@@ -56,6 +56,102 @@ _DECLARATION = re.compile(
 )
 _WORD = re.compile(r"[\w']+")
 _SORT = re.compile(r"(?:Prop|Type(?:\s+\S+)?|Sort\s+\S+)")
+_ROOT_WORD = re.compile(r"[\w']+")
+_ROOT_BINDERS = {"forall", "exists", "fun", "λ", "let", "if", "match", "by", "do", "have", "show", "calc"}
+
+
+@dataclass(frozen=True, slots=True)
+class PropositionRoot:
+    text: str
+    operator: str | None = None
+    parts: tuple[str, str] | None = None
+
+
+def proposition_root(proposition: str) -> PropositionRoot:
+    """Conservatively split only a supported outer Lean connective."""
+    text = proposition.strip()
+    pairs = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
+    for _ in range(64):
+        opaque = PropositionRoot(text)
+        stack: list[str] = []
+        operators: list[tuple[str, int]] = []
+        wrapped = text.startswith("(")
+        index = 0
+        while index < len(text):
+            char = text[index]
+            prime = char == "'" and index > 0 and (text[index - 1].isalnum() or text[index - 1] in "_'✝")
+            if char == '"' or (char == "'" and not prime):
+                quote = char
+                index += 1
+                while index < len(text) and text[index] != quote:
+                    index += 2 if text[index] == "\\" else 1
+                if index >= len(text):
+                    return opaque
+                index += 1
+                continue
+            if char == "«":
+                end = text.find("»", index + 1)
+                if end < 0:
+                    return opaque
+                index = end + 1
+                continue
+            if text.startswith(("/-", "--"), index):
+                return opaque
+            if char in pairs:
+                stack.append(pairs[char])
+            elif char in pairs.values():
+                if not stack or stack.pop() != char:
+                    return opaque
+                if not stack and index != len(text) - 1:
+                    wrapped = False
+            elif not stack:
+                if char in "∀∃":
+                    return opaque
+                word = _ROOT_WORD.match(text, index)
+                if word:
+                    if word[0] in _ROOT_BINDERS:
+                        return opaque
+                    index = word.end()
+                    continue
+                if char in "↔→∨∧=":
+                    if char == "=" and ((index and text[index - 1] in "=:<>!")
+                                         or (index + 1 < len(text) and text[index + 1] in "=>")):
+                        return opaque
+                    operators.append((char, index))
+            index += 1
+        if stack:
+            return opaque
+        if wrapped:
+            text = text[1:-1].strip()
+            continue
+        for operator in ("↔", "→", "∨", "∧", "¬", "="):
+            if operator == "¬":
+                if text.startswith("¬") and text[1:].strip():
+                    return PropositionRoot(text, "¬", (text[1:].strip(), "False"))
+                continue
+            positions = [position for symbol, position in operators if symbol == operator]
+            if positions:
+                if operator in ("↔", "=") and len(positions) != 1:
+                    return opaque
+                position = positions[0]
+                left, right = text[:position].strip(), text[position + 1:].strip()
+                return PropositionRoot(text, operator, (left, right)) if left and right else opaque
+        return opaque
+    return PropositionRoot(text)
+
+
+def proposition_binary(proposition: str, operator: str) -> tuple[str, str] | None:
+    root = proposition_root(proposition)
+    return root.parts if root.operator == operator else None
+
+
+def same_proposition(left: str, right: str) -> bool:
+    return proposition_root(left).text == proposition_root(right).text
+
+
+def implication_parts(proposition: str) -> tuple[str, str] | None:
+    root = proposition_root(proposition)
+    return root.parts if root.operator in ("→", "¬") else None
 
 
 def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], str]:
@@ -239,5 +335,7 @@ def render_model_inventory(inventory: LocalProofInventory) -> str:
 
 __all__ = [
     "InventoryEntry", "InventoryError", "InventoryKind", "LocalProofInventory",
-    "build_local_inventory", "render_model_inventory",
+    "PropositionRoot", "build_local_inventory", "implication_parts",
+    "proposition_binary", "proposition_root", "render_model_inventory",
+    "same_proposition",
 ]

@@ -23,7 +23,9 @@ from .lean_gym.models import VerificationStatus as Status
 from .proof_inventory import LocalProofInventory, _declarations_and_target, build_local_inventory
 from .records import SymbolicState
 from .replay import proof_state_fingerprint
-from .tactic_compiler import TACTIC_COMPILER_VERSION, GroundedTacticCompiler, _binary, _implication
+from .grounding import enumerate_applications
+from .proof_inventory import implication_parts as _implication, proposition_binary as _binary
+from .tactic_compiler import TACTIC_COMPILER_VERSION, GroundedTacticCompiler
 
 
 SCHEMA_VERSION = "grounded-curriculum-v1"
@@ -312,7 +314,8 @@ def derive_grounded_plan(reference_tactic: str, inventory: LocalProofInventory, 
 
 
 def _verify_candidates(verifier, problem, prefix, plan, inventory, expected_hash):
-    candidates = GroundedTacticCompiler().compile(plan, inventory, candidate_limit=8).candidates
+    applications = enumerate_applications(plan.steps[-1].operator, inventory)
+    candidates = GroundedTacticCompiler().compile_all(applications, inventory).candidates
     infrastructure = False
     for candidate in candidates:
         try:

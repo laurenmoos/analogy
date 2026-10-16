@@ -1,5 +1,20 @@
 # Analogy
 
+The generated-domain path makes one story/operator model call, deterministically
+enumerates every valid application of the selected configured operator, and sends
+every unique compiled candidate to Lean. Model-facing text is centralized in
+`prompts.yaml`.
+
+Run the matched direct-choice versus story-mediated ablation separately from
+production:
+
+```bash
+PYTHONPATH=src python scripts/benchmark_story_operator_ablation.py \
+  --config config.mlx-8b-grounded-analogy.yaml \
+  --fixtures tests/fixtures/story_operator_ambiguous.json \
+  --output-dir runs-grounded/story-operator-ablation
+```
+
 This repository explores whether analogies from poetry, physics, and other domains can help a Lean model choose its next tactic when ordinary proof search is stuck.
 
 The current prototype does not synthesize programs. A conventional policy supplies a credible set of tactic candidates; a cheap daydream process explores unusual relations; an LLM may use a pertinent analogy to choose among the original candidates; and Lean verifies the result.

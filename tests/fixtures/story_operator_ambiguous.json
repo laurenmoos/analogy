@@ -1,0 +1,12 @@
+[
+  {"id":"component_or_apply","binders":"(P Q : Prop) (h : P ∧ Q) (f : Q → P)","target":"P","accepted_prefix":[]},
+  {"id":"component_or_exact","binders":"(P Q : Prop) (h : P ∧ Q) (hq : Q)","target":"Q","accepted_prefix":[]},
+  {"id":"equality_or_apply","binders":"(P Q : Prop) (e : P = Q) (hp : P) (f : P → Q)","target":"Q","accepted_prefix":[]},
+  {"id":"reverse_equality_or_apply","binders":"(P Q : Prop) (e : P = Q) (hq : Q) (f : Q → P)","target":"P","accepted_prefix":[]},
+  {"id":"iff_forward_or_apply","binders":"(P Q : Prop) (h : P ↔ Q) (hp : P) (f : P → Q)","target":"Q","accepted_prefix":[]},
+  {"id":"iff_backward_or_apply","binders":"(P Q : Prop) (h : P ↔ Q) (hq : Q) (f : Q → P)","target":"P","accepted_prefix":[]},
+  {"id":"cases_or_exact","binders":"(P Q R : Prop) (h : P ∨ Q) (hr : R)","target":"R","accepted_prefix":[]},
+  {"id":"cases_or_local","binders":"(P Q : Prop) (h : P ∨ Q) (hp : P)","target":"P","accepted_prefix":[]},
+  {"id":"split_or_exact","binders":"(P Q : Prop) (h : P ∧ Q) (hp : P) (hq : Q)","target":"P ∧ Q","accepted_prefix":[]},
+  {"id":"split_or_rewrite","binders":"(P Q : Prop) (e : P = Q) (hp : P) (hq : Q)","target":"Q ∧ P","accepted_prefix":[]}
+]

@@ -213,7 +213,9 @@ def test_repeat_only_iteration_cannot_inherit_grounded_reward_from_prior_progres
         assert samples[0].action is result.live_actions[0]
         assert samples[0].reward == 1.0
     else:
-        assert [sample.reward for sample in samples] == [0.94, 1.0]
+        assert len(samples) == 1
+        assert samples[0].action is result.live_actions[0]
+        assert samples[0].reward == 1.0
 
 
 @pytest.mark.parametrize("outcome", ["completion", "rejection", "repetition"])
@@ -386,7 +388,7 @@ def test_later_lean_or_embedding_failure_excludes_only_the_affected_action(stage
     assert samples[0].reward == 0.1
 
 
-def test_schema_rejection_remains_an_eligible_policy_action():
+def test_schema_rejection_has_no_verified_transition_policy_sample():
     from analogy.rl import discounted_iteration_samples
     from test_analogy_transfer_loop import runner, run
     result, _, _ = runner(["invalid", "invalid"])
@@ -394,8 +396,7 @@ def test_schema_rejection_remains_an_eligible_policy_action():
     samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
         verified_reward=-0.05, discount=0.95, iteration_cost=0.01)
     assert rollout.analogy_trace.iterations[0].training_eligible
-    assert len(samples) == 1
-    assert samples[0].reward == -0.05
+    assert samples == ()
 
 
 def test_same_state_invocations_preserve_live_and_final_rows_with_one_path_identity(tmp_path):

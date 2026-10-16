@@ -22,6 +22,75 @@ def test_curriculum_cli_builds_without_loading_any_model(monkeypatch, tmp_path, 
     assert len(rows(cfg.output_dir / "transitions.jsonl")) == 2
 
 
+def test_grounded_curriculum_cli_has_nonterminal_then_second_analogy_completion(monkeypatch, tmp_path):
+    import json
+    from dataclasses import replace
+    import analogy.training as training
+    from analogy.config import load_config
+    from analogy.grounded_curriculum import build_grounded_curriculum
+    from analogy.records import CandidateOrigin, TacticCandidate
+    from test_grounded_curriculum import config as curriculum_config, PrefixVerifier
+    from test_analogy_transfer_loop import Encoder, grounded_payload
+    from test_analogy_transfer_generation import RecordingBackend, SOURCE, ALIGNMENT, TRANSFER
+
+    cfg = curriculum_config(tmp_path, tactics=("intro analogy_h",), ids=("train", "validation"))
+    cfg.split_manifest.write_text(json.dumps({"schema_version": 1,
+        "train": ["train"], "validation": ["validation"], "test": []}))
+    manifest = build_grounded_curriculum(cfg, PrefixVerifier(cfg.lean_project)).manifest_path
+    config = load_config(ROOT / "config.mlx-8b-grounded-analogy.yaml")
+    config = replace(config, benchmark=replace(config.benchmark, corpus=cfg.problems),
+        run=replace(config.run, output_dir=tmp_path / "runs"),
+        rl=replace(config.rl, curriculum_manifest=manifest))
+    source = json.loads(SOURCE)
+    source["transformation"]["operation"] = "introduce"
+    alignment = json.loads(ALIGNMENT)
+    alignment["mapping"]["shelved wheel"] = "introduced_assumption"
+    first_transfer = dict(json.loads(TRANSFER), active_subgoal="P → P", premises=[],
+        predicted_next_subgoal="P", completion_expected=False)
+    first_plan = grounded_payload(PrefixVerifier.states[0], proposition="P")
+    first_plan.update(bindings=[], completion_expected=False, expected_next_subgoal="P")
+    first_plan["steps"][0].update(operator="introduce", inputs=[], input_propositions=[],
+        output_proposition="P", closes_subgoal=False)
+    second_plan = grounded_payload("h : P\nanalogy_h : P\n⊢ P", proposition="P", index=1)
+    second_plan["steps"][0]["output_proposition"] = "P"
+    second_transfer = dict(json.loads(TRANSFER), active_subgoal="P")
+    records = [json.dumps(source), json.dumps(alignment), json.dumps(first_transfer), json.dumps(first_plan),
+        SOURCE, ALIGNMENT, json.dumps(second_transfer), json.dumps(second_plan)]
+
+    class Backend(RecordingBackend, Encoder):
+        hidden_size = 2
+
+    class Ranker:
+        def rank(self, state, goal):
+            return (TacticCandidate("ordinary_bad", 1.0, CandidateOrigin.ORDINARY),)
+
+    backend = Backend(records * 2)
+    class Verifier(PrefixVerifier):
+        def proof_structure_after(self, problem, prefix):
+            from analogy.proof_views import ProofStructure
+            shape = super().proof_structure_after(problem, prefix)
+            return shape if not prefix else ProofStructure(1, '{"root":"atom"}', ('{"root":"target"}',))
+
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "load_model_backend", lambda config: backend)
+    monkeypatch.setattr(cli, "LeanSubprocessVerifier", Verifier)
+    monkeypatch.setattr(training, "QwenTacticRanker", lambda *args, **kwargs: Ranker())
+    assert cli.main(["--config", "grounded.yaml"]) == 0
+    run = next((tmp_path / "runs" / "rescue").iterdir())
+    rows = [json.loads(line) for line in (run / "analogy_iterations.jsonl").read_text().splitlines()]
+    assert len(rows) == 4
+    assert [row["iteration_index"] for row in rows] == [0, 1, 0, 1]
+    assert all(row["observation"]["actual_transition"] for row in rows if row["iteration_index"] == 1)
+    episodes = [json.loads(line) for line in (run / "problems.jsonl").read_text().splitlines()]
+    assert all(row["completed"] and row["transition_id"] for row in episodes)
+    assert len({row["proof_path_id"] for row in episodes}) == 2
+    metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
+    assert len(metrics) == 1
+    assert abs(metrics[0]["mean_reward"] - 0.97) < 1e-6
+    text = (run / "readable_traces.md").read_text()
+    assert "GROUNDED ROLE BINDINGS" in text and "COMPILED TACTICS" in text
+
+
 def test_generated_profile_cli_writes_connected_trace(monkeypatch, tmp_path, capsys):
     """Catch broken generated-profile composition or missing trace finalization."""
     import json

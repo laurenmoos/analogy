@@ -12,6 +12,7 @@ import warnings
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -33,7 +34,8 @@ from .analogy_transfer_generation import (
 from .analogy_stream import AnalogyHop, AnalogyTacticPlan
 from .config import AppConfig
 from .lean_gym.corpus import load_problems
-from .lean_gym.models import Problem
+from .lean_gym.models import Problem, VerificationStatus
+from .grounded_curriculum import OnlineCurriculumState, load_online_curriculum_states
 from .lean_gym.verifier import LeanGymAdapter
 from .loop import (
     AcceptNovelState,
@@ -94,6 +96,8 @@ class ProblemEpisode:
     failure: str | None = None
     proof_trace: dict[str, Any] | None = None
     proof_path_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    transition_id: str | None = None
+    model_calls: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +176,9 @@ class ConditionSummary:
     mean_surprise_trajectory: tuple[float, ...] = ()
     saturation_rate: float = 0.0
     failures: tuple[tuple[str, str], ...] = ()
+    funnel: dict[str, dict[str, int]] = field(default_factory=dict)
+    model_calls: int = 0
+    completion_per_model_call: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +307,7 @@ class RescueRunWriter:
         problem_id: str,
         rollout_id: str,
         proof_path_id: str | None = None,
+        transition_id: str | None = None,
     ) -> None:
         key = (epoch, phase, problem_id, proof_path_id, rollout_id, iteration.iteration_index)
         if key in self._analogy_iteration_keys:
@@ -313,6 +321,7 @@ class RescueRunWriter:
                 "problem_id": problem_id,
                 "rollout_id": rollout_id,
                 "proof_path_id": proof_path_id,
+                "transition_id": transition_id,
                 **asdict(iteration),
             },
         )
@@ -334,9 +343,11 @@ def save_training_checkpoint(
     config_hash: str,
     *,
     reward_baseline: RewardBaseline | None = None,
+    artifact_identity: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "policy": policy.state_dict(),
+        "artifact_identity": artifact_identity,
         "optimizer": optimizer.state_dict(),
         "epoch": epoch,
         "python_rng": random.getstate(),
@@ -363,8 +374,10 @@ def load_training_checkpoint(
     config_hash: str,
     *,
     reward_baseline: RewardBaseline | None = None,
+    artifact_identity: dict[str, Any] | None = None,
 ) -> int:
     payload = _torch_load(Path(path))
+    _check_artifact_identity(payload.get("artifact_identity"), artifact_identity)
     if payload.get("config_hash") != config_hash:
         raise ValueError("checkpoint config hash does not match")
     if payload.get("split") != asdict(problem_split):
@@ -410,6 +423,7 @@ def build_evaluation_conditions(config: AppConfig) -> tuple[EvaluationCondition,
     if config.analogy.strategy == "generated_domain":
         return conditions + (EvaluationCondition("analogy_loop", "analogy_loop", **common),) + tuple(
             EvaluationCondition(name, name, **common) for name in (
+                *(("generated_raw",) if config.analogy.decoder == "grounded" else ()),
                 "generated_unsteered", "generated_random", "generated_learned", "generated_shuffled"
             )
         )
@@ -471,6 +485,96 @@ def _evaluation_policy(condition, config, generator, learned):
 ProblemRunner = Callable[[Problem, str, torch.nn.Module], ProblemEpisode]
 
 
+class _GenerationCallCounter:
+    """Count actual generation attempts, including exceptions before a record exists."""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+        self._generation_count = 0
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._backend, name)
+        if name not in {"generate", "generate_with_delta"}:
+            return attribute
+
+        @wraps(attribute)
+        def counted(*args, **kwargs):
+            self._generation_count += 1
+            return attribute(*args, **kwargs)
+
+        return counted
+
+
+def schedule_curriculum_states(manifest: Path, split: str, *, seed: int, epoch: int) -> tuple[OnlineCurriculumState, ...]:
+    """One pass over the requested split, with a stable seed/epoch permutation."""
+    states = list(sorted(load_online_curriculum_states(manifest, split), key=lambda item: item.transition_id))
+    random.Random(f"{seed}:{epoch}:{split}").shuffle(states)
+    return tuple(states)
+
+
+def reconstruct_curriculum_state(item: OnlineCurriculumState, problem: Problem, verifier: Any) -> SymbolicState:
+    if item.problem_id != problem.id:
+        raise ValueError("curriculum problem identity mismatch")
+    replayed = verifier.state_after(problem, item.accepted_prefix)
+    if not replayed.accepted or replayed.status is not VerificationStatus.OPEN or replayed.proof_state is None:
+        raise ValueError(f"curriculum prefix replay did not return an open accepted state: {replayed.status}")
+    actual = proof_state_fingerprint(replayed.proof_state.normalized)
+    if actual != item.current_state_hash:
+        raise ValueError(f"curriculum state hash mismatch: saved={item.current_state_hash!r}, replayed={actual!r}")
+    return SymbolicState(item.transition_id, replayed.proof_state.normalized, "lean4", item.accepted_prefix)
+
+
+def _curriculum_problem_split(manifest: Path, problems: Sequence[Problem]) -> ProblemSplit:
+    # Read split metadata only here. State artifacts are authenticated and
+    # projected exclusively when that phase is actually scheduled.
+    by_id = {item.id: item for item in problems}
+    data = json.loads(Path(manifest).read_text())
+    if data.get("schema_version") != "grounded-curriculum-v1":
+        raise ValueError("unsupported curriculum schema")
+    groups = []
+    seen = set()
+    for split in ("train", "validation", "test"):
+        ids = data["splits"][split]
+        if not isinstance(ids, list) or any(not isinstance(key, str) for key in ids):
+            raise ValueError("curriculum theorem split IDs must be string lists")
+        if seen.intersection(ids) or len(ids) != len(set(ids)):
+            raise ValueError("curriculum theorem splits overlap")
+        if set(ids) - set(by_id):
+            raise ValueError(f"curriculum {split} contains unknown problems")
+        seen.update(ids)
+        groups.append(tuple(by_id[key] for key in ids))
+    if seen != set(by_id):
+        raise ValueError("curriculum theorem splits must cover the configured corpus")
+    return ProblemSplit(*groups)
+
+
+def _artifact_identity(config: AppConfig) -> dict[str, Any] | None:
+    if config.analogy.decoder != "grounded" and config.rl.curriculum_manifest is None:
+        return None
+    from .analogy_transfer_generation import (SOURCE_PROMPT_VERSION, ALIGNMENT_PROMPT_VERSION,
+        TRANSFER_PROMPT_VERSION, GROUNDING_PROMPT_VERSION, GROUNDING_REPAIR_PROMPT_VERSION, TACTIC_PROMPT_VERSION)
+    from .grounded_plan import GROUNDED_PLAN_SCHEMA_VERSION
+    from .tactic_compiler import TACTIC_COMPILER_VERSION
+    return {"training_schema_version": "grounded-training-v1",
+        "curriculum_manifest_hash": (hashlib.sha256(config.rl.curriculum_manifest.read_bytes()).hexdigest()
+                                     if config.rl.curriculum_manifest else None),
+        "inventory_schema": "local-proof-inventory-v1", "grounded_plan_schema": GROUNDED_PLAN_SCHEMA_VERSION,
+        "compiler_version": TACTIC_COMPILER_VERSION, "decoder": config.analogy.decoder,
+        "prompt_versions": {"source": SOURCE_PROMPT_VERSION, "alignment": ALIGNMENT_PROMPT_VERSION,
+            "transfer": TRANSFER_PROMPT_VERSION, "grounding": GROUNDING_PROMPT_VERSION,
+            "grounding_repair": GROUNDING_REPAIR_PROMPT_VERSION, "raw_tactic": TACTIC_PROMPT_VERSION}}
+
+
+def _check_artifact_identity(saved: Any, expected: Any) -> None:
+    if saved == expected:
+        return
+    if not isinstance(saved, dict) or not isinstance(expected, dict):
+        raise ValueError(f"checkpoint artifact identity incompatible: saved={saved!r}, expected={expected!r}")
+    for key in sorted(set(saved) | set(expected)):
+        if saved.get(key) != expected.get(key):
+            raise ValueError(f"checkpoint {key} incompatible: saved={saved.get(key)!r}, expected={expected.get(key)!r}")
+
+
 def train_direct_rescue(
     config: AppConfig,
     generator: Any,
@@ -485,6 +589,9 @@ def train_direct_rescue(
 ) -> TrainingSummary:
     if not config.rl.enabled:
         raise ValueError("rescue training requires rl.enabled=true")
+    manifest = config.rl.curriculum_manifest
+    if manifest is not None and (replay_records is not None or problem_runner is not None):
+        raise ValueError("curriculum training cannot mix replay records or a custom runner")
     if replay_records is not None and problem_runner is not None:
         raise ValueError("replay training cannot use a custom problem runner")
     normalized_replay = tuple(replay_records or ())
@@ -500,7 +607,7 @@ def train_direct_rescue(
         )
     else:
         selected = load_problems(config.benchmark.corpus)
-    problem_split = split_problems(
+    problem_split = _curriculum_problem_split(manifest, selected) if manifest is not None else split_problems(
         selected,
         train_connectives=config.rl.train_connectives,
         validation_connectives=config.rl.validation_connectives,
@@ -531,6 +638,7 @@ def train_direct_rescue(
     )
     reward_baseline = RewardBaseline()
     resolved_hash = _config_hash(config)
+    artifact_identity = _artifact_identity(config)
     start_epoch = 0
     if config.rl.checkpoint is not None:
         start_epoch = load_training_checkpoint(
@@ -540,6 +648,7 @@ def train_direct_rescue(
             problem_split,
             resolved_hash,
             reward_baseline=reward_baseline,
+            artifact_identity=artifact_identity,
         )
     identifier = run_id or uuid.uuid4().hex
     writer = RescueRunWriter.create(
@@ -550,7 +659,20 @@ def train_direct_rescue(
     best_score = -1
     best_checkpoint: Path | None = None
 
-    def execute(item: Problem | StuckStateRecord, phase: str, epoch: int):
+    def execute(item: Problem | StuckStateRecord | OnlineCurriculumState, phase: str, epoch: int):
+        if isinstance(item, OnlineCurriculumState):
+            problem = next(problem for problem in selected if problem.id == item.problem_id)
+            sink = _live_iteration_sink(writer, epoch=epoch, phase=phase,
+                problem_id=problem.id, transition_id=item.transition_id)
+            try:
+                reconstructed = reconstruct_curriculum_state(item, problem, verifier)
+            except Exception as error:
+                return ProblemEpisode(problem.id, False, (), (), 0, 0,
+                    f"{type(error).__name__}: {error}", proof_path_id=sink.proof_path_id,
+                    transition_id=item.transition_id)
+            episode = _execute_problem(config, generator, verifier, problem, phase, active_policy,
+                initial_state=reconstructed, iteration_sink=sink)
+            return replace(episode, transition_id=item.transition_id)
         if isinstance(item, StuckStateRecord):
             reconstructed = reconstruct_stuck_state(item, verifier)
             return _execute_problem(
@@ -580,11 +702,11 @@ def train_direct_rescue(
             ),
         )
 
-    train_items: Sequence[Problem | StuckStateRecord] = (
+    train_items: Sequence[Problem | StuckStateRecord | OnlineCurriculumState] = (
         tuple(item for item in normalized_replay if item.split == "train")
         if normalized_replay else problem_split.train
     )
-    validation_items: Sequence[Problem | StuckStateRecord] = (
+    validation_items: Sequence[Problem | StuckStateRecord | OnlineCurriculumState] = (
         tuple(item for item in normalized_replay if item.split == "validation")
         if normalized_replay else problem_split.validation
     )
@@ -592,6 +714,12 @@ def train_direct_rescue(
         raise ValueError("replay training requires train and validation records")
 
     for epoch in range(start_epoch + 1, config.rl.epochs + 1):
+        if manifest is not None:
+            _check_artifact_identity(_artifact_identity(config), artifact_identity)
+            train_items = schedule_curriculum_states(manifest, "train", seed=config.run.seed, epoch=epoch)
+            validation_items = schedule_curriculum_states(manifest, "validation", seed=config.run.seed, epoch=epoch)
+            if not train_items or not validation_items:
+                raise ValueError("curriculum training requires train and validation states")
         for item in train_items:
             episode = execute(item, "train", epoch)
             _persist_episode(writer, episode, epoch, "train")
@@ -616,6 +744,7 @@ def train_direct_rescue(
         for episode in validation_episodes:
             _persist_episode(writer, episode, epoch, "validation")
         validation_score = sum(episode.completed for episode in validation_episodes)
+        _check_artifact_identity(_artifact_identity(config), artifact_identity)
         checkpoint = writer.path / "checkpoints" / f"epoch-{epoch:04d}.pt"
         if epoch % config.rl.checkpoint_interval == 0 or epoch == config.rl.epochs:
             save_training_checkpoint(
@@ -626,6 +755,7 @@ def train_direct_rescue(
                 problem_split,
                 resolved_hash,
                 reward_baseline=reward_baseline,
+                artifact_identity=artifact_identity,
             )
         if validation_score > best_score:
             best_score = validation_score
@@ -638,6 +768,7 @@ def train_direct_rescue(
                     problem_split,
                     resolved_hash,
                     reward_baseline=reward_baseline,
+                    artifact_identity=artifact_identity,
                 )
             best_checkpoint = checkpoint
 
@@ -666,7 +797,8 @@ def evaluate_direct_rescue(
     checkpoint = Path(checkpoint)
     identifier = f"evaluate-{checkpoint.stem}"
     problems = load_problems(config.benchmark.corpus)
-    problem_split = split_problems(
+    manifest = config.rl.curriculum_manifest
+    problem_split = _curriculum_problem_split(manifest, problems) if manifest is not None else split_problems(
         problems,
         train_connectives=config.rl.train_connectives,
         validation_connectives=config.rl.validation_connectives,
@@ -674,6 +806,7 @@ def evaluate_direct_rescue(
     )
     learned = _new_policy(config, generator)
     payload = _torch_load(checkpoint)
+    _check_artifact_identity(payload.get("artifact_identity"), _artifact_identity(config))
     if payload.get("config_hash") != _config_hash(config):
         raise ValueError("checkpoint config hash does not match evaluation config")
     if payload.get("split") != asdict(problem_split):
@@ -724,22 +857,39 @@ def evaluate_direct_rescue(
                         )
                     source_id = eligible[0]
                 shuffled_sources[item.id] = analogy_hops_by_problem[source_id]
-        episodes = tuple(
-            _execute_problem(
-                config,
+        state_items = (schedule_curriculum_states(manifest, "test", seed=config.run.seed, epoch=0)
+                       if manifest is not None else problem_split.test)
+        episodes_list = []
+        for scheduled in state_items:
+            item = (next(problem for problem in problems if problem.id == scheduled.problem_id)
+                    if isinstance(scheduled, OnlineCurriculumState) else scheduled)
+            transition_id = scheduled.transition_id if isinstance(scheduled, OnlineCurriculumState) else None
+            sink = _live_iteration_sink(writer, epoch=0, phase=condition.name,
+                problem_id=item.id, transition_id=transition_id)
+            try:
+                initial_state = (reconstruct_curriculum_state(scheduled, item, verifier)
+                                 if isinstance(scheduled, OnlineCurriculumState) else None)
+            except Exception as error:
+                episodes_list.append(ProblemEpisode(item.id, False, (), (), 0, 0,
+                    f"{type(error).__name__}: {error}", proof_path_id=sink.proof_path_id,
+                    transition_id=transition_id))
+                continue
+            condition_config = (replace(config, analogy=replace(config.analogy, decoder="raw"))
+                                if condition.name == "generated_raw" else config)
+            episode = _execute_problem(
+                condition_config,
                 generator,
                 verifier,
                 item,
-                condition.name,
+                "generated_unsteered" if condition.name == "generated_raw" else condition.name,
                 condition_policy,
                 analogy_hops=shuffled_sources.get(item.id),
                 generated_sources=tuple(generated_sources),
-                iteration_sink=_live_iteration_sink(
-                    writer, epoch=0, phase=condition.name, problem_id=item.id
-                ),
+                iteration_sink=sink,
+                initial_state=initial_state,
             )
-            for item in problem_split.test
-        )
+            episodes_list.append(replace(episode, transition_id=transition_id))
+        episodes = tuple(episodes_list)
         if condition.name == "analogy_loop":
             for episode in episodes:
                 hops = tuple(
@@ -848,6 +998,48 @@ def _summarize_condition(
     surprise_observations = sum(
         iteration.surprise is not None for iteration in iterations
     )
+    funnel = {}
+    for stage in ("source", "alignment", "transfer"):
+        attempts = tuple(attempt for iteration in iterations
+            for attempt in getattr(iteration, f"{stage}_generation_attempts", ()))
+        funnel[stage] = {"accepted": sum(item.status is GenerationStatus.VALID for item in attempts),
+                         "attempted": len(attempts)}
+    grounding_attempts = tuple(attempt for iteration in iterations
+        for attempt in (getattr(iteration, "grounding_generation_attempts", ())
+                        + getattr(iteration, "grounding_repair_attempts", ())))
+    plans = tuple(plan for iteration in iterations for plan in (
+        getattr(iteration, "grounded_plan", None), getattr(iteration, "repaired_grounded_plan", None))
+        if plan is not None)
+    # Binding and plan parsing are one strict transaction: a rejected binding
+    # rejects the plan. Both denominators include repairs and malformed calls.
+    funnel["binding"] = {"accepted": len(plans), "attempted": len(grounding_attempts)}
+    funnel["grounded_plan"] = {"accepted": len(plans), "attempted": len(grounding_attempts)}
+    compiler_success = sum(bool(candidates) for iteration in iterations for candidates in (
+        getattr(iteration, "compiled_tactics", ()), getattr(iteration, "repaired_compiled_tactics", ())))
+    funnel["compiler"] = {"accepted": compiler_success, "attempted": len(plans)}
+    candidate_count = sum(len(candidates) for iteration in iterations for candidates in (
+        getattr(iteration, "compiled_tactics", ()), getattr(iteration, "repaired_compiled_tactics", ())))
+    funnel["compiled_candidates"] = {"accepted": candidate_count, "attempted": len(plans)}
+    funnel["lean_acceptance"] = {"accepted": accepted_tactics, "attempted": len(lean_attempts)}
+    funnel["novel_successor"] = {"accepted": sum(
+        attempt.result.status is TacticStatus.ACCEPTED and attempt.discarded is None
+        for attempt in lean_attempts), "attempted": len(lean_attempts)}
+    continuation_opportunities = sum(
+        any(attempt.result.status is TacticStatus.ACCEPTED and attempt.discarded is None
+            for attempt in iteration.attempts)
+        and not any(attempt.result.status is TacticStatus.COMPLETE for attempt in iteration.attempts)
+        for iteration in iterations)
+    continuations = sum(getattr(iteration, "source", None) is not None
+        and bool(getattr(getattr(iteration, "observation", None), "actual_transition", None))
+        for iteration in iterations)
+    funnel["second_analogy"] = {"accepted": continuations, "attempted": continuation_opportunities}
+    funnel["completion"] = {"accepted": len(solved_ids), "attempted": len(episodes)}
+    # Historical/custom episodes can lack a measured counter. New episodes count
+    # the backend boundary, including failed ordinary generations before expansion.
+    model_calls = sum(
+        episode.model_calls if episode.model_calls is not None else (
+            episode.ordinary_expansions + sum(len(rollout.generations) for rollout in episode.rollouts)
+        ) for episode in episodes)
     return ConditionSummary(
         name=name,
         attempted=len(episodes),
@@ -885,6 +1077,9 @@ def _summarize_condition(
             for item in episodes
             if item.failure is not None
         ),
+        funnel=funnel,
+        model_calls=model_calls,
+        completion_per_model_call=len(solved_ids) / model_calls if model_calls else 0.0,
     )
 
 
@@ -912,6 +1107,8 @@ def _execute_problem(
     iteration_sink: Callable[[str, Any], None] | None = None,
     generated_sources: tuple[GeneratedSourceRecord, ...] = (),
 ) -> ProblemEpisode:
+    calls = _GenerationCallCounter(generator)
+    generator = calls
     collector = RolloutCollector()
     proof_path_id = getattr(iteration_sink, "proof_path_id", None) or uuid.uuid4().hex
     cancellation = _DeadlineCancellation(
@@ -1055,6 +1252,7 @@ def _execute_problem(
                 "termination": result.status.value,
             },
             proof_path_id=proof_path_id,
+            model_calls=calls._generation_count,
         )
     except Exception as error:
         preserved = collector.rollouts
@@ -1067,6 +1265,7 @@ def _execute_problem(
             sum(len(rollout.attempts) for rollout in preserved),
             f"{type(error).__name__}: {error}",
             proof_path_id=proof_path_id,
+            model_calls=calls._generation_count,
         )
 
 
@@ -1365,6 +1564,7 @@ def _persist_episode(
         writer.append_jsonl(
             "rollouts.jsonl", {"epoch": epoch, "phase": phase,
                                "problem_id": episode.problem_id,
+                               "transition_id": episode.transition_id,
                                "proof_path_id": proof_path_id, **asdict(rollout)}
         )
         for generation_index, generation in enumerate(rollout.generations):
@@ -1376,6 +1576,7 @@ def _persist_episode(
                     "problem_id": episode.problem_id,
                     "rollout_id": rollout.rollout_id,
                     "proof_path_id": proof_path_id,
+                    "transition_id": episode.transition_id,
                     "generation_index": generation_index,
                     **asdict(generation),
                 },
@@ -1390,6 +1591,7 @@ def _persist_episode(
                     problem_id=episode.problem_id,
                     rollout_id=rollout.rollout_id,
                     proof_path_id=proof_path_id,
+                    transition_id=episode.transition_id,
                 )
     writer.append_jsonl(
         "problems.jsonl",
@@ -1398,9 +1600,11 @@ def _persist_episode(
             "phase": phase,
             "problem_id": episode.problem_id,
             "proof_path_id": proof_path_id,
+            "transition_id": episode.transition_id,
             "completed": episode.completed,
             "ordinary_expansions": episode.ordinary_expansions,
             "verifier_calls": episode.verifier_calls,
+            "model_calls": episode.model_calls,
             "failure": episode.failure,
             **({"proof_trace": {**episode.proof_trace, "proof_path_id": proof_path_id}}
                if episode.proof_trace is not None else {}),
@@ -1409,7 +1613,8 @@ def _persist_episode(
 
 
 def _live_iteration_sink(
-    writer: RescueRunWriter, *, epoch: int, phase: str, problem_id: str
+    writer: RescueRunWriter, *, epoch: int, phase: str, problem_id: str,
+    transition_id: str | None = None,
 ) -> Callable[[str, Any], None]:
     proof_path_id = uuid.uuid4().hex
     def append(rollout_id: str, iteration: Any) -> None:
@@ -1420,6 +1625,7 @@ def _live_iteration_sink(
             problem_id=problem_id,
             rollout_id=rollout_id,
             proof_path_id=proof_path_id,
+            transition_id=transition_id,
         )
 
     append.proof_path_id = proof_path_id
@@ -1445,6 +1651,7 @@ def _run_metadata(
         },
         "seed": config.run.seed,
         "config_hash": _config_hash(config),
+        "artifact_identity": _artifact_identity(config),
     }
 
 

@@ -551,7 +551,11 @@ def discounted_iteration_samples(
         action_iterations = (iteration for iteration in trace.iterations if iteration.action is not None)
         normalized_actions = tuple(
             action for action, iteration in zip(normalized_actions, action_iterations)
-            if iteration.training_eligible
+            if iteration.training_eligible and any(
+                attempt.result.status is TacticStatus.COMPLETE
+                or (attempt.result.status is TacticStatus.ACCEPTED and attempt.discarded is None)
+                for attempt in iteration.attempts
+            )
         )
     count = len(normalized_actions)
     return tuple(

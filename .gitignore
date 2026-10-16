@@ -9,6 +9,7 @@ results/
 .venv/
 runs/
 runs-fast/
+runs-grounded/
 __pycache__/
 *.py[cod]
 *.egg-info/

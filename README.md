@@ -151,6 +151,36 @@ invocations of one theorem. Metrics still use the original episode fields.
 Replay prefixes without recorded intermediate states are identified explicitly.
 Older records without this metadata display an unavailable-trace notice.
 
+Grounded transition training uses `config.mlx-8b-grounded-analogy.yaml` (frozen
+Qwen3-8B, 512 output tokens). First build the offline, pinned-Lean curriculum:
+
+```sh
+PYTHONPATH=src python -m analogy build-grounded-curriculum --config config.grounded-curriculum.yaml
+PYTHONPATH=src python -m analogy --config config.mlx-8b-grounded-analogy.yaml
+```
+
+`rl.curriculum_manifest` enables theorem-grouped curriculum splits instead of the
+legacy connective partition. Each epoch schedules only that phase's online-safe
+states in deterministic seed/epoch order, replays the accepted prefix, checks
+the recorded current-state hash, and runs the ordinary solver and generated
+analogy loop. No reference tactic, expected successor, or similarity lookup is
+available at that boundary. Episodes and iteration rows join by `transition_id`
+and `proof_path_id`. Only actions with a verified novel successor or completion
+receive generated-policy training samples; later schema, compilation, or runtime
+failure preserves earlier useful actions. Qwen weights are never optimized.
+
+Grounded checkpoints carry the curriculum manifest hash, inventory and plan
+schemas, compiler version, decoder mode, and all staged prompt versions. Loading
+an incompatible or raw-only checkpoint reports saved and expected identities.
+Evaluation includes conventional, direct, legacy, raw generated, and grounded
+unsteered/random/learned/compatible-shuffled conditions with matched budgets.
+Condition summaries retain per-stage attempted/accepted counts; binding and plan
+validity share the strict parser transaction. Empty denominators mean that stage
+was not reached. `model_calls` includes ordinary and rescue generations; benchmark
+raw-call logs additionally retain actual Lean processes, including prefix replay.
+See [the grounded transition smoke report](docs/benchmarks/2026-10-15-grounded-transition-smoke.md)
+for separate default-curriculum, curated-fixture, and fake-backend evidence.
+
 The renderer reads machine records without changing them, builds the complete
 Markdown first, then flushes and atomically replaces a temporary file in the
 same directory. A rendering or replacement failure warns and preserves any

@@ -92,6 +92,7 @@ class RLConfig:
     train_connectives: tuple[str, ...]
     validation_connectives: tuple[str, ...]
     test_connectives: tuple[str, ...]
+    curriculum_manifest: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,7 @@ _SCHEMA: dict[str, frozenset[str]] = {
             "train_connectives",
             "validation_connectives",
             "test_connectives",
+            "curriculum_manifest",
         }
     ),
     "run": frozenset({"output_dir", "seed"}),
@@ -354,6 +356,8 @@ def load_config(path: Path) -> AppConfig:
         section = _mapping(root[name], f"config.{name}")
         if name == "analogy":
             section = {"strategy": "legacy", "decoder": "raw", "grounding_repair_calls": 1, **section}
+        if name == "rl":
+            section = {"curriculum_manifest": None, **section}
         _validate_keys(section, keys, f"config.{name}")
         sections[name] = section
 
@@ -559,6 +563,7 @@ def load_config(path: Path) -> AppConfig:
             train_connectives=train_connectives,
             validation_connectives=validation_connectives,
             test_connectives=test_connectives,
+            curriculum_manifest=_optional_path(rl["curriculum_manifest"], "config.rl.curriculum_manifest", base),
         ),
         run=RunConfig(
             output_dir=_path(run["output_dir"], "config.run.output_dir", base),

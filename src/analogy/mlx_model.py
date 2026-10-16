@@ -51,6 +51,14 @@ def _load_exact_model(load_fn: Callable[[str], Any], identifier: str) -> Any:
         ) from error
 
 
+def _mlx_import_diagnostic(error: ImportError) -> str:
+    missing = getattr(error, "name", None)
+    if missing and (missing == "mlx" or missing.startswith("mlx.")
+                    or missing == "mlx_lm" or missing.startswith("mlx_lm.")):
+        return "the MLX extra is not installed; install analogy[mlx]"
+    return f"failed to initialize MLX: {error or type(error).__name__}"
+
+
 class MLXQwenGenerator:
     """Qwen backend with an MLX-native, temporary decoder-layer intervention."""
 
@@ -94,9 +102,7 @@ class MLXQwenGenerator:
             from mlx_lm.models.base import create_attention_mask
             from mlx_lm.sample_utils import make_sampler
         except ImportError as error:
-            raise ModelConfigurationError(
-                "the MLX extra is not installed; install analogy[mlx]"
-            ) from error
+            raise ModelConfigurationError(_mlx_import_diagnostic(error)) from error
         model, tokenizer = _load_exact_model(load, config.name)
         return cls(
             model=model,

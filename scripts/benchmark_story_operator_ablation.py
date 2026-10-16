@@ -54,6 +54,22 @@ def parse_plain_operator(raw: str, enabled: tuple[GroundingOperator, ...]) -> Gr
     return operator
 
 
+def _count_tokens(generator, value):
+    counter = getattr(generator, "count_tokens", None)
+    if callable(counter):
+        return counter(value)
+    tokenizer = getattr(generator, "tokenizer", None) or getattr(generator, "_tokenizer", None)
+    if tokenizer is None:
+        return None
+    if isinstance(value, tuple):
+        rendered = tokenizer.apply_chat_template(
+            [{"role": item.role, "content": item.content} for item in value],
+            tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        value = rendered
+    return len(tokenizer.encode(value, add_special_tokens=False))
+
+
 def _run_arm(
     name, catalog, generator, description, inventory, operators, delta, seed, hidden_layer,
 ):
@@ -69,22 +85,24 @@ def _run_arm(
         messages, delta=delta.detach(), layer=hidden_layer, seed=seed,
     )
     latency = time.perf_counter() - started
-    if name == "plain":
-        operator = parse_plain_operator(raw, operators)
-        story = None
-    else:
-        decision = parse_story_operator_decision(raw, inventory, operators)
-        operator, story = decision.operator, decision.story
-    token_counter = getattr(generator, "count_tokens", None)
-    prompt_tokens = token_counter(messages) if callable(token_counter) else None
-    output_tokens = token_counter(raw) if callable(token_counter) else None
-    return {
-        "operator": operator, "story": story, "raw": raw, "messages": messages,
+    prompt_tokens = _count_tokens(generator, messages)
+    output_tokens = _count_tokens(generator, raw)
+    result = {
+        "raw": raw, "messages": messages,
         "model_seconds": latency,
         "prompt_characters": sum(len(item.content.encode("utf-8")) for item in messages),
         "output_characters": len(raw.encode("utf-8")),
         "prompt_tokens": prompt_tokens, "output_tokens": output_tokens,
     }
+    try:
+        if name == "plain":
+            result.update(operator=parse_plain_operator(raw, operators), story=None)
+        else:
+            decision = parse_story_operator_decision(raw, inventory, operators)
+            result.update(operator=decision.operator, story=decision.story)
+    except Exception as error:
+        result["parse_error"] = error
+    return result
 
 
 def benchmark(
@@ -117,14 +135,16 @@ def benchmark(
                         delta, seed, hidden_layer,
                     )
                     row.update({
-                        "selected_operator": generated["operator"].value,
-                        "story": generated["story"], "raw": generated["raw"],
+                        "story": generated.get("story"), "raw": generated["raw"],
                         "model_seconds": generated["model_seconds"],
                         "prompt_characters": generated["prompt_characters"],
                         "output_characters": generated["output_characters"],
                         "prompt_tokens": generated["prompt_tokens"],
                         "output_tokens": generated["output_tokens"],
                     })
+                    if generated.get("parse_error") is not None:
+                        raise generated["parse_error"]
+                    row["selected_operator"] = generated["operator"].value
                     applications = enumerate_applications(generated["operator"], inventory)
                     row["zero_applications"] = not applications
                     compilation = GroundedTacticCompiler().compile_all(applications, inventory)
@@ -162,21 +182,21 @@ def benchmark(
             "zero_applications": sum(row["zero_applications"] for row in valid),
             "candidate_count": sum(row["candidate_count"] for row in valid),
             "lean_calls": sum(row["lean_calls"] for row in valid),
-            "prompt_characters": sum(row.get("prompt_characters", 0) for row in valid),
-            "output_characters": sum(row.get("output_characters", 0) for row in valid),
+            "prompt_characters": sum(row.get("prompt_characters", 0) for row in selected),
+            "output_characters": sum(row.get("output_characters", 0) for row in selected),
             "prompt_tokens": sum(
-                row["prompt_tokens"] for row in valid if row.get("prompt_tokens") is not None
+                row["prompt_tokens"] for row in selected if row.get("prompt_tokens") is not None
             ),
             "prompt_token_samples": sum(
-                row.get("prompt_tokens") is not None for row in valid
+                row.get("prompt_tokens") is not None for row in selected
             ),
             "output_tokens": sum(
-                row["output_tokens"] for row in valid if row.get("output_tokens") is not None
+                row["output_tokens"] for row in selected if row.get("output_tokens") is not None
             ),
             "output_token_samples": sum(
-                row.get("output_tokens") is not None for row in valid
+                row.get("output_tokens") is not None for row in selected
             ),
-            "model_seconds": sum(row.get("model_seconds", 0.0) for row in valid),
+            "model_seconds": sum(row.get("model_seconds", 0.0) for row in selected),
             "lean_seconds": sum(row.get("lean_seconds", 0.0) for row in valid),
             "by_order": {
                 str(order): {
@@ -235,15 +255,18 @@ def benchmark(
     }
     report = [
         "# Story/operator ablation", "",
-        "| arm | calls | invalid | first-pick | any-candidate | prompt chars | output chars | model s | candidates | Lean calls |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| arm | calls | invalid | first-pick | any-candidate | prompt chars | prompt tokens | output chars | output tokens | model s | candidates | Lean calls |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for arm in ("plain", "story"):
         item = arms[arm]
         report.append(
             f"| {arm} | {item['calls']} | {item['invalid_outputs']} | {item['first_pick_successes']} | "
             f"{item['any_candidate_successes']} | {item['prompt_characters']} | "
-            f"{item['output_characters']} | {item['model_seconds']:.6f} | "
+            f"{item['prompt_tokens'] if item['prompt_token_samples'] else 'n/a'} | "
+            f"{item['output_characters']} | "
+            f"{item['output_tokens'] if item['output_token_samples'] else 'n/a'} | "
+            f"{item['model_seconds']:.6f} | "
             f"{item['candidate_count']} | {item['lean_calls']} |"
         )
     report.extend(["", f"Call-count mismatch: {'YES' if call_mismatch else 'no'}.",
@@ -252,7 +275,7 @@ def benchmark(
                    f"Story/plain model-latency ratio: {latency_ratio:.3f}.",
                    f"Story/plain candidate-count ratio: {candidate_ratio:.3f}.",
                    f"First-minus-second order success deltas: {order_deltas}.",
-                   "Token totals are recorded when the backend exposes count_tokens.",
+                   "Token totals are recorded when the backend exposes a tokenizer.",
                    f"Mean unique stories per fixture: {summary['story_diversity']['mean_unique_stories']:.3f}.", ""])
     (output / "report.md").write_text("\n".join(report), encoding="utf-8")
     return summary
@@ -264,7 +287,7 @@ class _FakeGenerator:
     def generate_with_delta(self, messages, **_kwargs):
         if messages[0].content.startswith("Choose one configured proof operation directly"):
             return '{"operator":"exact_local"}'
-        return '{"story":"A matching spare is already available.","operator":"exact_local","bindings":[]}'
+        return '{"story":"A matching spare is already available.","operator":"exact_local","bindings":{}}'
 
 
 def _fixture_problem(item):
@@ -278,6 +301,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--fake-backend", action="store_true")
+    parser.add_argument("--max-fixtures", type=int)
+    parser.add_argument("--latent-samples", type=int)
     args = parser.parse_args(argv)
     config = load_config(args.config)
     fixtures = json.loads(args.fixtures.read_text(encoding="utf-8"))
@@ -286,6 +311,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for item in fixtures
     ):
         raise ValueError("fixtures must be a list with exactly id, binders, target, accepted_prefix")
+    if args.max_fixtures is not None:
+        if args.max_fixtures <= 0:
+            raise ValueError("max-fixtures must be positive")
+        fixtures = fixtures[:args.max_fixtures]
     catalog = PromptCatalog.load(config.prompts.path)
     generator = _FakeGenerator() if args.fake_backend else load_model_backend(config.model)
     verifier = LeanSubprocessVerifier(LEAN_PROJECT_ROOT)
@@ -317,9 +346,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             for item in candidates
         )
 
+    sample_count = args.latent_samples or config.rl.rollouts_per_state
+    if sample_count <= 0:
+        raise ValueError("latent-samples must be positive")
     deltas = tuple(
         torch.randn(generator.hidden_size, generator=torch.Generator().manual_seed(config.run.seed + index))
-        for index in range(config.rl.rollouts_per_state)
+        for index in range(sample_count)
     )
     benchmark(
         fixtures, catalog, generator, config.analogy.grounding_operators, deltas,

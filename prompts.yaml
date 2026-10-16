@@ -249,14 +249,14 @@ prompts:
     user: >-
       The output failed validation: {{failure}}. Prior output: {{raw}}. Return only the required JSON object with no Markdown or commentary.
   story_operator:
-    version: story-operator-v1
+    version: story-operator-v2
     system: >-
-      Choose one configured proof operation through a short everyday story. Return only strict JSON.
+      Choose one configured operation through a short everyday story. Return only strict JSON. The story must use ordinary objects and actions: never copy formulas, propositions, inventory IDs, proof terminology, tactic names, variable letters, or mathematical symbols into the story.
     user: |-
       Neutral need: {{need_json}}
       Available items: {{inventory_json}}
       Allowed operators: {{operators_json}}
-      Return exactly story, operator, and bindings. Bindings map short story roles to listed inventory IDs.
+      Return exactly story, operator, and bindings. Only bindings may contain inventory IDs. bindings must be one JSON object mapping short everyday-role keys to listed inventory-ID values, for example {"key":"local:0"}.
   ablation_plain:
     version: ablation-plain-v1
     system: >-
@@ -266,11 +266,11 @@ prompts:
       Allowed operators: {{operators_json}}
       Return exactly operator.
   ablation_story:
-    version: ablation-story-v1
+    version: ablation-story-v2
     system: >-
-      Write a short everyday story, then choose one configured proof operation. Return only strict JSON.
+      Write a short everyday story, then choose one configured operation. Return only strict JSON. The story must use ordinary objects and actions: never copy formulas, propositions, inventory IDs, proof terminology, tactic names, variable letters, or mathematical symbols into the story.
     user: |-
       Neutral need: {{need_json}}
       Available items: {{inventory_json}}
       Allowed operators: {{operators_json}}
-      Return exactly story, operator, and bindings.
+      Return exactly story, operator, and bindings. Only bindings may contain inventory IDs. bindings must be one JSON object mapping short everyday-role keys to listed inventory-ID values, for example {"key":"local:0"}.

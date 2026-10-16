@@ -31,7 +31,7 @@ class _Generator:
         return json.dumps({
             "story": "A spare key already fits the lock.",
             "operator": "exact_local",
-            "bindings": [{"role": "key", "inventory_id": "local:0"}],
+            "bindings": {"key": "local:0"},
         })
 
 
@@ -86,3 +86,42 @@ def test_ablation_pairs_calls_crosses_order_and_keeps_plain_inventory_free(tmp_p
     assert summary["story_diversity"]["unique_by_fixture"] == {"a": 1, "b": 1}
     assert summary["paired"][0]["first_pick_delta"] == 0
     assert {path.name for path in output.iterdir()} == {"attempts.jsonl", "summary.json", "report.md"}
+
+
+def test_invalid_output_keeps_raw_text_and_generation_costs(tmp_path):
+    class InvalidStory(_Generator):
+        def generate_with_delta(self, messages, *, delta, layer, seed):
+            if messages[0].content == "story":
+                return '{"story":"A key fits.","operator":"exact_local","bindings":[]}'
+            return super().generate_with_delta(
+                messages, delta=delta, layer=layer, seed=seed,
+            )
+
+    prompt_path = tmp_path / "prompts.yaml"
+    prompt_path.write_text("""prompts:
+  ablation_plain:
+    version: p1
+    system: plain
+    user: 'Need={{need_json}} Ops={{operators_json}}'
+  ablation_story:
+    version: s1
+    system: story
+    user: 'Need={{need_json}} Items={{inventory_json}} Ops={{operators_json}}'
+""")
+    output = tmp_path / "out"
+    summary = benchmark(
+        ({"id": "a"},), PromptCatalog.load(prompt_path), InvalidStory(),
+        (GroundingOperator.EXACT_LOCAL,), (torch.zeros(2),), _reconstruct,
+        lambda _fixture, candidates: tuple(True for _ in candidates), output,
+        hidden_layer=-1, base_seed=0,
+    )
+    story = next(
+        json.loads(line) for line in (output / "attempts.jsonl").read_text().splitlines()
+        if json.loads(line)["arm"] == "story"
+    )
+
+    assert story["valid"] is False
+    assert story["raw"].endswith('"bindings":[]}')
+    assert story["prompt_characters"] > 0 and story["output_characters"] > 0
+    assert summary["arms"]["story"]["invalid_outputs"] == 1
+    assert summary["arms"]["story"]["prompt_characters"] > 0

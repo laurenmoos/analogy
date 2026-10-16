@@ -317,7 +317,7 @@ def build_local_inventory(
 
 
 def render_model_inventory(inventory: LocalProofInventory) -> str:
-    """Compact inventory view without state hashes or Lean local identifiers."""
+    """Formula-free model view; code retains exact propositions internally."""
     items = []
     for entry in inventory.locals + inventory.target_entries:
         try:
@@ -327,7 +327,6 @@ def render_model_inventory(inventory: LocalProofInventory) -> str:
         items.append({
             "inventory_id": entry.inventory_id,
             "kind": entry.kind.value,
-            "proposition": entry.proposition,
             "structural_shape": shape,
         })
     return json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

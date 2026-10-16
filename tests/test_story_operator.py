@@ -31,12 +31,13 @@ def _need():
     )
 
 
-def test_model_inventory_omits_state_hash_and_local_identifiers():
+def test_model_inventory_omits_state_hash_identifiers_and_exact_formulas():
     rendered = render_model_inventory(_inventory())
     assert "fingerprint" not in rendered
     assert "secret_name" not in rendered
+    assert '"proposition"' not in rendered
     assert json.loads(rendered)[0] == {
-        "inventory_id": "local:0", "kind": "local", "proposition": "P",
+        "inventory_id": "local:0", "kind": "local",
         "structural_shape": {"root": "target"},
     }
 
@@ -45,20 +46,20 @@ def test_parse_story_operator_decision_accepts_only_enabled_exact_ids():
     decision = parse_story_operator_decision(json.dumps({
         "story": "A labeled parcel is already on the requested shelf.",
         "operator": "exact_local",
-        "bindings": [{"role": "parcel", "inventory_id": "local:0"}],
+        "bindings": {"parcel": "local:0"},
     }), _inventory(), (GroundingOperator.EXACT_LOCAL,))
     assert decision.operator is GroundingOperator.EXACT_LOCAL
     assert decision.bindings[0].inventory_id == "local:0"
 
 
 @pytest.mark.parametrize("raw,match", [
-    ('{"story":"A","story":"B","operator":"exact_local","bindings":[]}', "duplicate"),
-    ('{"story":"A","operator":"split","bindings":[]}', "disabled"),
-    ('{"story":"A","operator":"exact_local","bindings":[{"role":"x","inventory_id":"missing"}]}', "unknown inventory"),
-    ('{"story":"A","operator":"exact_local","bindings":[{"role":"x","inventory_id":"local:0"},{"role":"x","inventory_id":"active_subgoal"}]}', "role labels"),
-    ('{"story":"A","operator":"exact_local","bindings":[{"role":"x","inventory_id":"local:0"},{"role":"y","inventory_id":"local:0"}]}', "inventory ids"),
-    ('{"story":"exact h","operator":"exact_local","bindings":[]}', "everyday"),
-    ('{"story":"A","operator":"exact_local","bindings":[],"completion":true}', "missing or unknown"),
+    ('{"story":"A","story":"B","operator":"exact_local","bindings":{}}', "duplicate"),
+    ('{"story":"A","operator":"split","bindings":{}}', "disabled"),
+    ('{"story":"A","operator":"exact_local","bindings":{"x":"missing"}}', "unknown inventory"),
+    ('{"story":"A","operator":"exact_local","bindings":{"x":"local:0","x":"active_subgoal"}}', "duplicate"),
+    ('{"story":"A","operator":"exact_local","bindings":{"x":"local:0","y":"local:0"}}', "inventory ids"),
+    ('{"story":"exact h","operator":"exact_local","bindings":{}}', "everyday"),
+    ('{"story":"A","operator":"exact_local","bindings":{},"completion":true}', "missing or unknown"),
 ])
 def test_parse_story_operator_decision_rejects_invalid_output(raw, match):
     with pytest.raises(ValueError, match=match):
@@ -96,7 +97,7 @@ def test_generator_makes_one_call_and_never_repairs(tmp_path):
 """)
     backend = _Generator(json.dumps({
         "story": "A parcel is already where it belongs.", "operator": "exact_local",
-        "bindings": [{"role": "parcel", "inventory_id": "local:0"}],
+        "bindings": {"parcel": "local:0"},
     }))
     generated = StoryOperatorGenerator(
         backend, PromptCatalog.load(prompt_path), (GroundingOperator.EXACT_LOCAL,),

@@ -44,7 +44,7 @@ def test_grounded_profile_uses_one_call_identity_without_production_ablation_arm
         "decision_schema", "compiler_version", "operators", "prompt_catalog_hash",
         "prompt_versions",
     }
-    assert identity["prompt_versions"] == {"story_operator": "story-operator-v1"}
+    assert identity["prompt_versions"] == {"story_operator": "story-operator-v2"}
 
 
 def test_curriculum_training_replays_prefix_and_persists_transition_without_answer(tmp_path, monkeypatch):

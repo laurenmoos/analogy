@@ -4,19 +4,19 @@
 
 This report verifies the production story/operator path and the standalone
 direct-choice versus story-mediated ablation. The implementation base was commit
-`b746769ebc5be08cedf7d5e19ecf907160a27dec` on
+`f2fffa4` on
 `codex/single-call-grounding`.
 
 - Host: Apple Silicon (`arm64`, Darwin `24.4.0`, macOS `15.4.1`).
 - Python environment: repository `.venv`, invoked with `PYTHONPATH=src`.
 - Production model profile: MLX Qwen3-8B configuration.
-- Real-model availability: unavailable in this environment because the MLX
-  optional dependency is not installed.
+- Real-model runtime: `mlx 0.32.4`, `mlx-lm 0.29.1`, locally cached
+  `mlx-community/Qwen3-8B-4bit`, Metal, hidden size 4096.
 - Lean: the repository's pinned subprocess verifier.
 - Prompt catalog hash:
-  `e1e4dbafdd98c3bb44c41f1d3c683abb456cbcf079610633f813384daf0f34f9`.
-- Production prompt: `story-operator-v1`.
-- Ablation prompts: `ablation-plain-v1` and `ablation-story-v1`.
+  `b4c4e782f7a69ce2011377e25134eed15780c9a12367fddc71e879a8715877da`.
+- Production prompt: `story-operator-v2`.
+- Ablation prompts: `ablation-plain-v1` and `ablation-story-v2`.
 
 The enabled operator configuration was:
 
@@ -32,7 +32,7 @@ The complete suite passed:
 
 ```text
 PYTHONPATH=src .venv/bin/python -m pytest -q
-117 passed in 8.18s
+119 passed in 7.37s
 ```
 
 The focused real-Lean integration suite passed:
@@ -94,41 +94,77 @@ first-minus-second order success delta was zero for both arms.
 
 | Arm | Calls | Invalid | First-pick successes | Any-candidate successes | Zero applications | Prompt chars | Output chars | Model seconds | Lean calls |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Plain | 40 | 0 | 16 | 16 | 24 | 26,584 | 1,040 | 0.000539 | 16 |
-| Story | 40 | 0 | 16 | 16 | 24 | 63,348 | 3,560 | 0.000596 | 16 |
+| Plain | 40 | 0 | 16 | 16 | 24 | 26,584 | 1,040 | 0.000721 | 16 |
+| Story | 40 | 0 | 16 | 16 | 24 | 72,248 | 3,560 | 0.000715 | 16 |
 
 The fixed fake backend always selected `exact_local`, so paired first-pick and
 any-candidate deltas were all zero. This checks experiment symmetry and artifact
 accounting, not story quality. It also explains the 24 zero-application outcomes
-per arm. The story prompt was 2.383× longer, its output was 3.423× longer, model
-latency was 1.106×, and candidate counts were equal. These ratios make prompt
+per arm. The story prompt was 2.718× longer, its output was 3.423× longer, and
+candidate counts were equal. Fake model timing is too small to compare. These ratios make prompt
 dominance visible instead of hiding it behind aggregate accuracy.
 
 The fake backend produced one unique story per fixture and therefore zero
 fixtures with multiple stories. The metric is wired correctly, but only a real
 model run can test whether distinct latent nudges yield distinct narratives.
 
-## Real-Qwen attempt
+## Real-Qwen and production execution
 
-The bounded command was attempted with the real configured backend:
+The first sandboxed attempt reported that the MLX extra was not installed. That
+diagnosis was false: Metal device initialization raises `ImportError` when the
+sandbox hides the GPU, and the backend collapsed every such error into the
+missing-extra message. The diagnostic now distinguishes a missing package from
+an unavailable Metal runtime. Running with explicit host GPU access loaded the
+cached model successfully.
+
+The actual production `story_operator` prompt, parser, grounding enumerator,
+compiler, and Lean verifier were then run on three hard fixtures:
+
+```text
+PYTHONPATH=src .venv/bin/python scripts/smoke_story_operator_production.py \
+  --config config.mlx-8b-grounded-analogy.yaml \
+  --fixtures tests/fixtures/story_operator_ambiguous.json \
+  --max-fixtures 3
+```
+
+Each state made exactly one Qwen call and no repair call. All three outputs were
+valid strict JSON with formula-free everyday stories. One state selected
+`exact_local`, produced one candidate, and Lean completed the proof. Two states
+selected operators with zero valid applications, so no tactic was fabricated and
+Lean was not called. Production success was therefore 1/3 on this deliberately
+ambiguous sample. This is a model-choice limitation, not a runtime or schema
+failure.
+
+The final matched real-model command used three fixtures, two latent samples,
+crossed order, and real Lean verification:
 
 ```text
 PYTHONPATH=src .venv/bin/python scripts/benchmark_story_operator_ablation.py \
   --config config.mlx-8b-grounded-analogy.yaml \
   --fixtures tests/fixtures/story_operator_ambiguous.json \
-  --output-dir /tmp/analogy-real-smoke.*/results
+  --output-dir /tmp/analogy-real-qwen-20261016-v6 \
+  --max-fixtures 3 --latent-samples 2
 ```
 
-It exited with status 2 before loading a model:
+| Arm | Calls | Invalid | First-pick | Any-candidate | Zero applications | Prompt tokens | Output tokens | Model seconds | Lean calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Plain | 6 | 0 | 6 | 6 | 0 | 1,048 | 44 | 13.039 | 8 |
+| Story | 6 | 0 | 4 | 4 | 2 | 2,414 | 400 | 53.779 | 4 |
 
-```text
-story operator ablation failed: ModelConfigurationError: the MLX extra is not installed; install analogy[mlx]
-```
+On this bounded smoke, direct selection beat story-mediated selection on both
+first-pick and any-candidate success. The story arm used 2.30× as many prompt
+tokens, 9.09× as many output tokens, and 4.12× model time. Both story failures
+were paired failures on `equality_or_apply`, where the story chose `exact_local`
+instead of `apply_implication` and deterministic grounding correctly returned
+zero applications.
 
-Consequently, this report makes no claim about real-Qwen paired accuracy or
-latent story diversity. The fake-backend, parser, deterministic grounding,
-compiler, and real-Lean verification evidence remain independent of that missing
-optional runtime.
+The two distinct latent nudges produced the same story for every fixture:
+mean unique stories per fixture was 1.0 and zero fixtures had multiple stories.
+Thus the requested diversity check is operational, and its observed result is
+negative for this deterministic Qwen configuration. The story prompt dominates
+cost and does not improve accuracy on this sample; a larger run is needed before
+changing the production research condition, but these results do not support a
+story benefit.
 
 ## Compatibility boundary
 

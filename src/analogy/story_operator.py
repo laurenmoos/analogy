@@ -94,13 +94,12 @@ def parse_story_operator_decision(
     if operator not in enabled:
         raise TransferOutputError("operator is disabled")
     raw_bindings = payload["bindings"]
-    if not isinstance(raw_bindings, list) or len(raw_bindings) > 16:
-        raise TransferOutputError("bindings must be a bounded JSON array")
-    bindings = tuple(StoryBinding(**_strict_object(item, StoryBinding)) for item in raw_bindings)
+    if not isinstance(raw_bindings, dict) or len(raw_bindings) > 16:
+        raise TransferOutputError("bindings must be a bounded JSON object")
+    bindings = tuple(StoryBinding(role, inventory_id)
+                     for role, inventory_id in raw_bindings.items())
     roles = tuple(item.role for item in bindings)
     ids = tuple(item.inventory_id for item in bindings)
-    if len(set(roles)) != len(roles):
-        raise TransferOutputError("binding role labels must be unique")
     if len(set(ids)) != len(ids):
         raise TransferOutputError("binding inventory ids must be unique")
     for inventory_id in ids:

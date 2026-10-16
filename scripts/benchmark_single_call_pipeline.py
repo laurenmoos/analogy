@@ -31,7 +31,7 @@ class _Backend:
         return json.dumps({
             "story": "Three spare keys are available for one matching lock.",
             "operator": "exact_local",
-            "bindings": [{"role": "key", "inventory_id": "local:0"}],
+            "bindings": {"key": "local:0"},
         })
 
 

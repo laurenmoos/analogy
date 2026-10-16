@@ -3,6 +3,7 @@ import json
 import pytest
 
 from analogy.model import normalize_lean4_tactic, parse_tactic_candidates, parse_tactic_sequence
+from analogy.mlx_model import _mlx_import_diagnostic
 
 
 @pytest.mark.parametrize("source,expected", [
@@ -28,3 +29,15 @@ def test_candidate_normalization_precedes_deduplication_and_weighting():
 
 def test_capability_sequence_is_normalized_too():
     assert parse_tactic_sequence('["cases h with hp hq"]') == ("cases h",)
+
+
+def test_mlx_import_diagnostic_distinguishes_missing_extra_from_unavailable_metal():
+    missing = ImportError("No module named 'mlx_lm'", name="mlx_lm")
+    metal = ImportError("[metal::load_device] No Metal device available")
+
+    assert _mlx_import_diagnostic(missing) == (
+        "the MLX extra is not installed; install analogy[mlx]"
+    )
+    assert _mlx_import_diagnostic(metal) == (
+        "failed to initialize MLX: [metal::load_device] No Metal device available"
+    )

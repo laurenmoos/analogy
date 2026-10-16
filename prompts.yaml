@@ -27,6 +27,7 @@ prompts:
       (A B : Prop) (ha : A) (hb : B) ⊢ A ∧ B => ["constructor", "exact ha", "exact hb"]
       (A B : Prop) (h : A ∧ B) ⊢ B ∧ A => ["constructor", "exact h.2", "exact h.1"]
       (A B : Prop) (f : A → B) (ha : A) ⊢ B => ["apply f", "exact ha"]
+      For a standalone split, emit `cases h`; never emit Lean 3 `cases h with hp hq`.
       (A B : Prop) (h : A ∨ B) ⊢ B ∨ A => ["cases h with | inl ha => right; exact ha | inr hb => left; exact hb"]
       (A B : Prop) (h : A ↔ B) ⊢ A → B => ["intro ha", "exact h.mp ha"]
       (A B : Prop) (f : A → B) (nb : ¬B) ⊢ ¬A => ["intro ha", "apply nb", "exact f ha"]

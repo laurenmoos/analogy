@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -502,6 +503,18 @@ class QwenTacticRanker:
             ) from error
 
 
+_LEAN3_CASES = re.compile(
+    r"^cases\s+(?P<subject>«[^»]+»|[A-Za-z_][\w'✝]*)\s+with\s+"
+    r"(?P<left>[A-Za-z_][\w'✝]*)\s+(?P<right>[A-Za-z_][\w'✝]*)$"
+)
+
+
+def normalize_lean4_tactic(text: str) -> str:
+    canonical = " ".join(text.split())
+    match = _LEAN3_CASES.fullmatch(canonical)
+    return canonical if match is None else f"cases {match['subject']}"
+
+
 def parse_tactic_sequence(text: str) -> tuple[str, ...]:
     """Parse a generated nonempty JSON array of nonblank tactic strings."""
 
@@ -513,7 +526,7 @@ def parse_tactic_sequence(text: str) -> tuple[str, ...]:
         raise ModelOutputError("model output must be a nonempty JSON array")
     if not all(isinstance(item, str) and item.strip() for item in value):
         raise ModelOutputError("every tactic must be a nonblank string")
-    return tuple(value)
+    return tuple(normalize_lean4_tactic(item) for item in value)
 
 
 def parse_tactic_candidates(
@@ -557,7 +570,7 @@ def parse_tactic_candidates(
             raise ModelOutputError(
                 "candidate scores must be finite nonnegative numbers"
             )
-        canonical = " ".join(tactic.split())
+        canonical = normalize_lean4_tactic(tactic)
         if canonical not in weights:
             order.append(canonical)
             weights[canonical] = float(score)
@@ -889,6 +902,7 @@ __all__ = [
     "TacticRankingError",
     "TextGenerator",
     "capability_prompt",
+    "normalize_lean4_tactic",
     "parse_tactic_sequence",
     "parse_tactic_candidates",
     "run_capability",

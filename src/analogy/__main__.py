@@ -6,6 +6,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from .experiments.activation_cli import build_activation_parser, run_activation_eval
 
 from .config import ConfigError, load_config, load_curriculum_config
 from .grounded_curriculum import CurriculumError, build_grounded_curriculum
@@ -50,10 +51,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="schema-repair attempts per judgment",
     )
+    parser.epilog = "Standalone measurement: analogy activation-eval --help"
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "activation-eval":
+        try:
+            args = build_activation_parser().parse_args(arguments)
+            return args.handler(args)
+        except (ConfigError, ModelConfigurationError, OSError, ValueError) as error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 2
     args = build_parser().parse_args(argv)
     if args.command == "build-grounded-curriculum":
         try:

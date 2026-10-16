@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import hashlib
 import time
+import re
+from pathlib import PurePath
 from typing import Any, Callable
 
 from ..config import ModelConfig
@@ -67,6 +69,23 @@ def _mlx_import_diagnostic(error: ImportError) -> str:
     return f"failed to initialize MLX: {error or type(error).__name__}"
 
 
+def resolve_loaded_revision(identifier: str, tokenizer: Any) -> str:
+    """Use only already-loaded metadata; never resolve a mutable ref online."""
+    metadata = getattr(tokenizer, "init_kwargs", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    candidates = [getattr(tokenizer, "_commit_hash", None), metadata.get("_commit_hash")]
+    for path in (getattr(tokenizer, "name_or_path", None), metadata.get("name_or_path"), identifier):
+        if isinstance(path, str):
+            parts = PurePath(path).parts
+            for index, part in enumerate(parts[:-1]):
+                if part == "snapshots":
+                    candidates.append(parts[index + 1])
+    revisions = {value.lower() for value in candidates if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value)}
+    if len(revisions) == 1:
+        return f"{identifier}@{revisions.pop()}"
+    return f"unresolved:{identifier}"
+
+
 class MLXQwenGenerator:
     """Qwen backend with an MLX-native, temporary decoder-layer intervention."""
 
@@ -94,7 +113,7 @@ class MLXQwenGenerator:
         self.do_sample = config.do_sample
         self.temperature = config.temperature
         self.top_p = config.top_p
-        self.model_revision = config.name
+        self.model_revision = resolve_loaded_revision(config.name, tokenizer)
         hidden_size = getattr(getattr(model, "args", None), "hidden_size", None)
         if hidden_size is None:
             raise ModelConfigurationError("MLX model does not expose hidden size")

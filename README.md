@@ -373,3 +373,62 @@ Each result directory contains:
 - `summary.json`: paired condition aggregates, fixed-pool solves, separately counted rescue solves, and operational fallbacks.
 
 The primary metric is Lean-verified solve rate within the identical fixed candidate and verifier budget. Compare `analogy` with both `none` and structurally matched `random`; do not fold rescue solves into the fixed-pool result. A null result—no eligible analogy, no improvement, or equal rankings—is valid evidence rather than an experiment failure. Rescue proposes at most two new tactics only after the fixed pool is exhausted and is reported separately.
+
+## Standalone activation-selected analogy evaluation
+
+Run the inexpensive deterministic fake and unit suite without loading Qwen:
+
+```bash
+uv run pytest -q
+```
+
+Run the frozen MLX experiment separately:
+
+```bash
+uv run --extra mlx python -m analogy activation-eval --config config.activation-analogy.yaml
+```
+
+The six preselected problems use 16 paired seeds for the initial result. A later
+32-seed confirmation must preserve that initial result. Successful implementation
+and fake tests are not a completed real-model experiment until its actual run
+artifacts exist.
+
+Equal-tactic/Lean-budget results measure analogy quality while charging selection
+as additional model work. Equal-compute results cap rescue work by processed model
+token positions and allow neutral/prompted top-ups within the selected condition's
+measured cost, with the same Lean-call cap. Conventional continuation is metered
+separately. Both views appear for every problem and all four conditions.
+
+For a bounded real smoke, retain all six calibration donor problems but evaluate
+one problem/seed cell after pre-Lean collection and selection are frozen:
+
+```bash
+uv run --extra mlx python -m analogy activation-eval --config config.activation-analogy.yaml --problem imp_intro_05 --seed 0 --max-cells 1
+```
+
+Each invocation creates a new `.artifacts/runs/activation_analogy/<run-id>/`.
+`--output-dir PATH` chooses an exact new directory and rejects existing paths.
+Resolved configuration, the immutable anchor manifest, flushed pre-Lean records,
+condition/view trial rows, `summary.json`, and `report.md` retain the evidence.
+Activation vectors are summarized by default; `persist_full_activations: true`
+additionally writes compressed pooled vectors (the provider exposes layer means,
+not a full per-token residual trajectory).
+
+Model identity is resolved from the loaded tokenizer's local commit metadata or
+snapshot path. If unavailable, artifacts use an explicit `unresolved:` identity
+and the report warns that immutable model provenance has not been established.
+
+Resume a fully frozen checkpoint with the same configuration and seed override:
+
+```bash
+uv run --extra mlx python -m analogy activation-eval --config config.activation-analogy.yaml --resume .artifacts/runs/activation_analogy/RUN_ID
+```
+
+Resume validates schema, frozen model revision, ordered problem IDs, seed range,
+prompt bytes, configuration, and anchor-manifest hashes. It uses the recorded
+selection, skips completed cells, and never overwrites results. An interrupted
+pre-Lean collection or a torn/partial trial journal is preserved and rejected;
+start a new run in those cases. Completed runs are immutable and resume as a
+read-only confirmation. Bootstrap intervals and paired counts are descriptive,
+not population inference. Single-boundary activation patching is a local causal
+proxy, not a reconstruction of the full analogy-conditioned trajectory.

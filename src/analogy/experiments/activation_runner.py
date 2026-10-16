@@ -12,7 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import math
-from typing import Mapping, Sequence
+import time
+from typing import Callable, Mapping, Sequence
 
 from ..config import AppConfig
 from ..inference.model_provider import CompletionActivationTrace, CompletionScore, ModelProvider
@@ -73,6 +74,20 @@ class CandidateEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenCompletionTrace:
+    """Score and vector summaries retained after selection for Lean-only resume.
+
+    These records deliberately cannot support recalibration or reselection.
+    Full pooled vectors remain optional diagnostics in the artifact writer.
+    """
+
+    score: CompletionScore
+    completion_token_count: int
+    processed_token_positions: int
+    activation_summaries: tuple[dict, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PreLeanCell:
     anchor: AnchorRecord
     context: ProofRescueContext
@@ -84,6 +99,7 @@ class PreLeanCell:
     charges: tuple[ModelCharge, ...]
     status: str
     diagnostics: tuple[str, ...] = ()
+    elapsed_seconds: float | None = None
 
     @property
     def processed_token_positions(self) -> int | None:
@@ -135,6 +151,7 @@ class MatchedConditionOutcome(ConditionOutcome):
     continuation_verifier_results: tuple[str, ...] = ()
     charges: tuple[ModelCharge, ...] = ()
     generations: tuple[GeneratedTacticSlate, ...] = ()
+    elapsed_seconds: float | None = None
 
     @property
     def lean_calls(self) -> int:
@@ -161,6 +178,7 @@ class ActivationEvaluationRun:
     collection: PreLeanCollection
     selections: FrozenSelections
     trials: tuple[MatchedActivationTrialRecord, ...]
+    elapsed_seconds: float | None = None
 
 
 def condition_order(seed: int) -> tuple[ActivationCondition, ...]:
@@ -240,6 +258,7 @@ class _GenerationAccounting:
 def collect_prelean(
     config: ActivationEvalConfig, app_config: AppConfig, anchors: Sequence[AnchorRecord],
     generator: ModelProvider, *, proof_structures: Mapping[tuple[str, int], ProofStructure],
+    cell_sink: Callable[[PreLeanCell], None] | None = None,
 ) -> PreLeanCollection:
     """Collect every cell before calibration, using only supplied anchor data.
 
@@ -261,9 +280,12 @@ def collect_prelean(
     layers = tuple(generator.resolve_decoder_layers(config.activation_layer_count, through=app_config.model.hidden_layer))
     cells = []
     for anchor in anchors:
+        started = time.monotonic()
         context = _context(anchor)
         if anchor.no_stuck_anchor:
             cells.append(PreLeanCell(anchor, context, None, (), (), (), (), (), "no_stuck_anchor"))
+            if cell_sink is not None:
+                cell_sink(cells[-1])
             continue
         structure = structures[(anchor.problem_id, anchor.seed)]
         accounting = _GenerationAccounting(generator)
@@ -330,7 +352,9 @@ def collect_prelean(
                 if status != "ready":
                     break
         cells.append(PreLeanCell(anchor, context, neutral, candidates, union, tuple(traces), tuple(evidence),
-                                 tuple(charges), status, tuple(diagnostics)))
+                                 tuple(charges), status, tuple(diagnostics), time.monotonic() - started))
+        if cell_sink is not None:
+            cell_sink(cells[-1])
     return PreLeanCollection(config, app_config, tuple(cells), layers, generator.model_revision)
 
 
@@ -349,6 +373,8 @@ class _RecordedPatches:
 
 def freeze_selections(collection: PreLeanCollection) -> FrozenSelections:
     """Pure cross-fit and freeze: there is no model or verifier argument."""
+    if any(isinstance(trace, FrozenCompletionTrace) for cell in collection.cells for trace in cell.neutral_traces):
+        raise ValueError("frozen checkpoint supports Lean resume, not reselection")
     config = collection.config
     usable = tuple(c for c in collection.cells if c.status == "ready")
     vectors = tuple(NeutralVector(c.anchor.problem_id, concatenate_layers(t)) for c in usable for t in c.neutral_traces)
@@ -512,6 +538,7 @@ def _evaluate_arm(frozen: FrozenCell, problem: Problem, verifier: Verifier, gene
                   app: AppConfig, arm: ActivationCondition, slate: _ArmSlate, *, view: str,
                   ceiling: int | None, final_cap: int, lean_cap: int, max_expansions: int,
                   unavailable: str | None = None) -> MatchedConditionOutcome:
+    started = time.monotonic()
     cell = frozen.prelean
     base = dict(condition=arm, generated_tactics=slate.tactics, budget_view=view,
                 processed_token_positions=slate.cost, compute_ceiling=ceiling, final_tactic_cap=final_cap,
@@ -587,12 +614,14 @@ def _evaluate_arm(frozen: FrozenCell, problem: Problem, verifier: Verifier, gene
                                    completed=completed, diagnostics=tuple(diagnostics), immediate_utility=utility,
                                    rescue_lean_calls=len(results), continuation_lean_calls=continuation_calls,
                                    continuation_status=continuation, continuation_processed_token_positions=continuation_positions,
-                                   continuation_verifier_results=continuation_results, diversity=tuple(observations))
+                                   continuation_verifier_results=continuation_results, diversity=tuple(observations),
+                                   elapsed_seconds=time.monotonic() - started)
 
 
 def run_lean_conditions(
     selections: FrozenSelections, problems: Sequence[Problem], verifier: Verifier, *, generator: ModelProvider,
     lean_call_cap: int | None = None, max_topups: int = 64,
+    trial_sink: Callable[[MatchedActivationTrialRecord], None] | None = None,
 ) -> tuple[MatchedActivationTrialRecord, ...]:
     """Replay frozen selections independently in both budget views.
 
@@ -700,6 +729,8 @@ def run_lean_conditions(
             causal_ranking_changes=tuple((e.candidate.record.candidate_id, _ranking_change(cell, e)) for e in cell.evidence),
             generation_failures=tuple(c for c in cell.candidates if isinstance(c, CandidateGenerationFailure)),
         ))
+        if trial_sink is not None:
+            trial_sink(records[-1])
     return tuple(records)
 
 

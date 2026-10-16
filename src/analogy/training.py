@@ -932,7 +932,7 @@ def evaluate_direct_rescue(
             )
         for episode in episodes:
             _persist_episode(writer, episode, 0, condition.name)
-        solved_ids = {item.problem_id for item in episodes if item.completed}
+        solved_ids = {item.transition_id or item.problem_id for item in episodes if item.completed}
         if condition.name == "conventional":
             conventional_solved = solved_ids
         summaries.append(_summarize_condition(condition.name, episodes, conventional_solved))
@@ -960,7 +960,9 @@ def _summarize_condition(
     iterations = tuple(
         iteration for trace in traces for iteration in trace.iterations
     )
-    solved_ids = tuple(sorted(item.problem_id for item in episodes if item.completed))
+    # Pair curriculum outcomes at state/transition granularity, not theorem level.
+    # Legacy episodes have no transition identity and retain their problem IDs.
+    solved_ids = tuple(sorted(item.transition_id or item.problem_id for item in episodes if item.completed))
     solved_set = set(solved_ids)
     verifier_calls = sum(item.verifier_calls for item in episodes)
     stop_counts = Counter(trace.stop_reason.value for trace in traces)

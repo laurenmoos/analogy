@@ -102,6 +102,53 @@ def test_curriculum_training_replays_prefix_and_persists_transition_without_answ
     assert set(loaded_splits) == {"train", "validation"}
 
 
+def test_curriculum_paired_outcomes_keep_opposite_results_on_distinct_prefixes(tmp_path, monkeypatch):
+    cfg = curriculum_config(tmp_path, ids=("heldout",))
+    cfg.split_manifest.write_text(json.dumps({"schema_version": 1,
+        "train": [], "validation": [], "test": ["heldout"]}))
+    verifier = PrefixVerifier(cfg.lean_project)
+    manifest = build_grounded_curriculum(cfg, verifier).manifest_path
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, benchmark=replace(base.benchmark, corpus=cfg.problems),
+        run=replace(base.run, output_dir=tmp_path / "runs"),
+        rl=replace(base.rl, enabled=True, curriculum_manifest=manifest))
+    generator = type("Generator", (), {"hidden_size": 2})()
+    policy = training._new_policy(config, generator)
+    split = training._curriculum_problem_split(manifest, training.load_problems(cfg.problems))
+    checkpoint = tmp_path / "epoch.pt"
+    torch.save({"config_hash": training._config_hash(config), "split": asdict(split),
+        "artifact_identity": training._artifact_identity(config),
+        "policy_schema_version": policy.schema_version, "policy": policy.state_dict()}, checkpoint)
+    conditions = training.build_evaluation_conditions(config)[:2]
+    monkeypatch.setattr(training, "build_evaluation_conditions", lambda config: conditions)
+
+    def execute(config, generator, verifier, problem, phase, policy, **kwargs):
+        # Baseline solves only the initial state; direct rescue solves only its successor.
+        completed = bool(kwargs["initial_state"].context) == (phase != "conventional")
+        return training.ProblemEpisode(problem.id, completed, (), (), 0, 1)
+
+    monkeypatch.setattr(training, "_execute_problem", execute)
+    summary = training.evaluate_direct_rescue(config, generator, verifier, checkpoint)
+    baseline, direct = summary.condition_summaries
+    states = training.load_online_curriculum_states(manifest, "test")
+    initial_id = next(item.transition_id for item in states if not item.accepted_prefix)
+    successor_id = next(item.transition_id for item in states if item.accepted_prefix)
+    assert baseline.solved_ids == (initial_id,)
+    assert baseline.newly_solved_ids == baseline.regressed_ids == ()
+    assert direct.solved_ids == direct.newly_solved_ids == (successor_id,)
+    assert direct.regressed_ids == (initial_id,)
+    assert [(item.solved, item.attempted) for item in summary.condition_summaries] == [(1, 2), (1, 2)]
+    assert direct.funnel["completion"] == {"accepted": 1, "attempted": 2}
+
+
+def test_legacy_paired_outcomes_fall_back_to_problem_identity():
+    episode = training.ProblemEpisode("new-theorem", True, (), (), 0, 2)
+    summary = training._summarize_condition("direct", (episode,), {"baseline-theorem"})
+    assert summary.solved_ids == summary.newly_solved_ids == ("new-theorem",)
+    assert summary.regressed_ids == ("baseline-theorem",)
+    assert (summary.solved, summary.attempted, summary.completion_per_lean_call) == (1, 1, 0.5)
+
+
 @pytest.mark.parametrize("later_failure", ["compile", "runtime", "malformed"])
 def test_useful_first_action_keeps_credit_after_later_failure(later_failure):
     from test_analogy_transfer_loop import grounded_runner, grounded_payload, run, Evaluator

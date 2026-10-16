@@ -277,3 +277,18 @@ rescue tactic attempts (including conventional finishing), and second-analogy
 continuation uses prior novel nonterminal iterations as opportunities. Empty
 denominators indicate unavailable measurements. Episode budget counters omit
 prefix reconstruction and final-proof validation; raw subprocess logs retain them.
+
+## Post-review paired-diagnostic correction
+
+New evaluation summaries identify solved curriculum episodes by `transition_id`,
+falling back to `problem_id` for legacy episodes. Baseline pairing uses the same
+identity, so a gain on one prefix and a regression on another prefix of the same
+theorem no longer cancel. A two-prefix evaluation regression verifies both
+directions; a legacy regression verifies the fallback. Completion counts and
+denominators remain episode-based. The published initial-state results above
+are unchanged, and historical raw summaries and sealed evidence are not rewritten.
+
+Focused follow-up verification passed **129 tests / 1 skip in 4.69 seconds**
+(`tests/test_grounded_training.py`, `tests/test_training.py`, `tests/test_rl.py`,
+`tests/test_cli.py`). No inference or full-suite rerun was performed for this
+diagnostic-only correction.

@@ -16,6 +16,12 @@ from .analogy_transfer import (
 from .analogy_transfer_generation import (
     TransferredTacticPlan, SOURCE_PROMPT_VERSION, ALIGNMENT_PROMPT_VERSION,
     TRANSFER_PROMPT_VERSION, TACTIC_PROMPT_VERSION,
+    GROUNDING_PROMPT_VERSION, GROUNDING_REPAIR_PROMPT_VERSION,
+)
+from .grounded_plan import GROUNDED_PLAN_SCHEMA_VERSION, GroundedTacticPlan
+from .proof_inventory import LocalProofInventory, build_local_inventory
+from .tactic_compiler import (
+    TACTIC_COMPILER_VERSION, CompilationDiagnostic, CompiledTactic, GroundedTacticCompiler,
 )
 from .proof_views import ProofStructure, TransitionComparison
 from .records import (
@@ -78,6 +84,23 @@ class GeneratedAnalogyIteration:
 
 
 @dataclass(frozen=True, slots=True)
+class GroundedAnalogyIteration(GeneratedAnalogyIteration):
+    """Grounded artifacts are additive without changing historical raw rows."""
+
+    inventory: LocalProofInventory | None = None
+    grounded_plan: GroundedTacticPlan | None = None
+    compiled_tactics: tuple[CompiledTactic, ...] = ()
+    compilation_diagnostics: tuple[CompilationDiagnostic, ...] = ()
+    grounding_generation_attempts: tuple[GenerationAttempt, ...] = ()
+    grounding_repair_attempts: tuple[GenerationAttempt, ...] = ()
+    repaired_grounded_plan: GroundedTacticPlan | None = None
+    repaired_compiled_tactics: tuple[CompiledTactic, ...] = ()
+    repair_compilation_diagnostics: tuple[CompilationDiagnostic, ...] = ()
+    compiler_version: str | None = None
+    grounded_plan_schema_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GeneratedAnalogyTrace:
     iterations: tuple[GeneratedAnalogyIteration, ...]
     stop_reason: StopReason
@@ -103,6 +126,10 @@ class _VerificationFailure(Exception):
     pass
 
 
+class _CompilationFailure(Exception):
+    pass
+
+
 class GeneratedDomainAnalogyLoopRunner:
     """Coordinate bounded stages while keeping the verified trajectory explicit."""
 
@@ -114,6 +141,9 @@ class GeneratedDomainAnalogyLoopRunner:
         tactics_per_iteration: int, max_model_calls: int, max_lean_calls: int,
         structure_lean_cost: int = 0, iteration_sink: Callable | None = None,
         base_seed: int = 0, source_transform: Callable | None = None,
+        decoder: str = "raw", grounded_plan_generator: Any = None,
+        compiler: Any = None, inventory_builder: Callable = build_local_inventory,
+        grounding_repair_calls: int = 1,
     ) -> None:
         for name, value in (("tactics_per_iteration", tactics_per_iteration),
                             ("max_model_calls", max_model_calls), ("max_lean_calls", max_lean_calls)):
@@ -121,6 +151,18 @@ class GeneratedDomainAnalogyLoopRunner:
                 raise ValueError(f"{name} must be a positive integer")
         if isinstance(structure_lean_cost, bool) or not isinstance(structure_lean_cost, int) or structure_lean_cost < 0:
             raise ValueError("structure_lean_cost must be a non-negative integer")
+        if decoder not in {"raw", "grounded"}:
+            raise ValueError("decoder must be raw or grounded")
+        if (isinstance(grounding_repair_calls, bool) or not isinstance(grounding_repair_calls, int)
+                or grounding_repair_calls not in (0, 1)):
+            raise ValueError("grounding_repair_calls must be 0 or 1")
+        if decoder == "grounded" and grounded_plan_generator is None:
+            raise ValueError("grounded decoder requires a grounded plan generator")
+        self.decoder = decoder
+        self.grounded_plan_generator = grounded_plan_generator
+        self.compiler = compiler if compiler is not None else GroundedTacticCompiler()
+        self.inventory_builder = inventory_builder
+        self.grounding_repair_calls = grounding_repair_calls
         self.structure_builder = structure_builder
         self.observation_builder = observation_builder
         self.action_sampler = action_sampler
@@ -184,7 +226,10 @@ class GeneratedDomainAnalogyLoopRunner:
             )
             structure = representation = need = action = None
             generated_source = source = alignment = transfer = plan = None
-            stage_attempts = {name: () for name in ("source", "alignment", "transfer", "tactic")}
+            stage_attempts = {name: () for name in ("source", "alignment", "transfer", "tactic", "grounding", "grounding_repair")}
+            inventory = grounded = repaired_grounded = None
+            compiled_tactics = repaired_compiled = compilation_diagnostics = repair_diagnostics = ()
+            invalid_grounding = False
             local_proposals, local_attempts = [], []
             finisher_state = comparison = failed_stage = None
             failure_diagnostic = None
@@ -195,12 +240,12 @@ class GeneratedDomainAnalogyLoopRunner:
             predicted = actual = None
             repeated = False
 
-            def generate(stage, service, *args, **kwargs):
+            def generate(stage, service, *args, method="generate", **kwargs):
                 nonlocal resources, failed_stage, active_stage
                 active_stage = stage
                 self._check_boundary(resources, cancellation, model=True)
                 try:
-                    generated = service.generate(*args, analogy_index=index,
+                    generated = getattr(service, method)(*args, analogy_index=index,
                         max_attempts=resources.remaining_model_calls, cancellation=cancellation, **kwargs)
                 except AnalogyGenerationFailure as failure:
                     stage_attempts[stage] = failure.attempts
@@ -223,6 +268,9 @@ class GeneratedDomainAnalogyLoopRunner:
                 active_stage = "proof_need"
                 active = current.expression.split("⊢", 1)[-1].split("\n\n", 1)[0].strip()
                 need = derive_proof_need(structure, active, fixed_target=goal.expression)
+                if self.decoder == "grounded":
+                    active_stage = "inventory"
+                    inventory = self.inventory_builder(current, structure, fixed_target=goal.expression)
                 active_stage = "action"
                 action = self.action_sampler(representation, index)
                 actions.append(action)
@@ -234,19 +282,60 @@ class GeneratedDomainAnalogyLoopRunner:
                     source = self.source_transform(source, need, observation)
                 alignment = generate("alignment", self.alignment_generator, observation, need, source).alignment
                 transfer = generate("transfer", self.transfer_generator, observation, need, source, alignment).transfer
-                plan = generate("tactic", self.tactic_generator, current, structure, source, alignment, transfer,
-                                candidate_count=self.tactics_per_iteration).plan
-                predicted = plan.predicted_state
-
-                # Lean verification is authoritative. Discard repeated candidates.
-                active_stage = "verification"
-                self._check_boundary(resources, cancellation, lean=True)
-                verified, resources = self._verify(
-                    current, plan.tactics[:self.tactics_per_iteration], predicted,
-                    evaluator, cancellation, resources, seen, "analogy",
-                )
-                local_proposals.extend(verified.proposals)
-                local_attempts.extend(verified.attempts)
+                if self.decoder == "grounded":
+                    grounded = generate("grounding", self.grounded_plan_generator,
+                        inventory, transfer, plan_id=f"grounded-plan-{index}").plan
+                    active_stage = "compilation"
+                    compilation = self.compiler.compile(grounded, inventory, self.tactics_per_iteration)
+                    compiled_tactics, compilation_diagnostics = compilation.candidates, compilation.diagnostics
+                    if not compiled_tactics:
+                        raise _CompilationFailure("; ".join(item.message for item in compilation_diagnostics))
+                    predicted = grounded.expected_next_subgoal
+                    active_stage = "verification"
+                    self._check_boundary(resources, cancellation, lean=True)
+                    verified, resources = self._verify(current, compiled_tactics, predicted,
+                        evaluator, cancellation, resources, seen, "grounded_compiler", compiled=True)
+                    local_proposals.extend(verified.proposals)
+                    local_attempts.extend(verified.attempts)
+                    if (verified.failure is None and verified.completed_proof is None
+                            and verified.successor is None and verified.attempts
+                            and len(verified.attempts) == len(compiled_tactics)
+                            and all(item.result.status is TacticStatus.ERROR for item in verified.attempts)
+                            and self.grounding_repair_calls and resources.remaining_model_calls > 0
+                            and resources.remaining_lean_calls > 0):
+                        repaired_grounded = generate("grounding_repair", self.grounded_plan_generator,
+                            inventory, transfer, method="repair", failed_plan=grounded,
+                            compiled_tactics=compiled_tactics, failed_attempts=verified.attempts,
+                            plan_id=f"grounded-repair-{index}").plan
+                        active_stage = "compilation"
+                        repaired = self.compiler.compile(repaired_grounded, inventory, self.tactics_per_iteration)
+                        repaired_compiled, repair_diagnostics = repaired.candidates, repaired.diagnostics
+                        if not repaired_compiled:
+                            raise _CompilationFailure("; ".join(item.message for item in repair_diagnostics))
+                        rejected_texts = {item.proposal.candidate.source for item in verified.attempts}
+                        fresh = tuple(item for item in repaired_compiled if item.text not in rejected_texts)
+                        predicted = repaired_grounded.expected_next_subgoal
+                        active_stage = "verification"
+                        self._check_boundary(resources, cancellation, lean=True)
+                        verified, resources = self._verify(current, fresh, predicted,
+                            evaluator, cancellation, resources, seen, "grounded_compiler_repair", compiled=True)
+                        local_proposals.extend(verified.proposals)
+                        local_attempts.extend(verified.attempts)
+                    if verified.attempts:
+                        predicted = verified.attempts[-1].proposal.predicted_state
+                else:
+                    plan = generate("tactic", self.tactic_generator, current, structure, source, alignment, transfer,
+                                    candidate_count=self.tactics_per_iteration).plan
+                    predicted = plan.predicted_state
+                    # Keep historical raw decoding and verification behavior unchanged.
+                    active_stage = "verification"
+                    self._check_boundary(resources, cancellation, lean=True)
+                    verified, resources = self._verify(
+                        current, plan.tactics[:self.tactics_per_iteration], predicted,
+                        evaluator, cancellation, resources, seen, "analogy",
+                    )
+                    local_proposals.extend(verified.proposals)
+                    local_attempts.extend(verified.attempts)
                 successor, completed = verified.successor, verified.completed_proof
                 if verified.failure is not None:
                     raise _VerificationFailure(verified.failure)
@@ -304,9 +393,15 @@ class GeneratedDomainAnalogyLoopRunner:
                     attempt.status is GenerationStatus.RUNTIME_ERROR for attempt in failure.attempts
                 )
                 failure_diagnostic = str(failure)
+                invalid_grounding = self.decoder == "grounded"
                 reason = (StopReason.CANCELLED if cancellation.is_cancelled() else
                           StopReason.MODEL_BUDGET if resources.remaining_model_calls <= 0 else StopReason.NO_SUCCESSOR)
                 decision = SurpriseDecision(False, reason, controller_state)
+            except _CompilationFailure as failure:
+                invalid_grounding = True
+                failed_stage = "compilation"
+                failure_diagnostic = str(failure)
+                decision = SurpriseDecision(False, StopReason.NO_SUCCESSOR, controller_state)
             except _BoundaryStop as boundary:
                 decision = SurpriseDecision(False, boundary.reason, controller_state)
             except Exception as failure:
@@ -325,7 +420,8 @@ class GeneratedDomainAnalogyLoopRunner:
                 and item.discarded.reason is DiscardReason.REPEATED_STATE
                 for item in local_attempts
             )
-            iteration = GeneratedAnalogyIteration(
+            iteration_type = GroundedAnalogyIteration if self.decoder == "grounded" else GeneratedAnalogyIteration
+            iteration = iteration_type(
                 iteration_index=index,
                 state_before=before,
                 observation=observation,
@@ -357,8 +453,20 @@ class GeneratedDomainAnalogyLoopRunner:
                 lean_calls=resources.lean_calls,
                 elapsed_seconds=time.monotonic() - started,
                 training_eligible=(action is not None and not infrastructure_failure
-                                   and decision.reason is not StopReason.CANCELLED),
+                                   and not invalid_grounding and decision.reason is not StopReason.CANCELLED),
                 transition_before=transition_before,
+                **({"inventory": inventory, "grounded_plan": grounded, "compiled_tactics": compiled_tactics,
+                    "compilation_diagnostics": compilation_diagnostics,
+                    "grounding_generation_attempts": stage_attempts["grounding"],
+                    "grounding_repair_attempts": stage_attempts["grounding_repair"],
+                    "repaired_grounded_plan": repaired_grounded, "repaired_compiled_tactics": repaired_compiled,
+                    "repair_compilation_diagnostics": repair_diagnostics,
+                    "compiler_version": TACTIC_COMPILER_VERSION,
+                    "grounded_plan_schema_version": GROUNDED_PLAN_SCHEMA_VERSION,
+                    "prompt_versions": (("source", SOURCE_PROMPT_VERSION),
+                    ("alignment", ALIGNMENT_PROMPT_VERSION), ("transfer", TRANSFER_PROMPT_VERSION),
+                    ("grounding", GROUNDING_PROMPT_VERSION), ("grounding_repair", GROUNDING_REPAIR_PROMPT_VERSION))}
+                   if self.decoder == "grounded" else {}),
             )
             iterations.append(iteration)
             proposals.extend(local_proposals)
@@ -406,13 +514,15 @@ class GeneratedDomainAnalogyLoopRunner:
             raise _BoundaryStop(StopReason.LEAN_BUDGET)
 
     @staticmethod
-    def _verify(current, tactics, predicted, evaluator, cancellation, resources, seen, stage):
+    def _verify(current, tactics, predicted, evaluator, cancellation, resources, seen, stage, *, compiled=False):
         proposals, attempts = [], []
         successor = completed = None
-        for tactic in dict.fromkeys(" ".join(tactic.split()) for tactic in tactics):
+        candidates = ({item.text: item.predicted_next_subgoal for item in tactics} if compiled else
+                      dict.fromkeys((" ".join(tactic.split()) for tactic in tactics), predicted))
+        for tactic, prediction in candidates.items():
             if cancellation.is_cancelled() or resources.remaining_lean_calls <= 0:
                 break
-            proposal = RescueProposal(TacticCandidate(tactic, 1.0 / len(tactics), CandidateOrigin.ANALOGICAL), predicted)
+            proposal = RescueProposal(TacticCandidate(tactic, 1.0 / len(tactics), CandidateOrigin.ANALOGICAL), prediction)
             proposals.append(proposal)
             evaluate_at = getattr(evaluator, "evaluate_at", None)
             resources = resources.use_lean()
@@ -426,6 +536,10 @@ class GeneratedDomainAnalogyLoopRunner:
             if candidate_state is not None and proof_state_fingerprint(candidate_state.expression) in seen:
                 discarded = DiscardedSuccessor(evaluation.result, DiscardReason.REPEATED_STATE)
             attempts.append(RescueAttempt(proposal, evaluation.result, discarded, stage=stage))
+            infrastructure_failure = getattr(evaluation.result, "infrastructure_failure", None)
+            if infrastructure_failure is not None:
+                return _Verified(tuple(proposals), tuple(attempts), successor, completed,
+                    f"{infrastructure_failure}: {'; '.join(evaluation.result.diagnostics)}"), resources
             if evaluation.completed_proof is not None:
                 completed = evaluation.completed_proof
                 break
@@ -435,4 +549,5 @@ class GeneratedDomainAnalogyLoopRunner:
         return _Verified(tuple(proposals), tuple(attempts), successor, completed), resources
 
 
-__all__ = ["GeneratedAnalogyIteration", "GeneratedAnalogyTrace", "GeneratedDomainAnalogyLoopRunner"]
+__all__ = ["GeneratedAnalogyIteration", "GroundedAnalogyIteration", "GeneratedAnalogyTrace",
+           "GeneratedDomainAnalogyLoopRunner"]

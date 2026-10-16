@@ -30,6 +30,7 @@ ALIGNMENT_PROMPT_VERSION = "analogy-alignment-v1"
 TRANSFER_PROMPT_VERSION = "proof-reasoning-transfer-v1"
 TACTIC_PROMPT_VERSION = "transferred-tactic-v1"
 GROUNDING_PROMPT_VERSION = "grounding-v1"
+GROUNDING_REPAIR_PROMPT_VERSION = "grounding-repair-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +349,38 @@ class GroundedPlanGenerator(_TransferGenerator):
             result_type=GeneratedGroundedPlan, cancellation=cancellation,
         )
 
+    def repair(
+        self, inventory: LocalProofInventory, transfer: ProofReasoningTransfer, *,
+        failed_plan: GroundedTacticPlan, compiled_tactics, failed_attempts,
+        plan_id: str, analogy_index: int = 0, max_attempts: int | None = None, cancellation=None,
+    ) -> GeneratedGroundedPlan:
+        prompt = (
+            f"Prompt version: {GROUNDING_REPAIR_PROMPT_VERSION}\n"
+            + render_grounding_prompt(inventory, transfer)
+            + f"\nUnchanged rejected grounded plan: {_dump(failed_plan)}\n"
+            + "Compiled candidate provenance: "
+            + json.dumps([asdict(item) for item in compiled_tactics], ensure_ascii=False, sort_keys=True)
+            + "\nLean diagnostics: "
+            + json.dumps([{"tactic": item.proposal.candidate.source,
+                           "diagnostics": item.result.diagnostics} for item in failed_attempts],
+                         ensure_ascii=False, sort_keys=True)
+            + "\nReturn only a replacement typed plan for the SAME inventory and transfer. "
+              "Revise only role bindings, operator direction, or the typed inference chain. "
+              "Do not repeat a rejected candidate or emit raw Lean."
+        )
+        # The diagnostic path gets exactly one call, with no nested schema retry.
+        return _generate_strict(
+            generator=self.generator,
+            messages=(Message("system", "Repair grounded typed JSON using Lean diagnostics; never emit raw Lean."),
+                      Message("user", prompt)),
+            delta=None, hidden_layer=self.hidden_layer,
+            seed=self.base_seed + analogy_index * 100 + 50,
+            max_repair_calls=0, max_attempts=max_attempts,
+            parser=lambda raw: parse_grounded_tactic_plan(raw, inventory, transfer, plan_id),
+            result_type=GeneratedGroundedPlan, initial_repair=True,
+            schema_errors=(TransferOutputError,), cancellation=cancellation,
+        )
+
 
 __all__ = [
     "SOURCE_PROMPT_VERSION", "ALIGNMENT_PROMPT_VERSION", "TRANSFER_PROMPT_VERSION",
@@ -358,4 +391,5 @@ __all__ = [
     "render_alignment_prompt", "render_transfer_prompt", "render_transferred_tactic_prompt",
     "GROUNDING_PROMPT_VERSION", "GeneratedGroundedPlan", "GroundedPlanGenerator",
     "render_grounding_prompt",
+    "GROUNDING_REPAIR_PROMPT_VERSION",
 ]

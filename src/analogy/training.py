@@ -28,6 +28,7 @@ from .analogy_transfer_loop import GeneratedDomainAnalogyLoopRunner
 from .analogy_transfer import ProofNeed, SourceAnalogy
 from .analogy_transfer_generation import (
     SourceAnalogyGenerator, AlignmentGenerator, ProofTransferGenerator, TransferredTacticGenerator,
+    GroundedPlanGenerator,
 )
 from .analogy_stream import AnalogyHop, AnalogyTacticPlan
 from .config import AppConfig
@@ -1259,6 +1260,9 @@ def _new_generated_runner(config, generator, adapter, policy, *, condition,
         alignment_generator=AlignmentGenerator(generator, **options),
         transfer_generator=ProofTransferGenerator(generator, **options),
         tactic_generator=TransferredTacticGenerator(generator, **options),
+        decoder=config.analogy.decoder,
+        grounded_plan_generator=GroundedPlanGenerator(generator, **options),
+        grounding_repair_calls=config.analogy.grounding_repair_calls,
         transition_comparator=lambda before, predicted, actual: compare_transitions(
             before, predicted, actual, generator, config.analogy.transition_embedding_layer),
         controller=SurpriseController(SurpriseConfig(

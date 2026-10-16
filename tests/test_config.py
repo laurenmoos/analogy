@@ -79,6 +79,35 @@ data:
 """
 
 
+@pytest.mark.parametrize("decoder", [None, "raw", "grounded"])
+def test_grounded_decoder_is_explicit_and_old_profiles_default_raw(tmp_path, decoder):
+    path = tmp_path / "config.yaml"
+    text = _valid_yaml()
+    if decoder is not None:
+        text = text.replace("analogy:\n", f"analogy:\n  decoder: {decoder}\n")
+    path.write_text(text)
+    config = _config_module().load_config(path)
+    assert config.analogy.decoder == (decoder or "raw")
+    assert config.analogy.grounding_repair_calls == 1
+
+
+@pytest.mark.parametrize("setting", ["decoder: other", "decoder: true",
+    "grounding_repair_calls: 2", "grounding_repair_calls: -1", "grounding_repair_calls: true",
+    "grounding_repair_calls: 1.0"])
+def test_grounded_decoder_rejects_invalid_settings(tmp_path, setting):
+    path = tmp_path / "config.yaml"
+    path.write_text(_valid_yaml().replace("analogy:\n", f"analogy:\n  {setting}\n"))
+    with pytest.raises(_config_module().ConfigError, match="decoder|grounding_repair_calls"):
+        _config_module().load_config(path)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_grounded_decoder_accepts_explicit_repair_limit(tmp_path, count):
+    path = tmp_path / "config.yaml"
+    path.write_text(_valid_yaml().replace("analogy:\n", f"analogy:\n  grounding_repair_calls: {count}\n"))
+    assert _config_module().load_config(path).analogy.grounding_repair_calls == count
+
+
 @pytest.mark.parametrize("strategy", [None, "legacy", "generated_domain"])
 def test_analogy_strategy_defaults_to_legacy_and_accepts_generated_domain(tmp_path, strategy):
     path = tmp_path / "config.yaml"

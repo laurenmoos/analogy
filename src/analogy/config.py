@@ -63,6 +63,8 @@ class AnalogyConfig:
     iteration_cost: float
     rerank_tactics: bool
     strategy: str = "legacy"
+    decoder: str = "raw"
+    grounding_repair_calls: int = 1
 
 
 @dataclass(frozen=True)
@@ -139,7 +141,7 @@ _SCHEMA: dict[str, frozenset[str]] = {
             "min_surprise_improvement", "improvement_patience",
             "tactics_per_iteration", "max_model_calls", "max_lean_calls",
             "transition_embedding_layer", "discount", "iteration_cost",
-            "rerank_tactics", "strategy",
+            "rerank_tactics", "strategy", "decoder", "grounding_repair_calls",
         }
     ),
     "rl": frozenset(
@@ -293,7 +295,7 @@ def load_config(path: Path) -> AppConfig:
     for name, keys in _SCHEMA.items():
         section = _mapping(root[name], f"config.{name}")
         if name == "analogy":
-            section = {"strategy": "legacy", **section}
+            section = {"strategy": "legacy", "decoder": "raw", "grounding_repair_calls": 1, **section}
         _validate_keys(section, keys, f"config.{name}")
         sections[name] = section
 
@@ -305,6 +307,12 @@ def load_config(path: Path) -> AppConfig:
     strategy = _string(analogy["strategy"], "config.analogy.strategy")
     if strategy not in {"legacy", "generated_domain"}:
         raise ConfigError("config.analogy.strategy must be legacy or generated_domain")
+    decoder = _string(analogy["decoder"], "config.analogy.decoder")
+    if decoder not in {"raw", "grounded"}:
+        raise ConfigError("config.analogy.decoder must be raw or grounded")
+    grounding_repair_calls = _integer(analogy["grounding_repair_calls"], "config.analogy.grounding_repair_calls")
+    if grounding_repair_calls not in (0, 1):
+        raise ConfigError("config.analogy.grounding_repair_calls must be 0 or 1")
     rl = sections["rl"]
     run = sections["run"]
     data = sections["data"]
@@ -411,6 +419,8 @@ def load_config(path: Path) -> AppConfig:
         ),
         analogy=AnalogyConfig(
             strategy=strategy,
+            decoder=decoder,
+            grounding_repair_calls=grounding_repair_calls,
             enabled=_boolean(analogy["enabled"], "config.analogy.enabled"),
             samples=_positive_integer(analogy["samples"], "config.analogy.samples"),
             min_iterations=min_iterations,

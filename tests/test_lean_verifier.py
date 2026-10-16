@@ -45,6 +45,36 @@ def test_real_lean_tracks_open_rejected_and_complete_steps(verifier: LeanSubproc
     assert complete.proof_state is None
 
 
+@pytest.mark.parametrize("status", [VerificationStatus.REJECTED, VerificationStatus.TIMEOUT,
+                                    VerificationStatus.INTERNAL_ERROR])
+def test_adapter_preserves_typed_infrastructure_status_without_changing_error_contract(status):
+    from analogy.lean_gym.models import VerificationResult
+    from analogy.records import CandidateOrigin, TacticCandidate, TacticStatus
+    class StatusVerifier:
+        def try_tactic(self, problem, prefix, candidate):
+            return VerificationResult(status, False, None,
+                (Diagnostic("error", "test", "specific failure", None, None),), 1, 0)
+    adapter = LeanGymAdapter(problem(), StatusVerifier())
+    current = adapter.register_replay_state(SymbolicState("failure", "⊢ P → P", "lean4"))
+    result = adapter.run_tactic(current, TacticCandidate("intro p", 1.0, CandidateOrigin.ANALOGICAL))
+    assert result.status is TacticStatus.ERROR
+    assert result.diagnostics == ("specific failure",)
+    if status is VerificationStatus.REJECTED:
+        assert getattr(result, "infrastructure_failure", None) is None
+    else:
+        assert result.verification_status is status
+        assert result.infrastructure_failure == status.value
+
+
+@pytest.mark.parametrize("status", [VerificationStatus.REJECTED, "timeout", None])
+def test_infrastructure_result_requires_a_typed_infrastructure_status(status):
+    from analogy.lean_gym.verifier import LeanInfrastructureResult
+    from analogy.records import CandidateOrigin, TacticCandidate, TacticStatus
+    with pytest.raises(ValueError, match="infrastructure"):
+        LeanInfrastructureResult(TacticCandidate("intro h", 1.0, CandidateOrigin.ANALOGICAL),
+            TacticStatus.ERROR, verification_status=status)
+
+
 def test_real_lean_preserves_multiple_goals(verifier: LeanSubprocessVerifier) -> None:
     two = problem("(P Q : Prop)", "P → Q → P ∧ Q")
     prefix = ("intro p", "intro q")

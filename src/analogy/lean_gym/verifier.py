@@ -24,6 +24,26 @@ if TYPE_CHECKING:
 from .models import Diagnostic, Problem, ProofState, VerificationResult, VerificationStatus
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LeanInfrastructureResult(TacticResult):
+    """Keep the ERROR contract while retaining a non-proof verifier failure."""
+
+    verification_status: VerificationStatus
+
+    def __post_init__(self) -> None:
+        TacticResult.__post_init__(self)
+        if (self.status is not TacticStatus.ERROR
+                or not isinstance(self.verification_status, VerificationStatus)
+                or self.verification_status not in (
+                    VerificationStatus.TIMEOUT, VerificationStatus.INTERNAL_ERROR,
+                )):
+            raise ValueError("infrastructure results require ERROR and a typed verifier failure")
+
+    @property
+    def infrastructure_failure(self) -> str:
+        return self.verification_status.value
+
+
 _LEAN_STRUCTURE_PRELUDE = r'''import Lean
 open Lean Meta Elab Tactic
 
@@ -399,6 +419,9 @@ class LeanGymAdapter:
                 state=successor,
                 diagnostics=diagnostics,
             )
+        if result.status in (VerificationStatus.TIMEOUT, VerificationStatus.INTERNAL_ERROR):
+            return LeanInfrastructureResult(candidate, TacticStatus.ERROR,
+                diagnostics=diagnostics or (result.status.value,), verification_status=result.status)
         self._failed.setdefault(state.id, []).append(candidate.source)
         return TacticResult(
             candidate,

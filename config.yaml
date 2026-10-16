@@ -22,6 +22,8 @@ search:
   stuck_after: 3
 
 analogy:
+  decoder: raw
+  grounding_repair_calls: 1
   strategy: legacy
   enabled: false
   samples: 4

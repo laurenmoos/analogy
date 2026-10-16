@@ -93,6 +93,51 @@ def test_generated_factory_uses_full_observation_and_zero_delta_only_for_unsteer
     assert isinstance(_new_analogy_runner(config, backend, adapter, policy), GeneratedDomainAnalogyLoopRunner)
 
 
+def test_grounded_factory_executes_typed_decoder_and_keeps_legacy_control():
+    from analogy.training import _new_analogy_runner, _new_policy
+    from analogy.analogy_loop import AnalogyLoopRunner
+    from test_analogy_transfer_loop import Encoder, GroundedEvaluator, grounded_payload, state
+    from test_analogy_transfer_generation import RecordingBackend, SOURCE, ALIGNMENT, TRANSFER, STRUCTURE
+    from analogy.loop import NeverCancelled
+    config = generated_config()
+    config = replace(config, analogy=replace(config.analogy, decoder="grounded",
+        grounding_repair_calls=0, tactics_per_iteration=1))
+    class Backend(RecordingBackend, Encoder):
+        hidden_size = 2
+    backend = Backend([SOURCE, ALIGNMENT, TRANSFER, json.dumps(grounded_payload())])
+    policy = _new_policy(config, backend)
+    adapter = SimpleNamespace(proof_structure_for=lambda current: STRUCTURE)
+    runner = _new_analogy_runner(config, backend, adapter, policy, condition="generated_unsteered")
+    evaluator = GroundedEvaluator()
+    outcome = runner.search(state(), state(), (), (), evaluator, NeverCancelled())
+    assert outcome.completed_proof == "by exact h"
+    assert runner.grounding_repair_calls == 0
+    assert torch.equal(backend.calls[0][2], torch.zeros(2))
+    assert all(call[2] is None for call in backend.calls[1:])
+    assert isinstance(_new_analogy_runner(config, backend, adapter, policy, condition="analogy_loop"), AnalogyLoopRunner)
+
+
+@pytest.mark.parametrize("failure", ["compile", "schema", "runtime"])
+def test_grounded_invalid_or_infrastructure_iterations_never_enter_policy_optimization(failure):
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import grounded_runner, grounded_payload, run, GroundedEvaluator
+    payload = grounded_payload(operator="rewrite_forward") if failure == "compile" else grounded_payload()
+    runner, _, _ = grounded_runner(payload)
+    if failure == "schema":
+        # Keep upstream records valid; replace only grounding generation's backend.
+        from test_analogy_transfer_generation import RecordingBackend
+        runner.grounded_plan_generator.generator = RecordingBackend(["invalid", "invalid"])
+    evaluator = GroundedEvaluator()
+    if failure == "runtime":
+        def broken(*args):
+            raise RuntimeError("Lean crashed")
+        evaluator.evaluate_at = broken
+    rollout = run(runner, evaluator).rollouts[0]
+    assert not rollout.analogy_trace.iterations[0].training_eligible
+    assert discounted_iteration_samples(rollout.analogy_trace, runner.live_actions, rollout,
+        verified_reward=-0.05, discount=0.95, iteration_cost=0.01) == ()
+
+
 def test_generated_random_policy_is_seeded_untrained_and_learned_modes_keep_checkpoint():
     from analogy.training import _evaluation_policy, _new_policy
     config = generated_config()

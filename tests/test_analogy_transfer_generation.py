@@ -18,6 +18,10 @@ from analogy.analogy_transfer_generation import (
     parse_transferred_tactic_plan, render_alignment_prompt, render_source_prompt,
     render_transfer_prompt, render_transferred_tactic_prompt,
 )
+from analogy.analogy_transfer_generation import (
+    GROUNDING_PROMPT_VERSION, GroundedPlanGenerator, render_grounding_prompt,
+)
+from analogy.proof_inventory import build_local_inventory
 from analogy.proof_views import ProofStructure
 from analogy.records import SymbolicState
 from analogy.rescue import GenerationStatus
@@ -302,3 +306,91 @@ def test_stage_seeds_are_repeatable_and_analogy_index_changes_tactic_seed():
     seeds = [call[1] for call in backend.calls]
     assert seeds[0] == seeds[1]
     assert seeds[2] != seeds[0]
+
+
+def grounded_context():
+    inv = build_local_inventory(SymbolicState("s", "h : C\n⊢ C", "lean4"), STRUCTURE,
+                                fixed_target="C → S")
+    payload = {
+        "motivating_transfer_id": "transfer-2", "state_fingerprint": inv.state_fingerprint,
+        "bindings": [{"binding_id": "binding-0", "proof_role": "matching_hypothesis",
+                      "inventory_id": "local:0", "proposition": "C", "source_role": None,
+                      "justification": "The matching premise is available."}],
+        "steps": [{"step_id": "step-0", "operator": "exact_local", "inputs": ["binding-0"],
+                   "input_propositions": ["C"], "output_proposition": "C",
+                   "transfer_step_index": 0, "closes_subgoal": True}],
+        "expected_next_subgoal": "No remaining goals.", "completion_expected": True,
+        "surface_hints": [],
+    }
+    return inv, records()[2], payload
+
+
+def test_grounding_prompt_renders_exact_inventory_transfer_and_typed_contract():
+    inv, transfer, _ = grounded_context()
+    prompt = render_grounding_prompt(inv, transfer)
+    assert inv.state_fingerprint in prompt and '"identifier": "h"' in prompt
+    assert '"inventory_id": "local:0"' in prompt and '"proposition": "C"' in prompt
+    assert '"transfer_id": "transfer-2"' in prompt
+    assert GROUNDING_PROMPT_VERSION in prompt
+    assert "Do not emit raw Lean" in prompt and "Copy inventory IDs exactly" in prompt
+    assert "exact_local" in prompt and "rewrite_backward" in prompt
+
+
+def test_grounded_generator_repairs_unknown_id_once_without_latent_action():
+    inv, transfer, payload = grounded_context()
+    valid = json.dumps(payload)
+    payload["bindings"][0]["inventory_id"] = "local:999"
+    invalid = json.dumps(payload)
+    backend = RecordingBackend((invalid, valid))
+    result = GroundedPlanGenerator(backend, base_seed=7, max_repair_calls=5).generate(
+        inv, transfer, plan_id="caller-plan", analogy_index=2, max_attempts=9)
+    assert result.plan.plan_id == "caller-plan"
+    assert result.prompt_version == GROUNDING_PROMPT_VERSION
+    assert [attempt.status for attempt in result.attempts] == [GenerationStatus.INVALID, GenerationStatus.VALID]
+    assert [attempt.raw_text for attempt in result.attempts] == [invalid, valid]
+    assert [attempt.repair for attempt in result.attempts] == [False, True]
+    assert all(call[2] is None for call in backend.calls)
+    assert result.attempts[1].seed == result.attempts[0].seed + 1
+    assert backend.calls[0][0][1].content in backend.calls[1][0][1].content
+
+
+@pytest.mark.parametrize("budget,count", [(1, 1), (2, 2), (9, 2)])
+def test_persistent_grounding_failure_never_returns_a_plan_for_compilation(budget, count):
+    inv, transfer, payload = grounded_context()
+    payload["bindings"][0]["inventory_id"] = "missing"
+    backend = RecordingBackend((json.dumps(payload),) * 3)
+    compiled = []
+    with pytest.raises(AnalogyGenerationFailure) as error:
+        result = GroundedPlanGenerator(backend).generate(
+            inv, transfer, plan_id="plan", max_attempts=budget)
+        compiled.append(result.plan)
+    assert compiled == []
+    assert len(backend.calls) == len(error.value.attempts) == count
+    assert all(attempt.status is GenerationStatus.INVALID for attempt in error.value.attempts)
+
+
+def test_grounded_generator_checks_cancellation_before_repair():
+    inv, transfer, _ = grounded_context()
+
+    class Cancellation:
+        def __init__(self):
+            self.checks = 0
+
+        def is_cancelled(self):
+            self.checks += 1
+            return self.checks > 1
+
+    backend = RecordingBackend(("not json", "not json"))
+    with pytest.raises(AnalogyGenerationFailure, match="cancelled") as error:
+        GroundedPlanGenerator(backend).generate(inv, transfer, plan_id="plan",
+                                               cancellation=Cancellation())
+    assert len(backend.calls) == len(error.value.attempts) == 1
+
+
+def test_grounded_generator_rejects_stale_transfer_before_model_call():
+    inv, transfer, _ = grounded_context()
+    backend = RecordingBackend(())
+    with pytest.raises(TransferOutputError, match="active subgoal"):
+        GroundedPlanGenerator(backend).generate(
+            inv, replace(transfer, active_subgoal="D"), plan_id="plan")
+    assert backend.calls == []

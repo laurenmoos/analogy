@@ -14,6 +14,10 @@ from .analogy_transfer import (
     parse_source_analogy,
 )
 from .proof_views import ProofStructure, render_structure_view
+from .grounded_plan import (
+    GroundedPlanError, GroundedTacticPlan, GroundingOperator, parse_grounded_tactic_plan,
+)
+from .proof_inventory import LocalProofInventory
 from .records import Message, SymbolicState
 from .rescue import GenerationAttempt
 
@@ -25,6 +29,7 @@ SOURCE_PROMPT_VERSION = "source-analogy-v2"
 ALIGNMENT_PROMPT_VERSION = "analogy-alignment-v1"
 TRANSFER_PROMPT_VERSION = "proof-reasoning-transfer-v1"
 TACTIC_PROMPT_VERSION = "transferred-tactic-v1"
+GROUNDING_PROMPT_VERSION = "grounding-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +76,13 @@ class GeneratedTransferredTacticPlan:
     plan: TransferredTacticPlan
     attempts: tuple[GenerationAttempt, ...]
     prompt_version: str = TACTIC_PROMPT_VERSION
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedGroundedPlan:
+    plan: GroundedTacticPlan
+    attempts: tuple[GenerationAttempt, ...]
+    prompt_version: str = GROUNDING_PROMPT_VERSION
 
 
 def parse_transferred_tactic_plan(
@@ -185,6 +197,43 @@ def render_transferred_tactic_prompt(
     )
 
 
+def render_grounding_prompt(
+    inventory: LocalProofInventory, transfer: ProofReasoningTransfer,
+) -> str:
+    if transfer.active_subgoal != " ".join(inventory.active_subgoal.split()):
+        raise GroundedPlanError("transfer must describe the current active subgoal")
+    return (
+        f"Prompt version: {GROUNDING_PROMPT_VERSION}\n"
+        f"Current verified local proof inventory: {_dump(inventory)}\n"
+        f"Transferred proof reasoning: {_dump(transfer)}\n"
+        "Ground the reasoning using only typed operations and current inventory entries. "
+        "Do not emit raw Lean, tactics, programs, or a plan_id. Copy inventory IDs exactly; "
+        "never guess identifiers or copy an ID from a different state. Return one strict JSON "
+        "object with exactly motivating_transfer_id, state_fingerprint, bindings, steps, "
+        "expected_next_subgoal, completion_expected, and surface_hints. "
+        "Copy motivating_transfer_id from transfer_id and state_fingerprint from the inventory. "
+        "bindings is an array of objects with exactly binding_id, proof_role, inventory_id, "
+        "proposition, source_role (text or null), and justification. Each consumed transfer premise "
+        "must appear verbatim as a proof_role and contribute to the final inference chain. "
+        "Copy proposition text exactly from the referenced inventory entry, including whitespace. "
+        "steps is a nonempty array of objects with exactly step_id, operator, inputs, "
+        "input_propositions, output_proposition, transfer_step_index, and closes_subgoal. "
+        "Use globally unique canonical ASCII binding/step IDs (for example binding-0 and step-0). "
+        "inputs are unique IDs of bindings or strictly earlier steps; input_propositions must "
+        "copy the corresponding exact propositions in the same order. No cycles or future references. "
+        "transfer_step_index is a zero-based index into reasoning_steps. closes_subgoal and "
+        "completion_expected are booleans. Copy completion_expected and expected_next_subgoal "
+        "from the transfer's completion_expected and predicted_next_subgoal. The final step's "
+        "closes_subgoal must equal completion_expected; its output_proposition must equal the exact "
+        "active_subgoal for completion, or expected_next_subgoal for an open successor. "
+        "surface_hints is an optional-in-content but required-key array of diagnostic strings; "
+        "use [] when unnecessary. Hints are never executable. Limit bindings and steps to 64 each, "
+        "inputs per step and hints to 16 each, and text fields to 16384 characters. "
+        f"Allowed operators: {json.dumps([item.value for item in GroundingOperator])}. "
+        "Static grounding is only a proposal; Lean alone decides correctness."
+    )
+
+
 class _TransferGenerator:
     def __init__(
         self, generator: Any, *, hidden_layer: int = -1, base_seed: int = 0,
@@ -286,6 +335,20 @@ class TransferredTacticGenerator(_TransferGenerator):
         )
 
 
+class GroundedPlanGenerator(_TransferGenerator):
+    def generate(
+        self, inventory: LocalProofInventory, transfer: ProofReasoningTransfer, *,
+        plan_id: str, analogy_index: int = 0, max_attempts: int | None = None, cancellation=None,
+    ) -> GeneratedGroundedPlan:
+        return self._generate(
+            render_grounding_prompt(inventory, transfer),
+            "Bind transferred reasoning to the exact current inventory as strict typed JSON.",
+            delta=None, analogy_index=analogy_index, offset=40, max_attempts=max_attempts,
+            parser=lambda raw: parse_grounded_tactic_plan(raw, inventory, transfer, plan_id),
+            result_type=GeneratedGroundedPlan, cancellation=cancellation,
+        )
+
+
 __all__ = [
     "SOURCE_PROMPT_VERSION", "ALIGNMENT_PROMPT_VERSION", "TRANSFER_PROMPT_VERSION",
     "TACTIC_PROMPT_VERSION", "GeneratedSourceAnalogy", "GeneratedAlignment",
@@ -293,4 +356,6 @@ __all__ = [
     "SourceAnalogyGenerator", "AlignmentGenerator", "ProofTransferGenerator",
     "TransferredTacticGenerator", "parse_transferred_tactic_plan", "render_source_prompt",
     "render_alignment_prompt", "render_transfer_prompt", "render_transferred_tactic_prompt",
+    "GROUNDING_PROMPT_VERSION", "GeneratedGroundedPlan", "GroundedPlanGenerator",
+    "render_grounding_prompt",
 ]

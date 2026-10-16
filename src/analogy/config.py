@@ -402,6 +402,11 @@ def load_config(path: Path) -> AppConfig:
             "config.analogy.grounding_operators must contain GroundingOperator values"
         ) from error
     rl = sections["rl"]
+    if (_boolean(analogy["enabled"], "config.analogy.enabled")
+            and strategy == "generated_domain"
+            and _boolean(rl["enabled"], "config.rl.enabled")
+            and _positive_integer(rl["rollouts_per_state"], "config.rl.rollouts_per_state") < 2):
+        raise ConfigError("generated analogy RL requires rl.rollouts_per_state >= 2")
     run = sections["run"]
     data = sections["data"]
     base = config_path.parent

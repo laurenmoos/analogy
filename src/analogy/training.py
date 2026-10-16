@@ -64,12 +64,14 @@ from .rescue import (
 from .rl import (
     DirectRescuePolicy,
     PolicyAction,
-    RewardBaseline,
     RewardWeights,
+    StoryDiversityMetrics,
+    StoryDiversitySample,
     TrainingMetrics,
     TrainingSample,
     discounted_iteration_samples,
     reinforce_step,
+    story_diversity,
     verifier_reward,
     with_reward,
 )
@@ -105,6 +107,7 @@ class TrainingSummary:
     epochs_completed: int
     best_checkpoint: Path
     metrics: tuple[TrainingMetrics, ...]
+    story_diversity: tuple[StoryDiversityMetrics, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +222,7 @@ def group_sibling_samples(
     order: list[str] = []
     grouped: dict[str, list[TrainingSample]] = {}
     for sample in samples:
-        state_id = sample.rollout.state_id
+        state_id = sample.state_id
         if state_id not in grouped:
             order.append(state_id)
             grouped[state_id] = []
@@ -339,9 +342,7 @@ def save_training_checkpoint(
     epoch: int,
     problem_split: ProblemSplit,
     config_hash: str,
-    *,
-    reward_baseline: RewardBaseline | None = None,
-    artifact_identity: dict[str, Any] | None = None,
+    *, artifact_identity: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "policy": policy.state_dict(),
@@ -353,9 +354,6 @@ def save_training_checkpoint(
         "split": asdict(problem_split),
         "config_hash": config_hash,
         "policy_schema_version": int(getattr(policy, "schema_version", 1)),
-        "reward_baseline": (
-            reward_baseline.state_dict() if reward_baseline is not None else None
-        ),
     }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -370,9 +368,7 @@ def load_training_checkpoint(
     optimizer: torch.optim.Optimizer,
     problem_split: ProblemSplit,
     config_hash: str,
-    *,
-    reward_baseline: RewardBaseline | None = None,
-    artifact_identity: dict[str, Any] | None = None,
+    *, artifact_identity: dict[str, Any] | None = None,
 ) -> int:
     payload = _torch_load(Path(path))
     _check_artifact_identity(payload.get("artifact_identity"), artifact_identity)
@@ -388,9 +384,6 @@ def load_training_checkpoint(
         )
     policy.load_state_dict(payload["policy"])
     optimizer.load_state_dict(payload["optimizer"])
-    saved_baseline = payload.get("reward_baseline")
-    if reward_baseline is not None and saved_baseline is not None:
-        reward_baseline.load_state_dict(saved_baseline)
     random.setstate(payload["python_rng"])
     torch.random.set_rng_state(payload["torch_rng"])
     return int(payload["epoch"])
@@ -585,6 +578,9 @@ def train_direct_rescue(
     configure_prompt_catalog(config.prompts.path)
     if not config.rl.enabled:
         raise ValueError("rescue training requires rl.enabled=true")
+    if (config.analogy.enabled and config.analogy.strategy == "generated_domain"
+            and config.rl.rollouts_per_state < 2):
+        raise ValueError("generated analogy training requires at least two rollouts_per_state")
     manifest = config.rl.curriculum_manifest
     if manifest is not None and (replay_records is not None or problem_runner is not None):
         raise ValueError("curriculum training cannot mix replay records or a custom runner")
@@ -632,7 +628,6 @@ def train_direct_rescue(
     active_optimizer = optimizer or torch.optim.Adam(
         active_policy.parameters(), lr=config.rl.learning_rate
     )
-    reward_baseline = RewardBaseline()
     resolved_hash = _config_hash(config)
     artifact_identity = _artifact_identity(config)
     start_epoch = 0
@@ -643,7 +638,6 @@ def train_direct_rescue(
             active_optimizer,
             problem_split,
             resolved_hash,
-            reward_baseline=reward_baseline,
             artifact_identity=artifact_identity,
         )
     identifier = run_id or uuid.uuid4().hex
@@ -652,10 +646,14 @@ def train_direct_rescue(
     )
     stuck_store = JsonlStuckStateStore(writer.path / "stuck_states.jsonl")
     all_metrics: list[TrainingMetrics] = []
+    diversity_metrics: list[StoryDiversityMetrics] = []
     best_score = -1
     best_checkpoint: Path | None = None
 
-    def execute(item: Problem | StuckStateRecord | OnlineCurriculumState, phase: str, epoch: int):
+    def execute(
+        item: Problem | StuckStateRecord | OnlineCurriculumState, phase: str,
+        epoch: int, sample_offset: int = 0,
+    ):
         if isinstance(item, OnlineCurriculumState):
             problem = next(problem for problem in selected if problem.id == item.problem_id)
             sink = _live_iteration_sink(writer, epoch=epoch, phase=phase,
@@ -667,7 +665,7 @@ def train_direct_rescue(
                     f"{type(error).__name__}: {error}", proof_path_id=sink.proof_path_id,
                     transition_id=item.transition_id)
             episode = _execute_problem(config, generator, verifier, problem, phase, active_policy,
-                initial_state=reconstructed, iteration_sink=sink)
+                initial_state=reconstructed, iteration_sink=sink, sample_offset=sample_offset)
             return replace(episode, transition_id=item.transition_id)
         if isinstance(item, StuckStateRecord):
             reconstructed = reconstruct_stuck_state(item, verifier)
@@ -682,6 +680,7 @@ def train_direct_rescue(
                 iteration_sink=_live_iteration_sink(
                     writer, epoch=epoch, phase=phase, problem_id=item.problem.id
                 ),
+                sample_offset=sample_offset,
             )
         if problem_runner is not None:
             return problem_runner(item, phase, active_policy)
@@ -696,6 +695,7 @@ def train_direct_rescue(
             iteration_sink=_live_iteration_sink(
                 writer, epoch=epoch, phase=phase, problem_id=item.id
             ),
+            sample_offset=sample_offset,
         )
 
     train_items: Sequence[Problem | StuckStateRecord | OnlineCurriculumState] = (
@@ -716,23 +716,49 @@ def train_direct_rescue(
             validation_items = schedule_curriculum_states(manifest, "validation", seed=config.run.seed, epoch=epoch)
             if not train_items or not validation_items:
                 raise ValueError("curriculum training requires train and validation states")
+        epoch_story_samples: list[StoryDiversitySample] = []
         for item in train_items:
-            episode = execute(item, "train", epoch)
-            _persist_episode(writer, episode, epoch, "train")
-            for siblings in group_sibling_samples(episode.training_samples):
+            repeat = (config.rl.rollouts_per_state
+                      if config.analogy.enabled and config.analogy.strategy == "generated_domain"
+                      else 1)
+            sibling_episodes = tuple(execute(item, "train", epoch, offset) for offset in range(repeat))
+            for episode in sibling_episodes:
+                _persist_episode(writer, episode, epoch, "train")
+                for rollout in episode.rollouts:
+                    trace = rollout.analogy_trace
+                    if trace is None:
+                        continue
+                    for iteration in trace.iterations:
+                        decision = getattr(iteration, "decision", None)
+                        if decision is not None:
+                            epoch_story_samples.append(StoryDiversitySample(
+                                f"{episode.problem_id}:{episode.transition_id or iteration.state_before.id}",
+                                decision.story, decision.operator.value,
+                            ))
+            samples = tuple(sample for episode in sibling_episodes for sample in episode.training_samples)
+            for siblings in group_sibling_samples(samples):
+                if len(siblings) < 2:
+                    continue
                 metrics = reinforce_step(
                     active_policy,
                     active_optimizer,
                     siblings,
                     config.rl.entropy_weight,
                     config.rl.max_gradient_norm,
-                    reward_baseline,
-                    "train",
                 )
                 all_metrics.append(metrics)
                 writer.append_jsonl(
                     "metrics.jsonl", {"epoch": epoch, "phase": "train", **asdict(metrics)}
                 )
+
+        diversity = story_diversity(
+            epoch_story_samples,
+            lambda text: generator.embed_text(text, layer=config.model.hidden_layer),
+        ) if epoch_story_samples else StoryDiversityMetrics(0, 0.0, 0.0, 0.0)
+        diversity_metrics.append(diversity)
+        writer.append_jsonl(
+            "story_diversity.jsonl", {"epoch": epoch, **asdict(diversity)}
+        )
 
         validation_episodes = tuple(
             execute(item, "validation", epoch) for item in validation_items
@@ -750,7 +776,6 @@ def train_direct_rescue(
                 epoch,
                 problem_split,
                 resolved_hash,
-                reward_baseline=reward_baseline,
                 artifact_identity=artifact_identity,
             )
         if validation_score > best_score:
@@ -763,7 +788,6 @@ def train_direct_rescue(
                     epoch,
                     problem_split,
                     resolved_hash,
-                    reward_baseline=reward_baseline,
                     artifact_identity=artifact_identity,
                 )
             best_checkpoint = checkpoint
@@ -776,6 +800,7 @@ def train_direct_rescue(
         config.rl.epochs,
         best_checkpoint,
         tuple(all_metrics),
+        tuple(diversity_metrics),
     )
     writer.write_json("summary.json", asdict(summary))
     writer.finalize_readable_traces()
@@ -1133,6 +1158,7 @@ def _execute_problem(
     initial_state: SymbolicState | None = None,
     iteration_sink: Callable[[str, Any], None] | None = None,
     generated_sources: tuple[GeneratedSourceRecord, ...] = (),
+    sample_offset: int = 0,
 ) -> ProblemEpisode:
     calls = _GenerationCallCounter(generator)
     generator = calls
@@ -1170,6 +1196,7 @@ def _execute_problem(
                     condition=(phase if phase in {"analogy_loop", "shuffled_analogy"} or phase.startswith("generated_") else None),
                     generated_sources=generated_sources,
                     problem_id=problem.id,
+                    sample_offset=sample_offset,
                 )
             else:
                 rescue = DirectRescueRunner(
@@ -1307,12 +1334,14 @@ def _new_analogy_runner(
     condition: str | None = None,
     generated_sources: tuple[GeneratedSourceRecord, ...] = (),
     problem_id: str = "",
+    sample_offset: int = 0,
 ) -> AnalogyLoopRunner | GeneratedDomainAnalogyLoopRunner:
     """Compose the readable loop from the same frozen model and policy head."""
     if config.analogy.strategy == "generated_domain" and condition not in {"analogy_loop", "shuffled_analogy"}:
         return _new_generated_runner(config, generator, adapter, policy,
             condition=condition or "generated_learned", iteration_sink=iteration_sink,
-            generated_sources=generated_sources, problem_id=problem_id)
+            generated_sources=generated_sources, problem_id=problem_id,
+            sample_offset=sample_offset)
     representations: dict[int, ProofRepresentation] = {}
     model_calls = 0
     lean_calls = 0
@@ -1438,7 +1467,7 @@ def _new_analogy_runner(
 
 
 def _new_generated_runner(config, generator, adapter, policy, *, condition,
-                          iteration_sink, generated_sources, problem_id):
+                          iteration_sink, generated_sources, problem_id, sample_offset=0):
     del generated_sources, problem_id
     if condition not in {"generated_unsteered", "generated_random", "generated_learned"}:
         raise ValueError(f"unknown generated evaluation condition: {condition}")
@@ -1472,7 +1501,9 @@ def _new_generated_runner(config, generator, adapter, policy, *, condition,
         if condition == "generated_unsteered":
             zero = parameter.new_zeros(())
             return PolicyAction(parameter.new_zeros(generator.hidden_size), zero, zero)
-        rng = torch.Generator(device=parameter.device).manual_seed(config.run.seed + index)
+        rng = torch.Generator(device=parameter.device).manual_seed(
+            config.run.seed + sample_offset * 1000 + index
+        )
         return policy.sample(observation, rng)
 
     return GeneratedDomainAnalogyLoopRunner(
@@ -1480,7 +1511,8 @@ def _new_generated_runner(config, generator, adapter, policy, *, condition,
         observation_builder=build_observation, action_sampler=sample_action,
         decision_generator=StoryOperatorGenerator(
             generator, prompt_catalog(), config.analogy.grounding_operators,
-            hidden_layer=config.model.hidden_layer, base_seed=config.run.seed,
+            hidden_layer=config.model.hidden_layer,
+            base_seed=config.run.seed + sample_offset * 1000,
         ),
         transition_comparator=lambda before, predicted, actual: compare_transitions(
             before, predicted, actual, generator, config.analogy.transition_embedding_layer),

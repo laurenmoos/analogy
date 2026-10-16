@@ -57,7 +57,7 @@ def test_curriculum_training_replays_prefix_and_persists_transition_without_answ
     monkeypatch.setattr(training, "load_online_curriculum_states", online_loader)
     def execute(config, generator, verifier, problem, phase, policy, **kwargs):
         # Only the verified current state and past actions cross the runner boundary.
-        assert set(kwargs) == {"initial_state", "iteration_sink"}
+        assert set(kwargs) == {"initial_state", "iteration_sink", "sample_offset"}
         state = kwargs["initial_state"]
         started.append((problem.id, phase, state.context))
         assert "reference_tactic" not in asdict(state)
@@ -67,8 +67,10 @@ def test_curriculum_training_replays_prefix_and_persists_transition_without_answ
     policy = torch.nn.Linear(1, 1)
     summary = training.train_direct_rescue(config, object(), verifier, policy=policy,
         optimizer=torch.optim.SGD(policy.parameters(), lr=0.1), run_id="curriculum")
-    assert sorted(started) == [("train_a", "train", ()), ("train_a", "train", ("intro analogy_h",)),
-        ("validation_a", "validation", ()), ("validation_a", "validation", ("intro analogy_h",))]
+    assert started.count(("train_a", "train", ())) == config.rl.rollouts_per_state
+    assert started.count(("train_a", "train", ("intro analogy_h",))) == config.rl.rollouts_per_state
+    assert started.count(("validation_a", "validation", ())) == 1
+    assert started.count(("validation_a", "validation", ("intro analogy_h",))) == 1
     episodes = [json.loads(line) for line in (summary.run_directory / "problems.jsonl").read_text().splitlines()]
     assert len({item["transition_id"] for item in episodes}) == 4
     assert all(item["proof_path_id"] for item in episodes)

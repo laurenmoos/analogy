@@ -49,3 +49,10 @@ def test_config_rejects_invalid_grounding_operators(tmp_path, operators, diagnos
     payload["analogy"]["grounding_operators"] = operators
     with pytest.raises(ConfigError, match=diagnostic):
         load_config(write_config(tmp_path, payload))
+
+
+def test_generated_analogy_rl_requires_sibling_rollouts(tmp_path):
+    payload = yaml.safe_load((ROOT / "config.mlx-8b-generated-analogy.yaml").read_text())
+    payload["rl"]["rollouts_per_state"] = 1
+    with pytest.raises(ConfigError, match="rollouts_per_state >= 2"):
+        load_config(write_config(tmp_path, payload))

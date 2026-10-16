@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import Sequence
+from typing import Callable, Sequence
 
 import torch
 
-from .records import TacticStatus
+from .records import Embedding, TacticStatus
 from .rescue import ProofRepresentation, RescueRollout, RescueTermination
 
 
@@ -323,62 +323,6 @@ def verifier_reward(
     return RewardBreakdown()
 
 
-class RewardBaseline:
-    """Exponential moving reward baseline for singleton policy updates."""
-
-    def __init__(self, decay: float = 0.95) -> None:
-        if (
-            isinstance(decay, bool)
-            or not isinstance(decay, (int, float))
-            or not math.isfinite(float(decay))
-            or not 0.0 <= float(decay) < 1.0
-        ):
-            raise ValueError("decay must be finite and in [0, 1)")
-        self.decay = float(decay)
-        self._values: dict[str, float] = {}
-
-    def value(self, key: str) -> float:
-        if not isinstance(key, str) or not key:
-            raise ValueError("baseline key must be a non-empty string")
-        return self._values.get(key, 0.0)
-
-    def update(self, key: str, reward: float) -> float:
-        previous = self.value(key)
-        if (
-            isinstance(reward, bool)
-            or not isinstance(reward, (int, float))
-            or not math.isfinite(float(reward))
-        ):
-            raise ValueError("reward must be finite")
-        normalized = float(reward)
-        if key in self._values:
-            self._values[key] = self.decay * previous + (1.0 - self.decay) * normalized
-        else:
-            self._values[key] = normalized
-        return normalized - previous
-
-    def state_dict(self) -> dict[str, object]:
-        return {"decay": self.decay, "values": dict(self._values)}
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        if not isinstance(state, dict) or set(state) != {"decay", "values"}:
-            raise ValueError("invalid reward baseline state")
-        if float(state["decay"]) != self.decay:
-            raise ValueError("reward baseline decay does not match")
-        values = state["values"]
-        if not isinstance(values, dict):
-            raise ValueError("invalid reward baseline values")
-        restored: dict[str, float] = {}
-        for key, value in values.items():
-            if not isinstance(key, str) or not key or isinstance(value, bool):
-                raise ValueError("invalid reward baseline entry")
-            number = float(value)
-            if not math.isfinite(number):
-                raise ValueError("invalid reward baseline entry")
-            restored[key] = number
-        self._values = restored
-
-
 def _validate_rollout_termination(rollout: RescueRollout) -> None:
     has_complete = any(
         item.result.status is TacticStatus.COMPLETE for item in rollout.attempts
@@ -407,6 +351,7 @@ class TrainingSample:
     rollout: RescueRollout
     action: PolicyAction
     reward: float
+    state_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.rollout, RescueRollout):
@@ -420,6 +365,10 @@ class TrainingSample:
         ):
             raise ValueError("reward must be finite")
         object.__setattr__(self, "reward", float(self.reward))
+        state_id = self.rollout.state_id if self.state_id is None else self.state_id
+        if not isinstance(state_id, str) or not state_id:
+            raise ValueError("state_id must be nonblank")
+        object.__setattr__(self, "state_id", state_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,20 +383,27 @@ class TrainingMetrics:
                 raise ValueError(f"{name} must be finite")
 
 
+def centered_advantages(samples: Sequence[TrainingSample]) -> torch.Tensor:
+    normalized = tuple(samples)
+    if len(normalized) < 2:
+        raise ValueError("same-state policy updates require at least two attempts")
+    if not all(isinstance(sample, TrainingSample) for sample in normalized):
+        raise ValueError("samples must contain only TrainingSample values")
+    if len({sample.state_id for sample in normalized}) != 1:
+        raise ValueError("samples must belong to one problem state")
+    rewards = torch.tensor([sample.reward for sample in normalized], dtype=torch.float32)
+    return rewards - rewards.mean()
+
+
 def reinforce_step(
     policy: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     samples: Sequence[TrainingSample],
     entropy_weight: float,
     max_gradient_norm: float,
-    baseline: RewardBaseline | None = None,
-    baseline_key: str = "train",
 ) -> TrainingMetrics:
     normalized = tuple(samples)
-    if not normalized:
-        raise ValueError("training samples must be non-empty")
-    if not all(isinstance(sample, TrainingSample) for sample in normalized):
-        raise ValueError("samples must contain only TrainingSample values")
+    advantages = centered_advantages(normalized)
     if (
         isinstance(entropy_weight, bool)
         or not isinstance(entropy_weight, (int, float))
@@ -467,14 +423,6 @@ def reinforce_step(
     rewards = torch.tensor(
         [sample.reward for sample in normalized], dtype=torch.float32
     )
-    if baseline is not None and not isinstance(baseline, RewardBaseline):
-        raise ValueError("baseline must be a RewardBaseline")
-    if len(normalized) > 1:
-        advantages = rewards - rewards.mean()
-    elif baseline is not None:
-        advantages = rewards - baseline.value(baseline_key)
-    else:
-        advantages = rewards
     log_probabilities = torch.stack(
         [sample.action.log_probability for sample in normalized]
     )
@@ -503,12 +451,76 @@ def reinforce_step(
         optimizer.zero_grad(set_to_none=True)
         raise ValueError("policy gradients must be finite")
     optimizer.step()
-    if len(normalized) == 1 and baseline is not None:
-        baseline.update(baseline_key, normalized[0].reward)
     return TrainingMetrics(
         float(loss.detach().cpu().item()),
         float(rewards.mean().item()),
         float(gradient_norm.detach().cpu().item()),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class StoryDiversitySample:
+    state_id: str
+    story: str
+    operator: str
+
+    def __post_init__(self) -> None:
+        for name in ("state_id", "story", "operator"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be nonblank text")
+
+
+@dataclass(frozen=True, slots=True)
+class StoryDiversityMetrics:
+    states: int
+    exact_distinct_ratio: float
+    mean_pairwise_distance: float
+    operator_diversity_ratio: float
+
+
+def _normalized_story(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def story_diversity(
+    samples: Sequence[StoryDiversitySample], embed: Callable[[str], Embedding],
+) -> StoryDiversityMetrics:
+    normalized = tuple(samples)
+    if not all(isinstance(item, StoryDiversitySample) for item in normalized):
+        raise ValueError("samples must contain StoryDiversitySample values")
+    grouped: dict[str, list[StoryDiversitySample]] = {}
+    for item in normalized:
+        grouped.setdefault(item.state_id, []).append(item)
+    eligible = tuple(group for group in grouped.values() if len(group) >= 2)
+    if not eligible:
+        return StoryDiversityMetrics(0, 0.0, 0.0, 0.0)
+    texts = {_normalized_story(item.story) for group in eligible for item in group}
+    embeddings = {text: embed(text) for text in sorted(texts)}
+    if any(not isinstance(value, Embedding) for value in embeddings.values()):
+        raise ValueError("embed must return Embedding values")
+    exact_ratios: list[float] = []
+    distances: list[float] = []
+    diverse_operators = 0
+    for group in eligible:
+        stories = tuple(_normalized_story(item.story) for item in group)
+        exact_ratios.append(len(set(stories)) / len(stories))
+        diverse_operators += len({item.operator for item in group}) > 1
+        for left in range(len(stories)):
+            for right in range(left + 1, len(stories)):
+                a = embeddings[stories[left]].values
+                b = embeddings[stories[right]].values
+                if len(a) != len(b):
+                    raise ValueError("story embeddings must have equal dimensions")
+                dot = sum(x * y for x, y in zip(a, b))
+                norm_a = math.sqrt(sum(x * x for x in a))
+                norm_b = math.sqrt(sum(y * y for y in b))
+                cosine = dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+                distances.append(1.0 - max(-1.0, min(1.0, cosine)))
+    return StoryDiversityMetrics(
+        len(eligible), sum(exact_ratios) / len(exact_ratios),
+        sum(distances) / len(distances) if distances else 0.0,
+        diverse_operators / len(eligible),
     )
 
 
@@ -532,6 +544,7 @@ def discounted_iteration_samples(
     if not isinstance(trace, (AnalogyLoopTrace, GeneratedAnalogyTrace)):
         raise ValueError("trace must be an AnalogyLoopTrace or GeneratedAnalogyTrace")
     normalized_actions = tuple(actions)
+    sample_state_ids = tuple(rollout.state_id for _ in normalized_actions)
     action_count = (sum(iteration.action is not None for iteration in trace.iterations)
                     if isinstance(trace, GeneratedAnalogyTrace) else len(trace.iterations))
     if len(normalized_actions) != action_count:
@@ -548,15 +561,17 @@ def discounted_iteration_samples(
     if float(iteration_cost) < 0.0:
         raise ValueError("iteration_cost must be non-negative")
     if isinstance(trace, GeneratedAnalogyTrace):
-        action_iterations = (iteration for iteration in trace.iterations if iteration.action is not None)
-        normalized_actions = tuple(
-            action for action, iteration in zip(normalized_actions, action_iterations)
+        action_iterations = tuple(iteration for iteration in trace.iterations if iteration.action is not None)
+        eligible = tuple(
+            (action, iteration) for action, iteration in zip(normalized_actions, action_iterations)
             if iteration.training_eligible and any(
                 attempt.result.status is TacticStatus.COMPLETE
                 or (attempt.result.status is TacticStatus.ACCEPTED and attempt.discarded is None)
                 for attempt in iteration.attempts
             )
         )
+        normalized_actions = tuple(action for action, _ in eligible)
+        sample_state_ids = tuple(iteration.state_before.id for _, iteration in eligible)
     count = len(normalized_actions)
     return tuple(
         TrainingSample(
@@ -564,6 +579,7 @@ def discounted_iteration_samples(
             action,
             float(discount) ** (count - index - 1) * float(verified_reward)
             - float(iteration_cost) * (count - index - 1),
+            sample_state_ids[index],
         )
         for index, action in enumerate(normalized_actions)
     )
@@ -599,13 +615,16 @@ __all__ = [
     "DirectRescuePolicy",
     "PolicyAction",
     "RewardBreakdown",
-    "RewardBaseline",
     "RewardWeights",
+    "StoryDiversityMetrics",
+    "StoryDiversitySample",
     "TrainingMetrics",
     "TrainingSample",
+    "centered_advantages",
     "discounted_iteration_samples",
     "intrinsic_surprise_reward",
     "reinforce_step",
+    "story_diversity",
     "verifier_reward",
     "with_reward",
 ]

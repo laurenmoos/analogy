@@ -92,6 +92,72 @@ def test_operator_templates(context, target, root, operator, inputs, complete, n
     evaluate_with_contract(inv, result, want)
 
 
+@pytest.mark.parametrize("context,target,operator,inputs,complete,next_goal", [
+    ("h : P → Q ∧ R", "R", "select_right", ("b0",), True, "done"),
+    ("h : P ∨ Q ∧ R", "P ∨ Q", "select_left", ("b0",), True, "done"),
+    ("h : P ∧ Q ↔ R", "Q ↔ R", "select_right", ("b0",), True, "done"),
+    ("h : ∀ x : Nat, P ∧ Q", "Q", "select_right", ("b0",), True, "done"),
+    ("h : P → Q ↔ R\np : P", "Q ↔ R", "apply_implication", ("b0", "b1"), True, "done"),
+    ("h : ∀ x : Nat, P ↔ Q\np : ∀ x : Nat, P", "Q", "iff_forward", ("b0", "b1"), True, "done"),
+    ("h : let x := P; Q ↔ R\nr : R", "let x := P; Q", "iff_backward", ("b0", "b1"), True, "done"),
+    ("h : P → a = b", "a = b", "rewrite_forward", ("b0",), True, "done"),
+    ("h : a = b ∧ P", "b = a", "rewrite_backward", ("b0",), True, "done"),
+    ("h : ¬ a = b", "b = a", "rewrite_forward", ("b0",), True, "done"),
+    ("h : ∀ x : Nat, P ∨ Q", "R", "cases", ("b0",), False, "R"),
+    ("P : Prop", "P ∨ Q ∧ R", "split", (), False, "P ∨ Q"),
+    ("P : Prop", "P ∧ Q ↔ R", "split", (), False, "P"),
+    ("P : Prop", "P → Q ↔ R", "split", (), False, "P → Q → R"),
+    ("P : Prop", "P → Q ∨ R", "choose_right", (), False, "R"),
+    ("P : Prop", "P ∨ Q ↔ R", "choose_left", (), False, "P"),
+    ("P : Prop", "P → Q ↔ R", "introduce", (), False, "Q ↔ R"),
+    ("P : Prop", "¬ P ∨ Q", "introduce", (), False, "False"),
+    ("hn : ¬ P ∨ Q\np : P ∨ Q", "R", "contradiction", ("b0", "b1"), True, "done"),
+])
+def test_nested_connective_cannot_masquerade_as_root(
+    monkeypatch, context, target, operator, inputs, complete, next_goal,
+):
+    import subprocess
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid root shapes must be rejected before Lean")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    inv = inventory(context, target)
+    grounded = plan(inv, operator, inputs, complete=complete, next_goal=next_goal)
+    result = GroundedTacticCompiler().compile(grounded, inv, 4)
+    assert result.candidates == ()
+    assert len(result.diagnostics) == 1
+    assert result.diagnostics[0].code == "unsupported_operator"
+
+
+@pytest.mark.parametrize("context,target,operator,inputs,complete,next_goal,want", [
+    ("h : P ∧ Q ∨ R", "P ∧ Q", "cases", ("b0",), False, "P ∧ Q", ["cases h"]),
+    ("h : P ∧ (Q ∨ R)", "P", "select_left", ("b0",), True, "done", ["exact h.left"]),
+    ("h : ¬ P ∧ Q", "Q", "select_right", ("b0",), True, "done", ["exact h.right"]),
+    ("h : P ∧ Q ∨ R", "R", "select_right", ("b0",), True, "done", None),
+    ("h : (P → Q) ∧ R", "P → Q", "select_left", ("b0",), True, "done", ["exact h.left"]),
+    ("h : P ∧ Q ↔ R\np : P ∧ Q", "R", "iff_forward", ("b0", "b1"), True, "done", ["exact h.mp p"]),
+    ("h : (P ↔ Q) → R\np : P ↔ Q", "R", "apply_implication", ("b0", "b1"), True, "done", ["exact h p", "apply h"]),
+    ("P : Prop", "P → Q ∧ R", "introduce", (), False, "Q ∧ R", ["intro analogy_h"]),
+    ("P : Prop", "P ∧ Q ↔ R", "split", (), False, "P ∧ Q → R", ["constructor"]),
+    ("P : Prop", "P → Q ↔ R", "split", (), False, "(P → Q) → R", ["constructor"]),
+    ("P : Prop", "P ∧ Q ∨ R", "choose_left", (), False, "P ∧ Q", ["left"]),
+    ("h : ¬ (P ∧ Q)\np : P ∧ Q", "R", "contradiction", ("b0", "b1"), True, "done", ["exact False.elim (h p)"]),
+    ("h : \"∧ → ↔\" = s", "s = \"∧ → ↔\"", "rewrite_backward", ("b0",), True, "done", ["rw [← h]"]),
+])
+def test_mixed_connective_roots_preserve_valid_templates(
+    context, target, operator, inputs, complete, next_goal, want,
+):
+    inv = inventory(context, target)
+    result = GroundedTacticCompiler().compile(
+        plan(inv, operator, inputs, complete=complete, next_goal=next_goal), inv, 4)
+    if want is None:
+        assert result.candidates == ()
+        assert result.diagnostics[0].code == "unsupported_operator"
+    else:
+        assert texts(result) == want
+
+
 def test_typed_two_step_term_has_stable_dependency_provenance_and_partial_metadata():
     inv = inventory("h1 : P ↔ R\nh2 : P → Q\nr : R", "Q")
     first = GroundedInferenceStep("step-1", GroundingOperator.IFF_BACKWARD,
@@ -199,6 +265,14 @@ def test_inaccessible_shadow_name_is_diagnostic_instead_of_malformed_lean():
     ("(P Q : Prop) (h : P ∧ Q)", "Q", "select_right", ("h",), True, "done"),
     ("(P Q R : Prop) (h : P ∨ Q)", "R", "cases", ("h",), False, "R"),
     ("(P Q : Prop) (hn : ¬ P) (p : P)", "Q", "contradiction", ("hn", "p"), True, "done"),
+    ("(P Q R : Prop) (h : (P → Q) ∧ R)", "P → Q", "select_left", ("h",), True, "done"),
+    ("(P Q R : Prop) (h : P ∧ Q ↔ R) (p : P ∧ Q)", "R", "iff_forward", ("h", "p"), True, "done"),
+    ("(P Q R : Prop) (h : (P ↔ Q) → R) (p : P ↔ Q)", "R", "apply_implication", ("h", "p"), True, "done"),
+    ("(P Q R : Prop)", "P ∧ Q ↔ R", "split", (), False, "P ∧ Q → R"),
+    ("(P Q R : Prop)", "P → Q ↔ R", "split", (), False, "(P → Q) → R"),
+    ("(P Q R : Prop)", "P → Q ∧ R", "introduce", (), False, "Q ∧ R"),
+    ("(P Q R : Prop)", "P ∧ Q ∨ R", "choose_left", (), False, "P ∧ Q"),
+    ("(P Q R : Prop) (hn : ¬ (P ∧ Q)) (p : P ∧ Q)", "R", "contradiction", ("hn", "p"), True, "done"),
 ])
 def test_compiled_candidates_with_pinned_lean(binders, target, operator, input_names, complete, next_goal):
     from analogy.lean_gym.models import Problem
@@ -220,6 +294,9 @@ def test_compiled_candidates_with_pinned_lean(binders, target, operator, input_n
     for candidate in compiled.candidates:
         result = verifier.try_tactic(problem, (), candidate.text)
         assert result.accepted, (candidate, result.diagnostics)
+        if not complete:
+            assert result.proof_state is not None
+            assert result.proof_state.text.split("⊢", 1)[1].splitlines()[0].strip() == next_goal
 
 
 def test_typed_multistep_term_with_pinned_lean():

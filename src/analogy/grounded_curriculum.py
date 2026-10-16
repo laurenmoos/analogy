@@ -1,7 +1,7 @@
 """Offline, theorem-split, Lean-verified transitions with an answer-free online view.
 
-The durable journal is authoritative. Each newline commits one prefix and all its
-verified variants; final artifacts are deterministic atomic projections of it.
+The durable journal is authoritative. Each newline commits one verified prefix;
+final artifacts are deterministic atomic projections of it.
 No retrieval or model execution is reachable from the online loader.
 """
 
@@ -16,19 +16,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import CurriculumConfig
-from .grounded_plan import (GROUNDED_PLAN_SCHEMA_VERSION, GroundedInferenceStep,
-                            GroundedRoleBinding, GroundedTacticPlan, GroundingOperator as Op)
+from .grounding import GroundingOperator, enumerate_applications
 from .lean_gym.corpus import load_problems, load_reference_proofs, validate_reference_coverage
 from .lean_gym.models import VerificationStatus as Status
-from .proof_inventory import LocalProofInventory, _declarations_and_target, build_local_inventory
+from .proof_inventory import LocalProofInventory, build_local_inventory
 from .records import SymbolicState
 from .replay import proof_state_fingerprint
-from .grounding import enumerate_applications
-from .proof_inventory import implication_parts as _implication, proposition_binary as _binary
+from .prompts import PromptCatalog
 from .tactic_compiler import TACTIC_COMPILER_VERSION, GroundedTacticCompiler
 
 
-SCHEMA_VERSION = "grounded-curriculum-v1"
+SCHEMA_VERSION = "grounded-curriculum-v2"
+GROUNDING_SCHEMA_VERSION = "grounded-application-v1"
 SPLITS = ("train", "validation", "test")
 FAILURES = ("unsupported_tactic", "compile_mismatch", "verifier_error", "repeated_state", "structure_failure")
 
@@ -49,13 +48,11 @@ class CurriculumSummary:
     retained: int
     nonterminal: int
     completions: int
-    variants: int
     unsupported_tactic: int
     compile_mismatch: int
     verifier_error: int
     repeated_state: int
     structure_failure: int
-    augmentation_failure: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,34 +103,24 @@ def _tree_hash(path: Path, *, project=False) -> str:
 
 
 def _identity(config: CurriculumConfig) -> dict:
-    from .analogy_transfer_generation import (SOURCE_PROMPT_VERSION, ALIGNMENT_PROMPT_VERSION,
-                                              TRANSFER_PROMPT_VERSION, GROUNDING_PROMPT_VERSION)
     toolchain = config.lean_project / "lean-toolchain"
     if not toolchain.is_file() or not re.fullmatch(
         r"leanprover/lean4:(?:v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?|nightly-\d{4}-\d{2}-\d{2}|[a-f0-9]{40})",
         toolchain.read_text().strip(),
     ):
         raise CurriculumError("lean_project must contain a pinned lean-toolchain")
-    model_hash = None
-    if config.model is not None:
-        model_path = Path(config.model.name)
-        if config.analogies_per_transition and not model_path.is_dir():
-            raise CurriculumError("offline augmentation requires a local pinned model directory")
-        if model_path.is_dir():
-            model_hash = _tree_hash(model_path)
+    prompts = PromptCatalog.load(config.prompts.path)
     return {"schema_version": SCHEMA_VERSION, "config_hash": _hash(asdict(config)),
             "problems_hash": _file_hash(config.problems),
             "reference_proofs_hash": _file_hash(config.reference_proofs),
             "split_manifest_hash": _file_hash(config.split_manifest),
             "lean_project_hash": _tree_hash(config.lean_project, project=True),
             "lean_version": toolchain.read_text().strip(),
-            "model_hash": _hash({"config": asdict(config.model) if config.model else None,
-                                  "revision": config.model_revision, "files": model_hash}),
-            "model_revision": config.model_revision,
-            "grounded_plan_schema_version": GROUNDED_PLAN_SCHEMA_VERSION,
+            "grounding_schema_version": GROUNDING_SCHEMA_VERSION,
             "compiler_version": TACTIC_COMPILER_VERSION,
-            "prompt_versions": {"source": SOURCE_PROMPT_VERSION, "alignment": ALIGNMENT_PROMPT_VERSION,
-                                "transfer": TRANSFER_PROMPT_VERSION, "grounding": GROUNDING_PROMPT_VERSION}}
+            "operators": [item.value for item in GroundingOperator],
+            "prompt_catalog_hash": prompts.content_hash,
+            "prompt_versions": {"story_operator": prompts.version("story_operator")}}
 
 
 def _read_json(path: Path):
@@ -212,109 +199,52 @@ def _state_hash(result) -> str:
     raise CurriculumError("verifier did not return an accepted state or completion")
 
 
-def derive_grounded_plan(reference_tactic: str, inventory: LocalProofInventory, before, after) -> GroundedTacticPlan:
-    """Recognize a conservative tactic subset; raw syntax is never a compiler input.
-
-    Unsupported terms are counted rather than guessed. Every resulting plan still
-    has to compile and reproduce the full verified successor, including all goals.
-    """
+def derive_grounding_operator(
+    reference_tactic: str, inventory: LocalProofInventory, before, after,
+) -> GroundingOperator:
+    """Recognize the operator only; deterministic code owns every application."""
     _state_hash(before)
     _state_hash(after)
-    completion = after.status is Status.COMPLETE
-    successor = "No remaining goals." if completion else _declarations_and_target(after.proof_state.normalized)[1]
-    output = inventory.active_subgoal if completion else successor
-    bindings: list[GroundedRoleBinding] = []
-    steps: list[GroundedInferenceStep] = []
-    by_name = {entry.identifier: entry for entry in inventory.locals}
-
-    def bind(name):
-        if name not in by_name:
-            raise UnsupportedReferenceTactic(f"unknown local term {name!r}")
-        entry = by_name[name]
-        existing = next((item for item in bindings if item.inventory_id == entry.inventory_id), None)
-        if existing:
-            return existing.binding_id, existing.proposition
-        key = f"binding-{len(bindings)}"
-        bindings.append(GroundedRoleBinding(key, key, entry.inventory_id, entry.proposition, None,
-                                            "Exact local declaration used by the verified reference."))
-        return key, entry.proposition
-
-    def step(op, args, proposition):
-        key = f"step-{len(steps)}"
-        steps.append(GroundedInferenceStep(key, op, tuple(arg[0] for arg in args),
-            tuple(arg[1] for arg in args), proposition, len(steps), False))
-        return key, proposition
-
-    def term(text, depth=0):
-        if depth > 32 or len(steps) > 48:
-            raise UnsupportedReferenceTactic("reference term exceeds supported bounds")
-        text = text.strip()
-        if text in by_name:
-            return bind(text)
-        if text.startswith("(") and text.endswith(")"):
-            # Only strip a wrapper enclosing the entire term.
-            balance = 0
-            for index, char in enumerate(text):
-                balance += (char == "(") - (char == ")")
-                if balance == 0:
-                    if index == len(text) - 1:
-                        return term(text[1:-1], depth + 1)
-                    break
-        # Split a single application at a depth-zero space; recursive parsing
-        # handles nested parenthesized arguments and local proof projections.
-        balance = 0
-        for index, char in enumerate(text):
-            balance += (char == "(") - (char == ")")
-            if char == " " and balance == 0:
-                fn, arg = text[:index], text[index + 1:].strip()
-                if fn.endswith((".mp", ".mpr")):
-                    projection = "mpr" if fn.endswith(".mpr") else "mp"
-                    relation = term(fn[:-(len(projection) + 1)], depth + 1)
-                    sides = _binary(relation[1], "↔")
-                    if sides is None:
-                        raise UnsupportedReferenceTactic("iff projection requires local iff")
-                    return step(Op.IFF_FORWARD if projection == "mp" else Op.IFF_BACKWARD,
-                                [relation, term(arg, depth + 1)], sides[1 if projection == "mp" else 0])
-                fn_term = term(fn, depth + 1)
-                relation = _implication(fn_term[1])
-                if relation is None:
-                    raise UnsupportedReferenceTactic("application requires implication")
-                return step(Op.APPLY_IMPLICATION, [fn_term, term(arg, depth + 1)], relation[1])
-        for suffix, operator, side in ((".left", Op.SELECT_LEFT, 0), (".right", Op.SELECT_RIGHT, 1)):
-            if text.endswith(suffix):
-                local = term(text[:-len(suffix)], depth + 1)
-                relation = _binary(local[1], "∧")
-                if relation:
-                    return step(operator, [local], relation[side])
-        raise UnsupportedReferenceTactic(f"unsupported reference term {text!r}")
-
-    tactic = reference_tactic.strip()
+    tactic = " ".join(reference_tactic.split())
+    local_names = {item.identifier for item in inventory.locals}
+    if re.fullmatch(r"intro(?:\s+[^\s]+)?", tactic):
+        return GroundingOperator.INTRODUCE
+    if tactic == "constructor":
+        return GroundingOperator.SPLIT
+    if tactic == "left":
+        return GroundingOperator.CHOOSE_LEFT
+    if tactic == "right":
+        return GroundingOperator.CHOOSE_RIGHT
+    if match := re.fullmatch(r"rw\s*\[\s*(←\s*)?([^\[\],]+?)\s*\]", tactic):
+        if match[2].strip() not in local_names:
+            raise UnsupportedReferenceTactic("rewrite must cite a local equality")
+        return (GroundingOperator.REWRITE_BACKWARD if match[1]
+                else GroundingOperator.REWRITE_FORWARD)
+    if tactic.startswith("cases ") and tactic[6:] in local_names:
+        return GroundingOperator.CASES
+    if tactic.startswith("apply ") and tactic[6:] in local_names:
+        return GroundingOperator.APPLY_IMPLICATION
     if tactic.startswith("exact "):
-        value = term(tactic[6:])
-        if not steps:
-            step(Op.EXACT_LOCAL, [value], output)
-    elif tactic.startswith("apply ") and tactic[6:] in by_name:
-        step(Op.APPLY_IMPLICATION, [bind(tactic[6:])], output)
-    elif re.fullmatch(r"intro(?:\s+[^\s]+)?", tactic):
-        step(Op.INTRODUCE, [], output)
-    elif tactic in {"constructor", "left", "right"}:
-        step({"constructor": Op.SPLIT, "left": Op.CHOOSE_LEFT, "right": Op.CHOOSE_RIGHT}[tactic], [], output)
-    elif (match := re.fullmatch(r"rw\s*\[\s*(←\s*)?([^\[\],]+?)\s*\]", tactic)):
-        step(Op.REWRITE_BACKWARD if match[1] else Op.REWRITE_FORWARD, [bind(match[2].strip())], output)
-    elif tactic.startswith("cases ") and tactic[6:] in by_name:
-        step(Op.CASES, [bind(tactic[6:])], output)
-    else:
-        raise UnsupportedReferenceTactic(f"unsupported reference tactic {tactic!r}")
-    final = steps[-1]
-    steps[-1] = GroundedInferenceStep(final.step_id, final.operator, final.inputs,
-        final.input_propositions, final.output_proposition, final.transfer_step_index, completion)
-    identity = _hash([reference_tactic, inventory.state_fingerprint, _state_hash(after)])
-    return GroundedTacticPlan(f"plan-{identity}", f"reference-{identity}", inventory.state_fingerprint,
-                              tuple(bindings), tuple(steps), successor, completion, ())
+        term = tactic[6:].strip()
+        if term.startswith("False.elim"):
+            return GroundingOperator.CONTRADICTION
+        if re.fullmatch(r"[^\s]+\.left", term):
+            return GroundingOperator.SELECT_LEFT
+        if re.fullmatch(r"[^\s]+\.right", term):
+            return GroundingOperator.SELECT_RIGHT
+        if re.fullmatch(r"[^\s]+\.mp\s+.+", term):
+            return GroundingOperator.IFF_FORWARD
+        if re.fullmatch(r"[^\s]+\.mpr\s+.+", term):
+            return GroundingOperator.IFF_BACKWARD
+        if term in local_names:
+            return GroundingOperator.EXACT_LOCAL
+        if term.split(maxsplit=1)[0] in local_names:
+            return GroundingOperator.APPLY_IMPLICATION
+    raise UnsupportedReferenceTactic(f"unsupported reference tactic {reference_tactic!r}")
 
 
-def _verify_candidates(verifier, problem, prefix, plan, inventory, expected_hash):
-    applications = enumerate_applications(plan.steps[-1].operator, inventory)
+def _verify_candidates(verifier, problem, prefix, operator, inventory, expected_hash):
+    applications = enumerate_applications(operator, inventory)
     candidates = GroundedTacticCompiler().compile_all(applications, inventory).candidates
     infrastructure = False
     for candidate in candidates:
@@ -324,36 +254,13 @@ def _verify_candidates(verifier, problem, prefix, plan, inventory, expected_hash
                 infrastructure = True
                 continue
             if outcome.accepted and _state_hash(outcome) == expected_hash:
-                return candidate, None
+                return candidate, applications, None
         except Exception:
             infrastructure = True
-    return None, "verifier_error" if infrastructure else "compile_mismatch"
+    return None, applications, "verifier_error" if infrastructure else "compile_mismatch"
 
 
-def _offline_variant(config, generator, inventory, structure, state, index):
-    """Call the existing stages with an explicit zero source-lens action."""
-    import torch
-    from .rl import PolicyAction
-    from .analogy_transfer import AnalogyObservation, derive_proof_need
-    from .analogy_transfer_generation import (SourceAnalogyGenerator, AlignmentGenerator,
-                                              ProofTransferGenerator, GroundedPlanGenerator)
-    observation = AnalogyObservation(inventory.fixed_target, state.expression, None, None,
-        state.context, (), None, None, None, None, None, None, None, False, 0, 8, 8)
-    need = derive_proof_need(structure, inventory.active_subgoal, fixed_target=inventory.fixed_target)
-    options = {"base_seed": config.seed, "hidden_layer": config.model.hidden_layer}
-    zero = torch.tensor(0.0)
-    action = PolicyAction(torch.zeros(generator.hidden_size), zero, zero)
-    source = SourceAnalogyGenerator(generator, **options).generate(observation, need, action, analogy_index=index).source
-    alignment = AlignmentGenerator(generator, **options).generate(observation, need, source, analogy_index=index).alignment
-    transfer = ProofTransferGenerator(generator, **options).generate(observation, need, source, alignment,
-                                                                    analogy_index=index).transfer
-    plan = GroundedPlanGenerator(generator, **options).generate(inventory, transfer,
-        plan_id=f"variant-plan-{index}", analogy_index=index).plan
-    return plan, {"source": asdict(source), "alignment": asdict(alignment), "transfer": asdict(transfer),
-                  "latent_action": {"kind": "unsteered_zero", "delta": [0.0] * generator.hidden_size}}
-
-
-def build_grounded_curriculum(config: CurriculumConfig, verifier, *, generator=None) -> CurriculumSummary:
+def build_grounded_curriculum(config: CurriculumConfig, verifier) -> CurriculumSummary:
     """Replay every prefix, then publish only reproducible accepted transitions."""
     problems = {item.id: item for item in load_problems(config.problems)}
     proofs = load_reference_proofs(config.reference_proofs)
@@ -366,7 +273,7 @@ def build_grounded_curriculum(config: CurriculumConfig, verifier, *, generator=N
     identity_path = config.output_dir / "build-identity.json"
     if identity_path.exists():
         if _read_json(identity_path) != identity:
-            raise CurriculumError("resume requires identical source/config/model/project hashes")
+            raise CurriculumError("resume requires identical source/config/prompt/project hashes")
     else:
         if any(config.output_dir.iterdir()):
             raise CurriculumError("cannot resume artifacts without identical build identity")
@@ -392,7 +299,7 @@ def build_grounded_curriculum(config: CurriculumConfig, verifier, *, generator=N
             seen.update(event["seen_hashes"])
             continue
         event = {"transition_id": transition_id, "records": [], "failure": None,
-                 "augmentation_failure": 0, "seen_hashes": []}
+                 "seen_hashes": []}
         try:
             before = verifier.state_after(problem, prefix)
             after = verifier.try_tactic(problem, prefix, tactic)
@@ -418,13 +325,15 @@ def build_grounded_curriculum(config: CurriculumConfig, verifier, *, generator=N
                     event["failure"] = "structure_failure"
                 else:
                     try:
-                        plan = derive_grounded_plan(tactic, inventory, before, after)
+                        operator = derive_grounding_operator(tactic, inventory, before, after)
                     except UnsupportedReferenceTactic:
                         event["failure"] = "unsupported_tactic"
                     except (ValueError, TypeError):
                         event["failure"] = "compile_mismatch"
                     else:
-                        candidate, failure = _verify_candidates(verifier, problem, prefix, plan, inventory, after_hash)
+                        candidate, applications, failure = _verify_candidates(
+                            verifier, problem, prefix, operator, inventory, after_hash,
+                        )
                         event["failure"] = failure
                         if candidate:
                             record = {"schema_version": SCHEMA_VERSION, "transition_id": transition_id,
@@ -435,46 +344,28 @@ def build_grounded_curriculum(config: CurriculumConfig, verifier, *, generator=N
                                 "before_state_hash": before_hash, "after_state_hash": after_hash,
                                 "before_state": before.proof_state.normalized,
                                 "after_state": after.proof_state.normalized if after.proof_state else None,
-                                "reference_tactic": tactic, "grounded_plan": asdict(plan),
+                                "reference_tactic": tactic, "grounding_operator": operator.value,
+                                "grounded_applications": [asdict(item) for item in applications],
                                 "matching_candidate": asdict(candidate), "compiler_version": TACTIC_COMPILER_VERSION,
-                                "grounded_plan_schema_version": GROUNDED_PLAN_SCHEMA_VERSION,
+                                "grounding_schema_version": GROUNDING_SCHEMA_VERSION,
                                 "lean_version": identity["lean_version"], "lean_project_hash": identity["lean_project_hash"],
-                                "model_revision": config.model_revision, "model_hash": identity["model_hash"],
                                 "prompt_versions": identity["prompt_versions"], "seed": config.seed,
                                 "outcome": "complete" if after.status is Status.COMPLETE else "novel_successor",
                                 "sampling_weight": 1.0 if after.status is Status.COMPLETE else 2.0}
                             event["records"].append(record)
-                            for variant_index in range(config.analogies_per_transition):
-                                if generator is None:
-                                    from .model_backend import load_model_backend
-                                    generator = load_model_backend(config.model)
-                                try:
-                                    variant_plan, artifacts = _offline_variant(config, generator, inventory, structure,
-                                        state, position * config.analogies_per_transition + variant_index)
-                                    match, failure = _verify_candidates(verifier, problem, prefix, variant_plan,
-                                                                       inventory, after_hash)
-                                    if match is None:
-                                        raise CurriculumError(failure)
-                                    event["records"].append({**record, **artifacts,
-                                        "transition_id": _hash([transition_id, "variant", variant_index]),
-                                        "parent_transition_id": transition_id, "grounded_plan": asdict(variant_plan),
-                                        "matching_candidate": asdict(match)})
-                                except Exception:
-                                    event["augmentation_failure"] += 1
         _append_event(journal_path, event)
         # Use the serialized representation consistently across first run/resume.
         events.append(json.loads(_json(event)))
     if _identity(config) != identity:
-        raise CurriculumError("source/config/model/project hashes changed during build")
+        raise CurriculumError("source/config/prompt/project hashes changed during build")
     records = [record for event in events for record in event["records"]]
     base = [record for record in records if record["parent_transition_id"] is None]
     transitions_path = config.output_dir / "transitions.jsonl"
     manifest_path = config.output_dir / "manifest.json"
     summary = CurriculumSummary(transitions_path, manifest_path, len(events), len(base),
         sum(item["outcome"] == "novel_successor" for item in base),
-        sum(item["outcome"] == "complete" for item in base), len(records) - len(base),
-        **{name: sum(event["failure"] == name for event in events) for name in FAILURES},
-        augmentation_failure=sum(event["augmentation_failure"] for event in events))
+        sum(item["outcome"] == "complete" for item in base),
+        **{name: sum(event["failure"] == name for event in events) for name in FAILURES})
     _atomic(transitions_path, "".join(_json(record) + "\n" for record in records))
     summary_path = config.output_dir / "summary.json"
     _atomic(summary_path, _json(asdict(summary)) + "\n")
@@ -520,5 +411,5 @@ def load_online_curriculum_states(manifest: Path, split: str) -> tuple[OnlineCur
     return tuple(result)
 
 
-__all__ = ["CurriculumError", "CurriculumSummary", "OnlineCurriculumState", "derive_grounded_plan",
+__all__ = ["CurriculumError", "CurriculumSummary", "OnlineCurriculumState", "derive_grounding_operator",
            "build_grounded_curriculum", "load_online_curriculum_states"]

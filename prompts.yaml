@@ -191,64 +191,6 @@ prompts:
       Prior output:
       {{raw}}
       Return only a corrected JSON object matching the requested schema.
-  source_analogy:
-    version: source-analogy-v3
-    system: >-
-      Generate a concrete non-proof source situation as strict JSON.
-    user: |-
-      Trajectory observation: {{observation}}
-      Neutral proof need: {{need}}
-      Generate a concrete everyday before/after situation that exhibits the needed transformation without restating the proof. Return exactly domain, source_before, source_after, source_roles, relation_chain, transformation, and rationale. Do not emit caller-owned IDs. Allowed enum values: {{enums}}.
-  analogy_alignment:
-    version: analogy-alignment-v2
-    system: >-
-      Align declared source and proof roles as strict JSON.
-    user: |-
-      Trajectory observation: {{observation}}
-      Neutral proof need: {{need}}
-      Source analogy: {{source}}
-      Return exactly mapping, invariant, source_operation, proof_operation, limitation, and confidence. Use only declared roles and do not emit caller-owned IDs.
-  proof_transfer:
-    version: proof-transfer-v2
-    system: >-
-      Translate the alignment into tactic-free proof reasoning as strict JSON.
-    user: |-
-      Trajectory observation: {{observation}}
-      Neutral proof need: {{need}}
-      Source analogy: {{source}}
-      Alignment: {{alignment}}
-      Return exactly active_subgoal, premises, reasoning_steps, predicted_next_subgoal, and completion_expected. Do not emit tactics or caller-owned IDs.
-  transferred_tactic:
-    version: transferred-tactic-v2
-    system: >-
-      Decode the cited proof reasoning transfer into Lean 4 tactics as strict JSON.
-    user: |-
-      Current proof state:
-      {{state}}
-      Lean structural signature: {{structure}}
-      Source analogy: {{source}}
-      Alignment: {{alignment}}
-      Transferred proof reasoning: {{transfer}}
-      Generate exactly {{candidate_count}} distinct single-line Lean 4 tactics. Return exactly predicted_state, tactics, and motivating_transfer_id. motivating_transfer_id must equal {{transfer_id}}.
-  grounded_plan:
-    version: grounded-plan-v2
-    system: >-
-      Ground transferred reasoning as strict typed JSON; never emit raw Lean.
-    user: |-
-      Current verified local proof inventory: {{inventory}}
-      Transferred proof reasoning: {{transfer}}
-      Use only listed inventory IDs and allowed operators. Return exactly motivating_transfer_id, state_fingerprint, bindings, steps, expected_next_subgoal, completion_expected, and surface_hints. Allowed operators: {{operators}}. Lean alone decides correctness.
-  grounded_plan_repair:
-    version: grounded-plan-repair-v2
-    system: >-
-      Repair grounded typed JSON using Lean diagnostics; never emit raw Lean.
-    user: |-
-      Current verified local proof inventory: {{inventory}}
-      Transferred proof reasoning: {{transfer}}
-      Failed grounded plan: {{failed_plan}}
-      Compiled tactics: {{compiled_tactics}}
-      Lean failures: {{failed_attempts}}
-      Return one corrected grounded plan using only listed inventory IDs and allowed operators: {{operators}}.
   legacy_analogy_hop:
     version: legacy-analogy-hop-v1
     system: >-

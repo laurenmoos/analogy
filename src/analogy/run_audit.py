@@ -345,7 +345,20 @@ def _normalize_iteration(
 
 def _generated_card(row: dict[str, Any]) -> dict[str, Any]:
     """Preserve generated stages and failures without inventing a legacy hop."""
-    card: dict[str, Any] = {"kind": "generated_domain"}
+    story_operator = "decision_schema_version" in row or "applications" in row
+    card: dict[str, Any] = {
+        "kind": "story_operator" if story_operator else "historical_generated_domain"
+    }
+    if story_operator:
+        for name in (
+            "observation", "need", "expected_operator", "decision", "decision_attempts",
+            "inventory", "applications", "compiled_tactics", "compilation_diagnostics",
+            "compiler_version", "decision_schema_version",
+        ):
+            card[name] = row.get(name)
+        for name in ("failed_stage", "failure_diagnostic", "prompt_versions", "training_eligible"):
+            card[name] = row.get(name)
+        return card
     for name in ("observation", "need", "generated_source", "source", "alignment",
                  "transfer", "tactic_plan", "inventory", "grounded_plan", "repaired_grounded_plan"):
         if name in {"inventory", "grounded_plan", "repaired_grounded_plan"} and name not in row:

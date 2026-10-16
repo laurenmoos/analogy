@@ -76,13 +76,15 @@ from .records import (
     VerifiedProgram,
 )
 from .proof_views import ProofStructure, ProofViews, TransitionComparison
+from .grounding import GroundedApplication, GroundingOperator
 from .surprise import StopReason, SurpriseConfig, SurpriseController
 
 __all__ = [
     "AcceptNovelState", "AnalogyIteration", "AnalogyLoopRunner", "AnalogyLoopTrace",
     "AnalogicalTransfer", "AppConfig", "CancellationToken",
     "CandidateOrigin", "ConfigError", "ConstrainedTacticChooser",
-    "GenericRescueOutcome", "GenericRescueRunner",
+    "GenericRescueOutcome", "GenericRescueRunner", "GroundedApplication",
+    "GroundingOperator",
     "CuriosityOutcome", "CuriosityRunner", "CuriositySearch", "DaydreamRound",
     "DiscardReason", "DiscardedSuccessor", "Embedding", "ExpansionOutcome",
     "LeanVerifier", "LocalRescueSearch", "NeverCancelled",

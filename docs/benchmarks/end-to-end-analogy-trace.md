@@ -1,5 +1,11 @@
 # End-to-end analogy trace: training and inference
 
+> **Historical artifact (superseded 2026-10-16).** This trace documents the
+> removed source → alignment → transfer → grounded-plan pipeline. Current
+> production uses one story/operator call followed by deterministic exhaustive
+> grounding and compilation. The old prompt renderer and schemas are intentionally
+> no longer executable; the recorded evidence below is retained for provenance.
+
 This document follows one proof all the way through the analogy pipeline. It shows what the model sees, what it returns, what deterministic code does next, and where learning happens.
 
 > **Evidence labels**

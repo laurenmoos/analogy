@@ -151,13 +151,13 @@ successor, errors return to `[State n unchanged]`, repeated successors are shown
 as candidates followed by `[DISCARDED: repeated_state]`, and verified completion
 shows no remaining subgoals. Multiple open goals are numbered explicitly.
 
-Generated interventions nest `SOURCE ANALOGY` → `ALIGNMENT` →
-`TRANSFERRED PROOF REASONING` → `TACTIC` → `LEAN RESULT`; legacy cards are labeled
-separately. Grounded rows insert `LOCAL PROOF INVENTORY`, `GROUNDED ROLE BINDINGS`,
-`TYPED INFERENCE STEPS`, and `COMPILED TACTICS` before `LEAN RESULTS`, with exact
-IDs, propositions, compiler provenance and original/repaired plans. Compiled
-proposals create no state edge until an actual attempt is recorded. Historical
-rows omit grounding sections; unavailable or failed stages remain explicit.
+Generated interventions render `STORY` → `OPERATOR` → `APPLICATIONS` →
+`COMPILED TACTICS` → every `LEAN RESULT`; legacy cards are labeled separately.
+The model supplies only the story, one operator from the configured enum, and
+story-role bindings to real inventory IDs. Code supplies exact propositions,
+state fingerprints, application IDs, completion predictions, and tactics.
+Compiled proposals create no state edge until an actual attempt is recorded.
+Historical staged rows remain readable but are not executable production paths.
 Ordinary search and conventional finishing attempts retain their
 own stage labels. Optional `proof_trace` metadata in `problems.jsonl` preserves
 the theorem, initial state, and ordinary expansions; a `proof_path_id` joins
@@ -184,15 +184,15 @@ and `proof_path_id`. Only actions with a verified novel successor or completion
 receive generated-policy training samples; later schema, compilation, or runtime
 failure preserves earlier useful actions. Qwen weights are never optimized.
 
-Grounded checkpoints carry the curriculum manifest hash, inventory and plan
-schemas, compiler version, decoder mode, and all staged prompt versions. Loading
-an incompatible or raw-only checkpoint reports saved and expected identities.
-Evaluation includes conventional, direct, legacy, raw generated, and grounded
-unsteered/random/learned/compatible-shuffled conditions with matched budgets.
-Condition summaries retain per-stage attempted/accepted counts; binding and plan
-validity share the strict parser transaction. Empty denominators mean that stage
-was not reached. `model_calls` includes ordinary and rescue generations; benchmark
-raw-call logs additionally retain actual Lean processes, including prefix replay.
+Grounded checkpoints carry the curriculum manifest hash, inventory and decision
+schemas, compiler version, configured operator list, and prompt-catalog identity.
+Old generated-domain checkpoints and trace schemas are intentionally incompatible.
+Within one proof state, training collects several sibling latent samples and
+subtracts their mean verifier score before the policy update. It also records
+whether those latent nudges actually produce distinct stories. Condition summaries
+retain decision, application, compilation, and Lean funnel counts. `model_calls`
+includes ordinary and rescue generations; benchmark raw-call logs additionally
+retain actual Lean processes, including prefix replay.
 See [the grounded transition smoke report](docs/benchmarks/2026-10-15-grounded-transition-smoke.md)
 for separate default-curriculum, curated-fixture, and fake-backend evidence.
 
@@ -236,28 +236,28 @@ evaluation, copy the profile, set `experiment.stage: evaluate_rescue`, and set
 `rl.checkpoint` to that checkpoint; the original training profile remains an
 immutable record of the run.
 
-The generated-domain profile uses the same model and call caps, with a minimum
-of two analogy iterations (when budgets, schema validation, and completion
-permit):
+The generated-domain profile uses the same model and hard call caps:
 
 ```bash
 PYTHONPATH=src python -m analogy --config config.mlx-8b-generated-analogy.yaml
 ```
 
-It separates concrete source generation, structural alignment, tactic-free
-proof reasoning, tactic decoding, and Lean verification. Only source generation
-receives the policy delta. A verified open successor gets an `assumption`
-finishing attempt before another analogy. `legacy` remains the default strategy.
-When used with `evaluate_rescue`, the generated profile evaluates conventional
-search, learned direct rescue,
-legacy cards, and generated unsteered, random, learned, and shuffled-source
-controls with matched configured call budgets. Actual calls can differ because
-of validation failure, early completion, or unavailable compatible shuffle donors.
+Each generated iteration makes one non-thinking Qwen call from the neutral need
+description plus the local inventory. The selected operator is restricted by
+`analogy.grounding_operators` in YAML. Deterministic grounding enumerates every
+valid current-state application, the compiler deduplicates its Lean 4 tactics,
+and Lean receives every candidate that fits the remaining budget. There is no
+source/alignment/transfer/grounded-plan repair chain.
+
+The direct-operator versus story-mediated comparison is deliberately not an
+evaluation branch in production. Use the standalone command at the top of this
+README; its crossed-order matched pairs report calls, first-pick and any-candidate
+success, invalid outputs, zero applications, prompt/output size, model and Lean
+latency, candidate/Lean-call counts, operator confusion, and story diversity.
 
 The [five-example generated-domain smoke report](docs/benchmarks/2026-10-15-generated-domain-analogy-smoke.md)
-records the exact configuration, immutable artifacts, relative control metrics,
-and connected traces. Its held-out results concern only two iff examples;
-the additional training/validation comparisons are in-sample diagnostics.
+is a sealed historical artifact for the removed staged pipeline, not evidence for
+the current one-call implementation.
 
 See the [quality and stream design](docs/superpowers/specs/2026-10-14-rescue-quality-and-analogy-stream-design.md) and [implementation plan](docs/superpowers/plans/2026-10-14-rescue-quality-and-analogy-stream.md).
 

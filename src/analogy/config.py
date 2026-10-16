@@ -123,21 +123,13 @@ class CurriculumConfig:
     lean_project: Path
     seed: int
     schema_version: str
-    analogies_per_transition: int
-    model: ModelConfig | None = None
-    model_revision: str = "none"
     prompts: PromptConfig = PromptConfig(Path("prompts.yaml"))
 
     def __post_init__(self) -> None:
-        if self.schema_version != "grounded-curriculum-v1":
+        if self.schema_version != "grounded-curriculum-v2":
             raise ConfigError("unsupported curriculum schema_version")
-        for name in ("seed", "analogies_per_transition"):
-            if isinstance(getattr(self, name), bool) or not isinstance(getattr(self, name), int) or getattr(self, name) < 0:
-                raise ConfigError(f"curriculum.{name} must be a non-negative integer")
-        if not isinstance(self.model_revision, str) or not self.model_revision.strip():
-            raise ConfigError("curriculum.model_revision must be nonblank")
-        if self.analogies_per_transition and (self.model is None or self.model_revision in {"none", "main", "latest"}):
-            raise ConfigError("augmentation requires a model and pinned model_revision")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+            raise ConfigError("curriculum.seed must be a non-negative integer")
 
 
 def load_curriculum_config(path: Path) -> CurriculumConfig:
@@ -146,32 +138,16 @@ def load_curriculum_config(path: Path) -> CurriculumConfig:
     try:
         root = _mapping(yaml.safe_load(path.read_text()), "config")
         root = {"prompts": {"path": "prompts.yaml"}, **root}
-        _validate_keys(root, frozenset({"curriculum", "model", "prompts"}), "config")
+        _validate_keys(root, frozenset({"curriculum", "prompts"}), "config")
         raw = _mapping(root["curriculum"], "curriculum")
         _validate_keys(raw, frozenset({"problems", "reference_proofs", "split_manifest", "output_dir",
-                                     "lean_project", "seed", "schema_version", "analogies_per_transition",
-                                     "model_revision"}), "curriculum")
-        model = None
-        if root["model"] is not None:
-            item = _mapping(root["model"], "model")
-            _validate_keys(item, _SCHEMA["model"], "model")
-            name = _string(item["name"], "model.name")
-            if (path.parent / name).exists():
-                name = str((path.parent / name).resolve())
-            model = ModelConfig(_model_backend(item["backend"]), name,
-                _string(item["device"], "model.device"), _integer(item["hidden_layer"], "model.hidden_layer"),
-                _positive_integer(item["max_new_tokens"], "model.max_new_tokens"),
-                _positive_number(item["timeout_seconds"], "model.timeout_seconds"),
-                _boolean(item["do_sample"], "model.do_sample"),
-                _positive_number(item["temperature"], "model.temperature"), _probability(item["top_p"], "model.top_p"))
+                                     "lean_project", "seed", "schema_version"}), "curriculum")
         prompt_raw = _mapping(root["prompts"], "prompts")
         _validate_keys(prompt_raw, frozenset({"path"}), "prompts")
         return CurriculumConfig(**{key: _path(raw[key], f"curriculum.{key}", path.parent)
             for key in ("problems", "reference_proofs", "split_manifest", "output_dir", "lean_project")},
             seed=_integer(raw["seed"], "curriculum.seed"),
             schema_version=_string(raw["schema_version"], "curriculum.schema_version"),
-            analogies_per_transition=_integer(raw["analogies_per_transition"], "curriculum.analogies_per_transition"),
-            model=model, model_revision=_string(raw["model_revision"], "curriculum.model_revision"),
             prompts=PromptConfig(_path(prompt_raw["path"], "prompts.path", path.parent)))
     except (OSError, yaml.YAMLError) as error:
         raise ConfigError(f"curriculum config could not be read: {error}") from error

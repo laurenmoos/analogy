@@ -27,15 +27,24 @@ def test_curriculum_schedule_is_deterministic_epoch_sensitive_and_split_isolated
                                    "split", "transition_id"} for item in first)
 
 
-def test_grounded_profile_uses_curriculum_and_matched_raw_ablation():
+def test_grounded_profile_uses_one_call_identity_without_production_ablation_arms():
     cfg = load_config(ROOT / "config.mlx-8b-grounded-analogy.yaml")
     assert cfg.rl.curriculum_manifest is not None
     assert cfg.model.max_new_tokens >= 512
     conditions = training.build_evaluation_conditions(cfg)
     names = {item.name for item in conditions}
     assert names >= {"generated_unsteered", "generated_random", "generated_learned", "analogy_loop", "conventional"}
-    assert names.isdisjoint({"generated_raw", "generated_shuffled"})
+    assert names.isdisjoint({"generated_raw", "generated_shuffled", "ablation_plain", "ablation_story"})
     assert len({item.budget for item in conditions}) == 1
+    identity = training._artifact_identity(
+        replace(cfg, rl=replace(cfg.rl, curriculum_manifest=None))
+    )
+    assert set(identity) == {
+        "training_schema_version", "curriculum_manifest_hash", "inventory_schema",
+        "decision_schema", "compiler_version", "operators", "prompt_catalog_hash",
+        "prompt_versions",
+    }
+    assert identity["prompt_versions"] == {"story_operator": "story-operator-v1"}
 
 
 def test_curriculum_training_replays_prefix_and_persists_transition_without_answer(tmp_path, monkeypatch):

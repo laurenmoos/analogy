@@ -26,7 +26,6 @@ from .analogy_generation import (
 )
 from .analogy_loop import AnalogyLoopRunner
 from .analogy_transfer_loop import GeneratedDomainAnalogyLoopRunner
-from .analogy_transfer import ProofNeed, SourceAnalogy
 from .story_operator import StoryOperatorGenerator
 from .analogy_stream import AnalogyHop, AnalogyTacticPlan
 from .config import AppConfig
@@ -142,14 +141,6 @@ class EvaluationCondition:
 class AnalogyAssignment:
     source: StuckStateRecord
     target: StuckStateRecord
-
-
-@dataclass(frozen=True, slots=True)
-class GeneratedSourceRecord:
-    problem_id: str
-    state: str
-    need: ProofNeed
-    source: SourceAnalogy
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,20 +439,6 @@ def shuffle_analogy_assignments(
     return tuple(assignments)
 
 
-def shuffle_generated_source(source, need, observation, records, *, problem_id, seed):
-    """Substitute a different theorem's compatible source before target alignment."""
-    def signature(item):
-        return (item.operation, item.input_arity, item.output_arity, item.permutation,
-                item.information_flow, item.proof_roles)
-    eligible = sorted((item for item in records if item.problem_id != problem_id
-                       and signature(item.need) == signature(need)),
-                      key=lambda item: (item.problem_id, item.state, item.source.analogy_id))
-    if not eligible:
-        raise ValueError("shuffled source evaluation lacks a structurally compatible other theorem")
-    selected = random.Random(seed + observation.iteration_index).choice(eligible)
-    return replace(selected.source, analogy_id=f"shuffled-{selected.problem_id}-{selected.source.analogy_id}")
-
-
 def _evaluation_policy(condition, config, generator, learned):
     if condition == "conventional":
         return None
@@ -519,7 +496,7 @@ def _curriculum_problem_split(manifest: Path, problems: Sequence[Problem]) -> Pr
     # projected exclusively when that phase is actually scheduled.
     by_id = {item.id: item for item in problems}
     data = json.loads(Path(manifest).read_text())
-    if data.get("schema_version") != "grounded-curriculum-v1":
+    if data.get("schema_version") != "grounded-curriculum-v2":
         raise ValueError("unsupported curriculum schema")
     groups = []
     seen = set()
@@ -848,7 +825,6 @@ def evaluate_direct_rescue(
     conventional_solved: set[str] = set()
     analogy_hops_by_problem: dict[str, tuple[AnalogyHop, ...]] = {}
     analogy_records_by_problem: dict[str, StuckStateRecord] = {}
-    generated_sources: list[GeneratedSourceRecord] = []
     for condition in build_evaluation_conditions(config):
         condition_policy = _evaluation_policy(condition.name, config, generator, learned)
         shuffled_sources: dict[str, tuple[AnalogyHop, ...]] = {}
@@ -906,7 +882,6 @@ def evaluate_direct_rescue(
                 "generated_unsteered" if condition.name == "generated_raw" else condition.name,
                 condition_policy,
                 analogy_hops=shuffled_sources.get(item.id),
-                generated_sources=tuple(generated_sources),
                 iteration_sink=sink,
                 initial_state=initial_state,
             )
@@ -944,14 +919,6 @@ def evaluate_direct_rescue(
                             for attempt in first.attempts
                         ),
                     )
-        if condition.name == "generated_learned":
-            generated_sources.extend(
-                GeneratedSourceRecord(episode.problem_id, iteration.state_before.expression,
-                                      iteration.need, iteration.source)
-                for episode in episodes for rollout in episode.rollouts
-                if rollout.analogy_trace is not None
-                for iteration in rollout.analogy_trace.iterations if iteration.source is not None
-            )
         for episode in episodes:
             _persist_episode(writer, episode, 0, condition.name)
         solved_ids = {item.transition_id or item.problem_id for item in episodes if item.completed}
@@ -1157,7 +1124,6 @@ def _execute_problem(
     analogy_hops: tuple[AnalogyHop, ...] | None = None,
     initial_state: SymbolicState | None = None,
     iteration_sink: Callable[[str, Any], None] | None = None,
-    generated_sources: tuple[GeneratedSourceRecord, ...] = (),
     sample_offset: int = 0,
 ) -> ProblemEpisode:
     calls = _GenerationCallCounter(generator)
@@ -1194,8 +1160,6 @@ def _execute_problem(
                     analogy_hops=analogy_hops,
                     iteration_sink=iteration_sink,
                     condition=(phase if phase in {"analogy_loop", "shuffled_analogy"} or phase.startswith("generated_") else None),
-                    generated_sources=generated_sources,
-                    problem_id=problem.id,
                     sample_offset=sample_offset,
                 )
             else:
@@ -1332,15 +1296,12 @@ def _new_analogy_runner(
     analogy_hops: tuple[AnalogyHop, ...] | None = None,
     iteration_sink: Callable[[str, Any], None] | None = None,
     condition: str | None = None,
-    generated_sources: tuple[GeneratedSourceRecord, ...] = (),
-    problem_id: str = "",
     sample_offset: int = 0,
 ) -> AnalogyLoopRunner | GeneratedDomainAnalogyLoopRunner:
     """Compose the readable loop from the same frozen model and policy head."""
     if config.analogy.strategy == "generated_domain" and condition not in {"analogy_loop", "shuffled_analogy"}:
         return _new_generated_runner(config, generator, adapter, policy,
             condition=condition or "generated_learned", iteration_sink=iteration_sink,
-            generated_sources=generated_sources, problem_id=problem_id,
             sample_offset=sample_offset)
     representations: dict[int, ProofRepresentation] = {}
     model_calls = 0
@@ -1467,8 +1428,7 @@ def _new_analogy_runner(
 
 
 def _new_generated_runner(config, generator, adapter, policy, *, condition,
-                          iteration_sink, generated_sources, problem_id, sample_offset=0):
-    del generated_sources, problem_id
+                          iteration_sink, sample_offset=0):
     if condition not in {"generated_unsteered", "generated_random", "generated_learned"}:
         raise ValueError(f"unknown generated evaluation condition: {condition}")
     lean_budget = min(config.analogy.max_lean_calls, config.rl.max_rescue_verifier_calls)

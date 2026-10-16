@@ -2,10 +2,11 @@
 
 import json
 from dataclasses import fields, replace
+from pathlib import Path
 
 import pytest
 
-from analogy.config import CurriculumConfig
+from analogy.config import CurriculumConfig, PromptConfig
 from analogy.grounded_curriculum import (
     CurriculumError, OnlineCurriculumState, build_grounded_curriculum,
     load_online_curriculum_states,
@@ -62,7 +63,8 @@ def config(tmp_path, tactics=("intro analogy_h", "exact h"), ids=("train_a",)):
     (project / "lean-toolchain").write_text("leanprover/lean4:v4.29.1\n")
     return CurriculumConfig(tmp_path / "problems.json", tmp_path / "proofs.json",
                             tmp_path / "splits.json", tmp_path / "out", project,
-                            7, "grounded-curriculum-v1", 0)
+                            7, "grounded-curriculum-v2",
+                            PromptConfig(Path(__file__).parents[1] / "prompts.yaml"))
 
 
 def rows(path):
@@ -177,8 +179,8 @@ def test_resume_recovers_partial_rows_without_reverification_or_duplicate_ids(tm
     assert again == summary
 
 
-@pytest.mark.parametrize("change", ["seed", "source", "project", "model"])
-def test_resume_requires_identical_source_config_project_and_model_hashes(tmp_path, change):
+@pytest.mark.parametrize("change", ["seed", "source", "project", "prompts"])
+def test_resume_requires_identical_source_config_project_and_prompt_hashes(tmp_path, change):
     cfg = config(tmp_path)
     build_grounded_curriculum(cfg, PrefixVerifier(cfg.lean_project))
     if change == "seed":
@@ -188,7 +190,9 @@ def test_resume_requires_identical_source_config_project_and_model_hashes(tmp_pa
     elif change == "project":
         (cfg.lean_project / "Extra.lean").write_text("-- changed\n")
     else:
-        cfg = replace(cfg, model_revision="different")
+        copied = tmp_path / "changed-prompts.yaml"
+        copied.write_text(cfg.prompts.path.read_text() + "\n")
+        cfg = replace(cfg, prompts=PromptConfig(copied))
     verifier = PrefixVerifier(cfg.lean_project)
     with pytest.raises(CurriculumError, match="identical|hash"):
         build_grounded_curriculum(cfg, verifier)
@@ -280,23 +284,6 @@ def test_pinned_lean_replays_and_compiles_real_nonterminal_transition(tmp_path):
     summary = build_grounded_curriculum(cfg, LeanSubprocessVerifier(LEAN_PROJECT_ROOT))
     assert summary.nonterminal == 1 and summary.completions == 1
     assert summary.retained == 2
-
-
-def test_local_model_content_change_blocks_resume_even_with_same_revision(tmp_path):
-    from analogy.config import ModelConfig
-    cfg = config(tmp_path)
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    weights = model_dir / "weights.safetensors"
-    weights.write_bytes(b"original")
-    cfg = replace(cfg, model=ModelConfig("transformers", str(model_dir), "cpu", -1, 512, 30, False, 0.3, 0.9),
-                  model_revision="immutable-revision")
-    build_grounded_curriculum(cfg, PrefixVerifier(cfg.lean_project))
-    weights.write_bytes(b"changed")
-    verifier = PrefixVerifier(cfg.lean_project)
-    with pytest.raises(CurriculumError, match="identical"):
-        build_grounded_curriculum(cfg, verifier)
-    assert verifier.calls == []
 
 
 def test_manifest_is_published_last_and_finalization_failure_can_resume(tmp_path, monkeypatch):

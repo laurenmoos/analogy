@@ -152,21 +152,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if passed else 1
 
     if config.experiment.stage == "train_rescue":
-        summary = train_direct_rescue(config, generator, verifier)
-        print(
-            f"train_rescue: {summary.epochs_completed} epochs; "
-            f"checkpoint={summary.best_checkpoint}"
-        )
+        train_direct_rescue(config, generator, verifier, progress=print)
         return 0
 
     if config.experiment.stage == "evaluate_rescue":
         assert config.rl.checkpoint is not None
-        summary = evaluate_direct_rescue(
-            config, generator, verifier, config.rl.checkpoint
+        evaluate_direct_rescue(
+            config, generator, verifier, config.rl.checkpoint, progress=print
         )
-        print(f"evaluate_rescue: {summary.run_id}")
-        for condition in summary.condition_summaries:
-            print(f"{condition.name}: {condition.solved}/{condition.attempted} solved")
         return 0
 
     run = run_baseline(config, generator, verifier)

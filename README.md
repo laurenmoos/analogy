@@ -174,6 +174,13 @@ PYTHONPATH=src python -m analogy build-grounded-curriculum --config config.groun
 PYTHONPATH=src python -m analogy --config config.mlx-8b-grounded-analogy.yaml
 ```
 
+Training and `evaluate_rescue` print the same plain-English progress that they
+save as `run.log` inside the run directory. Each problem is shown as a short
+sequence: ordinary Lean attempts, everyday story, selected operation, compiled
+candidate, Lean result, reward, and model/Lean call cost. Training also shows
+each policy update, story diversity, validation score, and checkpoint. The
+JSONL files remain the detailed machine-readable record.
+
 `rl.curriculum_manifest` enables theorem-grouped curriculum splits instead of the
 legacy connective partition. Each epoch schedules only that phase's online-safe
 states in deterministic seed/epoch order, replays the accepted prefix, checks

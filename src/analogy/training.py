@@ -252,6 +252,7 @@ class RescueRunWriter:
             "metrics.jsonl",
             "stuck_states.jsonl",
             "analogy_iterations.jsonl",
+            "run.log",
         ):
             (path / name).touch(exist_ok=False)
         return writer
@@ -260,6 +261,11 @@ class RescueRunWriter:
         target = self.path / name
         with target.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(_jsonable(payload), sort_keys=True) + "\n")
+            handle.flush()
+
+    def append_readable(self, line: str) -> None:
+        with (self.path / "run.log").open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(line + "\n")
             handle.flush()
 
     def finalize_readable_traces(self) -> None:
@@ -540,6 +546,105 @@ def _check_artifact_identity(saved: Any, expected: Any) -> None:
             raise ValueError(f"checkpoint {key} incompatible: saved={saved.get(key)!r}, expected={expected.get(key)!r}")
 
 
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _short_text(value: Any, limit: int = 220) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
+
+def _plain_value(value: Any) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _readable_episode_lines(episode: ProblemEpisode) -> tuple[str, ...]:
+    """Explain one episode without exposing internal dataclass or JSON dumps."""
+    lines = [f"Result: {'SOLVED' if episode.completed else 'not solved'}"]
+    proof_trace = episode.proof_trace or {}
+    for expansion in proof_trace.get("ordinary_expansions", ()):
+        for attempt in expansion.get("attempts", ()):
+            candidate = attempt.get("candidate", {})
+            lines.append(
+                f"Ordinary Lean: {_short_text(candidate.get('source', '<unknown>'))} "
+                f"-> {_plain_value(attempt.get('status', 'unknown'))}"
+            )
+    for rollout in episode.rollouts:
+        trace = getattr(rollout, "analogy_trace", None)
+        if trace is None:
+            for attempt in getattr(rollout, "attempts", ()):
+                tactic = attempt.proposal.candidate.source
+                status = getattr(attempt.result.status, "value", attempt.result.status)
+                lines.append(f"Lean: {_short_text(tactic)} -> {status}")
+        for iteration in getattr(trace, "iterations", ()):
+            decision = getattr(iteration, "decision", None)
+            if decision is not None and hasattr(decision, "story") and hasattr(decision, "operator"):
+                lines.append(f"Story: {_short_text(decision.story)}")
+                lines.append(f"Operation: {_plain_value(decision.operator)}")
+            else:
+                hop = getattr(iteration, "hop", None)
+                if hop is not None:
+                    lines.append(f"Analogy: {_short_text(hop.situation)}")
+            for candidate in getattr(iteration, "compiled_tactics", ()):
+                lines.append(f"Candidate: {_short_text(candidate.text)}")
+            tactic_plan = getattr(iteration, "tactic_plan", None)
+            for tactic in getattr(tactic_plan, "tactics", ()):
+                lines.append(f"Candidate: {_short_text(tactic)}")
+            for attempt in getattr(iteration, "attempts", ()):
+                tactic = attempt.proposal.candidate.source
+                status = getattr(attempt.result.status, "value", attempt.result.status)
+                lines.append(f"Lean: {_short_text(tactic)} -> {status}")
+            failed_stage = getattr(iteration, "failed_stage", None)
+            if failed_stage:
+                diagnostic = _short_text(
+                    getattr(iteration, "failure_diagnostic", None) or "no further detail"
+                )
+                lines.append(f"Stopped at {failed_stage}: {diagnostic}")
+        stop_reason = getattr(trace, "stop_reason", None)
+        if stop_reason is None:
+            stop_reason = getattr(rollout, "termination", None)
+        plain_stop = _plain_value(stop_reason) if stop_reason is not None else ""
+        if not episode.completed and plain_stop not in {"", "continue", "complete", "progress"}:
+            lines.append(f"Stopped: {plain_stop.replace('_', ' ')}")
+        reward = getattr(rollout, "reward", None)
+        if reward is not None:
+            lines.append(f"Reward: {float(reward):+.3f}")
+    if not episode.completed and not episode.rollouts and proof_trace.get("termination"):
+        termination = _plain_value(proof_trace["termination"])
+        lines.append(f"Stopped: {termination.replace('_', ' ')}")
+    if episode.failure:
+        lines.append(f"Failure: {_short_text(episode.failure)}")
+    model_calls = episode.model_calls if episode.model_calls is not None else sum(
+        getattr(getattr(rollout, "analogy_trace", None), "model_calls", 0)
+        for rollout in episode.rollouts
+    )
+    lines.append(
+        f"Cost: {_plural(model_calls, 'model call')}; "
+        f"{_plural(episode.verifier_calls, 'Lean check')}"
+    )
+    return tuple(lines)
+
+
+def _item_label(item: Problem | StuckStateRecord | OnlineCurriculumState) -> str:
+    if isinstance(item, OnlineCurriculumState):
+        return item.problem_id
+    if isinstance(item, StuckStateRecord):
+        return item.problem.id
+    return item.id
+
+
+def _run_log(
+    writer: RescueRunWriter,
+    progress: Callable[[str], None] | None,
+    *lines: str,
+) -> None:
+    for line in lines:
+        writer.append_readable(line)
+        if progress is not None:
+            progress(line)
+
+
 def train_direct_rescue(
     config: AppConfig,
     generator: Any,
@@ -551,6 +656,7 @@ def train_direct_rescue(
     problem_runner: ProblemRunner | None = None,
     run_id: str | None = None,
     replay_records: Sequence[StuckStateRecord] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> TrainingSummary:
     configure_prompt_catalog(config.prompts.path)
     if not config.rl.enabled:
@@ -686,6 +792,17 @@ def train_direct_rescue(
     if normalized_replay and (not train_items or not validation_items):
         raise ValueError("replay training requires train and validation records")
 
+    _run_log(
+        writer,
+        progress,
+        "TRAINING RUN",
+        f"Run: {identifier}",
+        f"Plan: {config.rl.epochs - start_epoch} remaining epochs; "
+        f"{len(train_items)} training inputs; {len(validation_items)} validation inputs",
+        "The language model is frozen; training updates only the small policy.",
+        "",
+    )
+
     for epoch in range(start_epoch + 1, config.rl.epochs + 1):
         if manifest is not None:
             _check_artifact_identity(_artifact_identity(config), artifact_identity)
@@ -693,12 +810,26 @@ def train_direct_rescue(
             validation_items = schedule_curriculum_states(manifest, "validation", seed=config.run.seed, epoch=epoch)
             if not train_items or not validation_items:
                 raise ValueError("curriculum training requires train and validation states")
+        _run_log(writer, progress, f"Epoch {epoch} of {config.rl.epochs}")
         epoch_story_samples: list[StoryDiversitySample] = []
-        for item in train_items:
+        for item_index, item in enumerate(train_items, 1):
             repeat = (config.rl.rollouts_per_state
                       if config.analogy.enabled and config.analogy.strategy == "generated_domain"
                       else 1)
-            sibling_episodes = tuple(execute(item, "train", epoch, offset) for offset in range(repeat))
+            _run_log(
+                writer, progress,
+                f"  Training state {item_index} of {len(train_items)}: {_item_label(item)}",
+            )
+            siblings = []
+            for offset in range(repeat):
+                _run_log(writer, progress, f"    Attempt {offset + 1} of {repeat}: running")
+                episode = execute(item, "train", epoch, offset)
+                siblings.append(episode)
+                _run_log(
+                    writer, progress,
+                    *(f"      {line}" for line in _readable_episode_lines(episode)),
+                )
+            sibling_episodes = tuple(siblings)
             for episode in sibling_episodes:
                 _persist_episode(writer, episode, epoch, "train")
                 for rollout in episode.rollouts:
@@ -727,6 +858,12 @@ def train_direct_rescue(
                 writer.append_jsonl(
                     "metrics.jsonl", {"epoch": epoch, "phase": "train", **asdict(metrics)}
                 )
+                _run_log(
+                    writer, progress,
+                    "    Learning update: "
+                    f"mean reward {metrics.mean_reward:+.3f}; "
+                    f"loss {metrics.loss:+.3f}; gradient norm {metrics.gradient_norm:.3f}",
+                )
 
         diversity = story_diversity(
             epoch_story_samples,
@@ -736,13 +873,41 @@ def train_direct_rescue(
         writer.append_jsonl(
             "story_diversity.jsonl", {"epoch": epoch, **asdict(diversity)}
         )
+        if diversity.states:
+            _run_log(
+                writer, progress,
+                "  Story diversity: "
+                f"{diversity.exact_distinct_ratio:.0%} distinct stories; "
+                f"{diversity.operator_diversity_ratio:.0%} changed operations",
+            )
+        else:
+            _run_log(
+                writer, progress,
+                "  Story diversity: unavailable (no state had two valid stories)",
+            )
 
-        validation_episodes = tuple(
-            execute(item, "validation", epoch) for item in validation_items
-        )
+        _run_log(writer, progress, "  Validation")
+        validation_rows = []
+        for item_index, item in enumerate(validation_items, 1):
+            _run_log(
+                writer, progress,
+                f"    Validation state {item_index} of {len(validation_items)}: "
+                f"{_item_label(item)}",
+            )
+            episode = execute(item, "validation", epoch)
+            validation_rows.append(episode)
+            _run_log(
+                writer, progress,
+                *(f"      {line}" for line in _readable_episode_lines(episode)),
+            )
+        validation_episodes = tuple(validation_rows)
         for episode in validation_episodes:
             _persist_episode(writer, episode, epoch, "validation")
         validation_score = sum(episode.completed for episode in validation_episodes)
+        _run_log(
+            writer, progress,
+            f"  Validation: {validation_score} of {len(validation_episodes)} solved",
+        )
         _check_artifact_identity(_artifact_identity(config), artifact_identity)
         checkpoint = writer.path / "checkpoints" / f"epoch-{epoch:04d}.pt"
         if epoch % config.rl.checkpoint_interval == 0 or epoch == config.rl.epochs:
@@ -768,6 +933,12 @@ def train_direct_rescue(
                     artifact_identity=artifact_identity,
                 )
             best_checkpoint = checkpoint
+        _run_log(
+            writer, progress,
+            (f"  Checkpoint saved: {checkpoint}"
+             if checkpoint.exists() else "  Checkpoint: unchanged this epoch"),
+            "",
+        )
 
     if best_checkpoint is None:
         raise RuntimeError("training produced no checkpoint")
@@ -781,6 +952,13 @@ def train_direct_rescue(
     )
     writer.write_json("summary.json", asdict(summary))
     writer.finalize_readable_traces()
+    _run_log(
+        writer,
+        progress,
+        "TRAINING COMPLETE",
+        f"Best checkpoint: {best_checkpoint}",
+        f"Run files: {writer.path}",
+    )
     return summary
 
 
@@ -789,6 +967,8 @@ def evaluate_direct_rescue(
     generator: Any,
     verifier: Any,
     checkpoint: Path,
+    *,
+    progress: Callable[[str], None] | None = None,
 ) -> EvaluationSummary:
     configure_prompt_catalog(config.prompts.path)
     if not config.rl.enabled:
@@ -825,7 +1005,20 @@ def evaluate_direct_rescue(
     conventional_solved: set[str] = set()
     analogy_hops_by_problem: dict[str, tuple[AnalogyHop, ...]] = {}
     analogy_records_by_problem: dict[str, StuckStateRecord] = {}
-    for condition in build_evaluation_conditions(config):
+    conditions = build_evaluation_conditions(config)
+    _run_log(
+        writer,
+        progress,
+        "INFERENCE RUN",
+        f"Checkpoint: {checkpoint}",
+        f"Plan: {len(conditions)} matched conditions",
+        "",
+    )
+    for condition_index, condition in enumerate(conditions, 1):
+        _run_log(
+            writer, progress,
+            f"Condition {condition_index} of {len(conditions)}: {condition.name}",
+        )
         condition_policy = _evaluation_policy(condition.name, config, generator, learned)
         shuffled_sources: dict[str, tuple[AnalogyHop, ...]] = {}
         if condition.name == "shuffled_analogy" and config.analogy.enabled:
@@ -855,12 +1048,18 @@ def evaluate_direct_rescue(
                         )
                     source_id = eligible[0]
                 shuffled_sources[item.id] = analogy_hops_by_problem[source_id]
-        state_items = (schedule_curriculum_states(manifest, "test", seed=config.run.seed, epoch=0)
-                       if manifest is not None else problem_split.test)
+        state_items = tuple(
+            schedule_curriculum_states(manifest, "test", seed=config.run.seed, epoch=0)
+            if manifest is not None else problem_split.test
+        )
         episodes_list = []
-        for scheduled in state_items:
+        for problem_index, scheduled in enumerate(state_items, 1):
             item = (next(problem for problem in problems if problem.id == scheduled.problem_id)
                     if isinstance(scheduled, OnlineCurriculumState) else scheduled)
+            _run_log(
+                writer, progress,
+                f"  Problem {problem_index} of {len(state_items)}: {item.id}",
+            )
             transition_id = scheduled.transition_id if isinstance(scheduled, OnlineCurriculumState) else None
             sink = _live_iteration_sink(writer, epoch=0, phase=condition.name,
                 problem_id=item.id, transition_id=transition_id)
@@ -868,9 +1067,14 @@ def evaluate_direct_rescue(
                 initial_state = (reconstruct_curriculum_state(scheduled, item, verifier)
                                  if isinstance(scheduled, OnlineCurriculumState) else None)
             except Exception as error:
-                episodes_list.append(ProblemEpisode(item.id, False, (), (), 0, 0,
+                episode = ProblemEpisode(item.id, False, (), (), 0, 0,
                     f"{type(error).__name__}: {error}", proof_path_id=sink.proof_path_id,
-                    transition_id=transition_id))
+                    transition_id=transition_id)
+                episodes_list.append(episode)
+                _run_log(
+                    writer, progress,
+                    *(f"    {line}" for line in _readable_episode_lines(episode)),
+                )
                 continue
             condition_config = (replace(config, analogy=replace(config.analogy, decoder="raw"))
                                 if condition.name == "generated_raw" else config)
@@ -885,7 +1089,12 @@ def evaluate_direct_rescue(
                 iteration_sink=sink,
                 initial_state=initial_state,
             )
-            episodes_list.append(replace(episode, transition_id=transition_id))
+            episode = replace(episode, transition_id=transition_id)
+            episodes_list.append(episode)
+            _run_log(
+                writer, progress,
+                *(f"    {line}" for line in _readable_episode_lines(episode)),
+            )
         episodes = tuple(episodes_list)
         if condition.name == "analogy_loop":
             for episode in episodes:
@@ -924,10 +1133,25 @@ def evaluate_direct_rescue(
         solved_ids = {item.transition_id or item.problem_id for item in episodes if item.completed}
         if condition.name == "conventional":
             conventional_solved = solved_ids
-        summaries.append(_summarize_condition(condition.name, episodes, conventional_solved))
+        condition_summary = _summarize_condition(condition.name, episodes, conventional_solved)
+        summaries.append(condition_summary)
+        _run_log(
+            writer, progress,
+            f"  Condition result: {condition_summary.solved} of "
+            f"{condition_summary.attempted} solved",
+            f"  Cost: {_plural(condition_summary.model_calls, 'model call')}; "
+            f"{_plural(condition_summary.verifier_calls, 'Lean check')}",
+            "",
+        )
     summary = EvaluationSummary(identifier, writer.path, tuple(summaries))
     writer.write_json("summary.json", asdict(summary))
     writer.finalize_readable_traces()
+    _run_log(
+        writer,
+        progress,
+        "INFERENCE COMPLETE",
+        f"Run files: {writer.path}",
+    )
     return summary
 
 

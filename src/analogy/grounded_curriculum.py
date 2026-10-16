@@ -490,9 +490,18 @@ def load_online_curriculum_states(manifest: Path, split: str) -> tuple[OnlineCur
     data = _read_json(manifest)
     if data.get("schema_version") != SCHEMA_VERSION:
         raise CurriculumError("unsupported curriculum schema")
-    path = manifest.parent / data["transitions"]
-    if path.parent.resolve() != manifest.parent.resolve() or _file_hash(path) != data["transitions_hash"]:
-        raise CurriculumError("transition artifact hash mismatch")
+    artifacts = {}
+    for name, label in (("transitions", "transition"), ("summary", "summary")):
+        try:
+            path = manifest.parent / data[name]
+            valid = (path.resolve().parent == manifest.parent.resolve()
+                     and _file_hash(path) == data[f"{name}_hash"])
+        except (OSError, KeyError, TypeError) as error:
+            raise CurriculumError(f"{label} artifact hash could not be verified") from error
+        if not valid:
+            raise CurriculumError(f"{label} artifact hash mismatch")
+        artifacts[name] = path
+    path = artifacts["transitions"]
     result = []
     seen = set()
     for line in path.read_text().splitlines():

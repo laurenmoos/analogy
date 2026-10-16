@@ -203,6 +203,27 @@ def test_online_loader_rejects_tampered_final_artifact(tmp_path):
         load_online_curriculum_states(summary.manifest_path, "train")
 
 
+@pytest.mark.parametrize("corruption", ["content", "hash", "missing", "outside_directory"])
+def test_online_loader_authenticates_summary_before_returning_states(tmp_path, corruption):
+    cfg = config(tmp_path)
+    summary = build_grounded_curriculum(cfg, PrefixVerifier(cfg.lean_project))
+    summary_path = cfg.output_dir / "summary.json"
+    manifest = json.loads(summary.manifest_path.read_text())
+    if corruption == "content":
+        summary_path.write_text(summary_path.read_text().replace('"retained":2', '"retained":999'))
+    elif corruption == "hash":
+        manifest["summary_hash"] = "0" * 64
+    elif corruption == "missing":
+        manifest["summary"] = "missing-summary.json"
+    else:
+        # A byte-identical file outside the published artifact directory is invalid.
+        (tmp_path / "outside-summary.json").write_bytes(summary_path.read_bytes())
+        manifest["summary"] = "../outside-summary.json"
+    summary.manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(CurriculumError, match="summary artifact"):
+        load_online_curriculum_states(summary.manifest_path, "train")
+
+
 def test_refuses_floating_lean_toolchain_before_replay(tmp_path):
     cfg = config(tmp_path)
     (cfg.lean_project / "lean-toolchain").write_text("leanprover/lean4:nightly\n")

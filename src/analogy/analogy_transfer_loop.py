@@ -453,7 +453,8 @@ class GeneratedDomainAnalogyLoopRunner:
                 lean_calls=resources.lean_calls,
                 elapsed_seconds=time.monotonic() - started,
                 training_eligible=(action is not None and not infrastructure_failure
-                                   and not invalid_grounding and decision.reason is not StopReason.CANCELLED),
+                                   and not invalid_grounding and decision.reason is not StopReason.CANCELLED
+                                   and (self.decoder == "raw" or successor is not None or completed is not None)),
                 transition_before=transition_before,
                 **({"inventory": inventory, "grounded_plan": grounded, "compiled_tactics": compiled_tactics,
                     "compilation_diagnostics": compilation_diagnostics,

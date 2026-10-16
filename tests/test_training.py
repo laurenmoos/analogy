@@ -183,6 +183,149 @@ def test_generated_trace_uses_existing_verifier_reward_discounting():
     assert samples[0].reward == 1.0
 
 
+@pytest.mark.parametrize("decoder", ["grounded", "raw"])
+def test_repeat_only_iteration_cannot_inherit_grounded_reward_from_prior_progress(decoder):
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import (
+        runner, grounded_runner, grounded_payload, run, Evaluator,
+    )
+    from test_analogy_transfer_generation import SOURCE, ALIGNMENT, TRANSFER
+    if decoder == "grounded":
+        second = grounded_payload("h : D\n⊢ D", proposition="D", index=1)
+        second["steps"][0]["output_proposition"] = "D"
+        result, _, _ = grounded_runner(extra=[SOURCE, ALIGNMENT,
+            json.dumps(dict(json.loads(TRANSFER), active_subgoal="D")), json.dumps(second)])
+    else:
+        result, _, _ = runner()
+    class RepeatingSecond(Evaluator):
+        def evaluate_at(self, current, candidate):
+            self.repeat = current.id == "D" and candidate.source != "assumption"
+            return super().evaluate_at(current, candidate)
+    rollout = run(result, RepeatingSecond()).rollouts[0]
+    iterations = rollout.analogy_trace.iterations
+    assert [item.repeated_state for item in iterations] == [False, True]
+    assert [item.training_eligible for item in iterations] == (
+        [True, False] if decoder == "grounded" else [True, True])
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=1.0, discount=0.95, iteration_cost=0.01)
+    if decoder == "grounded":
+        assert len(samples) == 1
+        assert samples[0].action is result.live_actions[0]
+        assert samples[0].reward == 1.0
+    else:
+        assert [sample.reward for sample in samples] == [0.94, 1.0]
+
+
+@pytest.mark.parametrize("outcome", ["completion", "rejection", "repetition"])
+def test_grounded_training_eligibility_requires_verified_progress_or_completion(outcome):
+    from test_analogy_transfer_loop import grounded_runner, run, GroundedEvaluator, Evaluator
+    result, _, _ = grounded_runner()
+    result.grounding_repair_calls = 0
+    evaluator = Evaluator(repeat=True) if outcome == "repetition" else GroundedEvaluator(
+        "exact h" if outcome == "completion" else "never")
+    rollout = run(result, evaluator).rollouts[0]
+    iteration = rollout.analogy_trace.iterations[0]
+    assert iteration.failed_stage is None  # exclude only verifier outcomes here
+    assert iteration.training_eligible is (outcome == "completion")
+
+
+def test_grounded_novel_iteration_remains_eligible_when_only_its_finisher_repeats():
+    from analogy.records import SearchNode
+    from analogy.rescue import TacticEvaluation
+    from test_analogy_transfer_loop import grounded_runner, run, Evaluator, state
+    result, _, _ = grounded_runner(model_budget=4)
+    class RepeatedFinisher(Evaluator):
+        def evaluate_at(self, current, candidate):
+            if candidate.source == "assumption":
+                repeated = state()
+                checked = TacticResult(candidate, TacticStatus.ACCEPTED, state=repeated)
+                return TacticEvaluation(checked, successor=SearchNode(repeated, 1.0, current.id, candidate.source))
+            return super().evaluate_at(current, candidate)
+    rollout = run(result, RepeatedFinisher()).rollouts[0]
+    iteration = rollout.analogy_trace.iterations[0]
+    assert iteration.repeated_state
+    assert iteration.attempts[0].discarded is None
+    assert iteration.attempts[-1].discarded is not None
+    assert iteration.training_eligible
+
+
+def test_repeat_only_rewrite_does_not_inherit_grounded_reward_with_pinned_lean():
+    from analogy.analogy_transfer_generation import GroundedPlanGenerator
+    from analogy.lean_gym.models import Problem
+    from analogy.lean_gym.resources import LEAN_PROJECT_ROOT
+    from analogy.lean_gym.verifier import LeanGymAdapter, LeanSubprocessVerifier
+    from analogy.loop import NeverCancelled
+    from analogy.records import SearchNode
+    from analogy.rescue import TacticEvaluation
+    from analogy.rl import discounted_iteration_samples
+    from test_analogy_transfer_loop import runner, grounded_payload
+    from test_analogy_transfer_generation import (
+        RecordingBackend, SourceAnalogyGenerator, AlignmentGenerator, ProofTransferGenerator,
+        SOURCE, ALIGNMENT, TRANSFER,
+    )
+    problem = Problem("repeat_rewrite", "RepeatRewrite", "(C A : Prop) (h : C = C)",
+        "A → C ∧ C", "test", "test", "and", 1)
+    adapter = LeanGymAdapter(problem, LeanSubprocessVerifier(LEAN_PROJECT_ROOT))
+    initial = adapter.initial_state()
+    records = []
+    for active, role in (("A → C ∧ C", "introduced_assumption"), ("C ∧ C", "equality_hypothesis")):
+        alignment = json.loads(ALIGNMENT)
+        alignment["mapping"]["shelved wheel"] = role
+        transfer = dict(json.loads(TRANSFER), active_subgoal=active,
+            premises=[role] if role == "equality_hypothesis" else [],
+            predicted_next_subgoal="C ∧ C", completion_expected=False)
+        records.extend((SOURCE, json.dumps(alignment), json.dumps(transfer), "grounding-fixture"))
+    class InventoryBackend(RecordingBackend):
+        def _respond(self, messages, seed, delta):
+            raw = super()._respond(messages, seed, delta)
+            if raw != "grounding-fixture":
+                return raw
+            inventory = json.loads(messages[-1].content.split("Current verified local proof inventory: ", 1)[1].splitlines()[0])
+            index = (len(self.calls) - 1) // 4
+            payload = grounded_payload(index=index)
+            payload.update(state_fingerprint=inventory["state_fingerprint"],
+                expected_next_subgoal="C ∧ C", completion_expected=False)
+            payload["steps"][0].update(output_proposition="C ∧ C", closes_subgoal=False)
+            if index == 0:
+                payload["bindings"] = []
+                payload["steps"][0].update(operator="introduce", inputs=[], input_propositions=[])
+            else:
+                payload["bindings"][0].update(proof_role="equality_hypothesis",
+                    inventory_id="local:2", proposition="C = C")
+                payload["steps"][0].update(operator="rewrite_forward", input_propositions=["C = C"])
+            return json.dumps(payload)
+    backend = InventoryBackend(records)
+    result, _, _ = runner()
+    result.decoder = "grounded"
+    result.source_generator = SourceAnalogyGenerator(backend)
+    result.alignment_generator = AlignmentGenerator(backend)
+    result.transfer_generator = ProofTransferGenerator(backend)
+    result.grounded_plan_generator = GroundedPlanGenerator(backend)
+    result.structure_builder = adapter.proof_structure_for
+    class LeanEvaluator:
+        def evaluate_at(self, current, candidate):
+            checked = adapter.run_tactic(current, candidate)
+            if checked.status is TacticStatus.COMPLETE:
+                return TacticEvaluation(checked, completed_proof=checked.proof)
+            if checked.status is TacticStatus.ACCEPTED:
+                return TacticEvaluation(checked, successor=SearchNode(checked.state, 1.0, current.id, candidate.source))
+            return TacticEvaluation(checked)
+    outcome = result.search(initial, SymbolicState("goal", problem.target, "lean4"), (), (), LeanEvaluator(), NeverCancelled())
+    rollout = outcome.rollouts[0]
+    iterations = rollout.analogy_trace.iterations
+    assert len(iterations) == 2
+    assert [item.compiled_tactics[0].text for item in iterations] == ["intro analogy_h", "rw [h]"]
+    assert [item.repeated_state for item in iterations] == [False, True]
+    assert iterations[1].attempts[0].result.status is TacticStatus.ACCEPTED
+    assert iterations[1].attempts[0].result.state.expression == iterations[1].state_before.expression
+    assert [item.training_eligible for item in iterations] == [True, False]
+    samples = discounted_iteration_samples(rollout.analogy_trace, result.live_actions, rollout,
+        verified_reward=1.0, discount=0.95, iteration_cost=0.01)
+    assert len(samples) == 1
+    assert samples[0].action is result.live_actions[0]
+    assert samples[0].reward == 1.0
+
+
 def test_generated_pre_action_failure_after_progress_keeps_prior_action_trainable():
     from analogy.rl import discounted_iteration_samples
     from test_analogy_transfer_loop import runner, run, STRUCTURE

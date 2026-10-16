@@ -205,6 +205,100 @@ def generated_row(phase, *, failed_stage=None):
         epoch=1, phase=phase, problem_id="p1", rollout_id=rollout.rollout_id, proof_path_id="path-one")))
 
 
+def grounded_row(*, failure=None, repair=False):
+    from test_analogy_transfer_loop import (
+        grounded_payload, grounded_runner, GroundedEvaluator, run, SymbolicState,
+        state, NeverCancelled,
+    )
+    expression = "h : C ∧ C\n⊢ C" if repair else "h : C\n⊢ C"
+    payload = grounded_payload(expression, operator="select_left" if repair else "exact_local",
+                               proposition="C ∧ C" if repair else "C")
+    extra = ()
+    if failure == "grounding":
+        payload["bindings"][0]["inventory_id"] = "local:999"
+        extra = (json.dumps(payload),)
+    elif failure == "compilation":
+        payload["steps"][0]["operator"] = "rewrite_forward"
+    elif repair:
+        extra = (json.dumps(grounded_payload(expression, operator="select_right", proposition="C ∧ C")),)
+    runner, _, _ = grounded_runner(payload, extra=extra)
+    evaluator = GroundedEvaluator("exact h.right" if repair else "exact h")
+    outcome = (runner.search(SymbolicState("C", expression, "lean4"), state(), (), (), evaluator, NeverCancelled())
+               if repair else run(runner, evaluator))
+    return json.loads(json.dumps(dict(asdict(outcome.rollouts[0].analogy_trace.iterations[0]),
+        epoch=1, phase="train", problem_id="p1", rollout_id="grounded", proof_path_id="path-one")))
+
+
+@pytest.mark.parametrize("failure", [None, "grounding", "compilation"])
+def test_grounded_audit_preserves_stages_without_inventing_attempts(tmp_path, failure):
+    row = grounded_row(failure=failure)
+    source, corpus = write_source(tmp_path / "source", [row])
+    item = load_audit_iterations(source, corpus)[0]
+    assert item.record_kind == "grounded_generated"
+    assert item.stage_payloads["inventory"]["payload"] == row["inventory"]
+    assert item.stage_payloads["grounding"]["status"] == ("failed" if failure == "grounding" else "available")
+    assert item.stage_payloads["compilation"]["status"] == ({None: "available", "grounding": "unavailable", "compilation": "failed"}[failure])
+    assert item.tactics == (() if failure else ("exact h",))
+    assert item.lean_outcomes == (() if failure else ("complete",))
+    assert item.stage_payloads["lean"]["status"] == ("unavailable" if failure else "available")
+
+
+def test_grounded_audit_retains_repair_provenance_and_is_observer_only(tmp_path):
+    row = grounded_row(repair=True)
+    source, corpus = write_source(tmp_path / "source", [row, dict(row, proof_path_id="path-two")])
+    (source / "reward.json").write_text('{"reward": 7}')
+    (source / "training.pt").write_bytes(b"training-artifact")
+    before = tree_hashes(source)
+    output = tmp_path / "audit"
+    audit_analogy_run(source, output, SequenceGenerator((judgment("working", 1),) * 2), corpus, seed=2, max_calls=2)
+    recorded = read_jsonl(output / "judgments.jsonl")
+    assert len(recorded) == 2
+    item = recorded[0]["input"]
+    assert item["lean_outcomes"] == ["error", "complete"]
+    assert item["stage_payloads"]["repair"]["payload"]["plan"] == row["repaired_grounded_plan"]
+    assert item["stage_payloads"]["compilation"]["payload"]["candidates"][0]["binding_ids"] == ["binding-0"]
+    assert tree_hashes(source) == before
+
+
+@pytest.mark.parametrize("field,value", [("grounded_plan_schema_version", "grounded-plan-v99"), ("compiler_version", "grounded-compiler-v99")])
+def test_grounded_audit_rejects_future_versions(tmp_path, field, value):
+    row = dict(grounded_row(), **{field: value})
+    source, corpus = write_source(tmp_path / "source", [row])
+    with pytest.raises(AuditRunError, match="unsupported.*version"):
+        load_audit_iterations(source, corpus)
+
+
+@pytest.mark.parametrize("status", ["timeout", "internal_error"])
+def test_grounded_audit_preserves_typed_infrastructure_failure(tmp_path, status):
+    row = grounded_row()
+    result = row["attempts"][0]["result"]
+    result.update(status="error", proof=None, verification_status=status)
+    source, corpus = write_source(tmp_path / "source", [row])
+    evidence = load_audit_iterations(source, corpus)[0].lean_attempts[0]
+    assert evidence.status == "error"
+    assert evidence.verification_status == status
+    assert evidence.infrastructure_failure == status
+
+
+def test_grounded_audit_distinguishes_original_and_repaired_compilation(tmp_path):
+    row = grounded_row(repair=True)
+    row.update(failed_stage="compilation", failure_diagnostic="repair unsupported", repaired_compiled_tactics=[],
+        repair_compilation_diagnostics=[{"code": "unsupported_operator", "step_id": "step-0", "message": "repair unsupported"}])
+    source, corpus = write_source(tmp_path / "source", [row])
+    stages = load_audit_iterations(source, corpus)[0].stage_payloads
+    assert stages["compilation"]["status"] == "available"
+    assert stages["repair"]["status"] == "failed"
+
+
+def test_grounded_audit_tactics_come_from_executed_result_not_proposal(tmp_path):
+    row = grounded_row()
+    row["attempts"][0]["proposal"]["candidate"]["source"] = "unexecuted proposal"
+    source, corpus = write_source(tmp_path / "source", [row])
+    item = load_audit_iterations(source, corpus)[0]
+    assert item.tactics == ("exact h",)
+    assert item.lean_attempts[0].source == "exact h"
+
+
 @pytest.mark.parametrize("phase", ["train", "validation", "generated_unsteered",
     "generated_random", "generated_learned", "generated_shuffled"])
 @pytest.mark.parametrize("failed_stage", [None, 0, 1, 2, 3])

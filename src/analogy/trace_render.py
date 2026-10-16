@@ -11,15 +11,26 @@ import os
 import re
 import tempfile
 from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from .progress_judge import persisted_stage_evidence
 
 
 _replace = os.replace
 
 
 def _record(value: Any) -> Any:
-    return asdict(value) if is_dataclass(value) else value
+    if is_dataclass(value):
+        return _record(asdict(value))
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {key: _record(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_record(item) for item in value]
+    return value
 
 
 def _goals(expression: str) -> list[str]:
@@ -67,6 +78,11 @@ class _Trace:
         self.lines.append(f"{stem}   └─ LEAN RESULT: {result['status']}")
         edge = stem + "      "
         status = result["status"]
+        verification_status = result.get("verification_status")
+        if verification_status is not None:
+            self.lines.append(f"{edge}verification_status={verification_status}")
+        if verification_status in {"timeout", "internal_error"}:
+            self.lines.append(f"{edge}[INFRASTRUCTURE FAILURE: {verification_status}]")
         if status == "error":
             for diagnostic in result.get("diagnostics", ()):
                 self.lines.extend(f"{edge}{line}" for line in diagnostic.splitlines())
@@ -83,6 +99,7 @@ class _Trace:
             self.state(result["state"])
 
     def iteration(self, iteration: dict) -> None:
+        record_kind, stages = persisted_stage_evidence(iteration)
         before = iteration["state_before"]
         self.state(before)
         self.analogy_number += 1
@@ -126,7 +143,10 @@ class _Trace:
                 "    │        └─ TRANSFERRED PROOF REASONING: not produced",
             ])
             prefix = "    │           └─ "
-        if not iteration.get("attempts"):
+        if record_kind == "grounded_generated":
+            self.grounding(iteration, stages)
+            prefix = "    │                          └─ "
+        if not iteration.get("attempts") and record_kind != "grounded_generated":
             self.lines.extend([f"{prefix}TACTIC: not verified",
                                "    │              └─ LEAN RESULT: not attempted"])
         for attempt in iteration.get("attempts", ()):
@@ -138,6 +158,58 @@ class _Trace:
         decision = iteration.get("decision")
         if decision:
             self.lines.append(f"    [CONTROLLER: {decision['reason']}]")
+
+    def grounding(self, iteration: dict, stages: dict) -> None:
+        """Render persisted premises and proposals; only attempt() creates edges."""
+        prefix = "    │           "
+        inventory = iteration.get("inventory")
+        self.lines.append(f"{prefix}└─ LOCAL PROOF INVENTORY [{stages['inventory']['status']}]")
+        if inventory is not None:
+            for name in ("state_fingerprint", "fixed_target", "active_subgoal"):
+                self.lines.extend(f"{prefix}   {line}" for line in f"{name}: {inventory[name]}".splitlines())
+            for entry in (*inventory.get("locals", ()), *inventory.get("target_entries", ())):
+                self.lines.append(f"{prefix}   {entry['inventory_id']} → {entry.get('identifier') or entry['kind']} : {entry['proposition']}")
+                self.lines.append(f"{prefix}     kind={entry['kind']}; shape={entry['structural_shape']}")
+
+        def plan_sections(plan: dict | None, status: str) -> None:
+            self.lines.append(f"{prefix}   └─ GROUNDED ROLE BINDINGS [{status}]")
+            if plan is not None:
+                self.lines.append(f"{prefix}      Plan: {plan['plan_id']}; transfer: {plan['motivating_transfer_id']}; state: {plan['state_fingerprint']}")
+                for binding in plan.get("bindings", ()):
+                    self.lines.append(f"{prefix}      {binding['binding_id']}: {binding['proof_role']} → {binding['inventory_id']} : {binding['proposition']}")
+                    self.lines.append(f"{prefix}        Source role: {binding.get('source_role')}; {binding['justification']}")
+            self.lines.append(f"{prefix}      └─ TYPED INFERENCE STEPS [{status}]")
+            if plan is not None:
+                for step in plan.get("steps", ()):
+                    self.lines.append(f"{prefix}         {step['step_id']}: {step['operator']}({', '.join(step['inputs'])})")
+                    self.lines.append(f"{prefix}           {step['input_propositions']} → {step['output_proposition']}; transfer step {step['transfer_step_index']}; closes={step['closes_subgoal']}")
+                self.lines.append(f"{prefix}         Expected: {plan['expected_next_subgoal']}; completion={plan['completion_expected']}")
+
+        def compilation(candidates: list, diagnostics: list, status: str) -> None:
+            self.lines.append(f"{prefix}         └─ COMPILED TACTICS [{status}] (proposals, not verified edges)")
+            for candidate in candidates:
+                self.lines.append(f"{prefix}            {candidate['text']}")
+                self.lines.append(f"{prefix}              steps={candidate['step_ids']}; bindings={candidate['binding_ids']}; expected={candidate['predicted_next_subgoal']}")
+            for diagnostic in diagnostics:
+                self.lines.append(f"{prefix}            {diagnostic['code']} [{diagnostic.get('step_id')}]: {diagnostic['message']}")
+
+        self.lines.append(f"{prefix}   Versions: {iteration.get('grounded_plan_schema_version')}; {iteration.get('compiler_version')}")
+        plan_sections(iteration.get("grounded_plan"), stages["grounding"]["status"])
+        compilation(iteration.get("compiled_tactics", ()), iteration.get("compilation_diagnostics", ()), stages["compilation"]["status"])
+        if iteration.get("grounding_generation_attempts") and iteration.get("grounded_plan") is None:
+            self.lines.append(f"{prefix}   Grounding generation: {json.dumps(iteration['grounding_generation_attempts'], ensure_ascii=False)}")
+        if iteration.get("grounding_repair_attempts") or iteration.get("repaired_grounded_plan"):
+            self.lines.append(f"{prefix}   └─ GROUNDED REPAIR [{stages['repair']['status']}]")
+            for attempt in iteration.get("attempts", ()):
+                if attempt.get("stage") == "grounded_compiler":
+                    result = attempt["result"]
+                    self.lines.append(f"{prefix}      Original candidate: {result['candidate']['source']}; Lean: {result['status']}")
+                    self.lines.extend(f"{prefix}        {message}" for message in result.get("diagnostics", ()))
+            for generation in iteration.get("grounding_repair_attempts", ()):
+                self.lines.append(f"{prefix}      Generation: {generation['status']}; seed={generation['seed']}; diagnostic={generation.get('diagnostic')}")
+            plan_sections(iteration.get("repaired_grounded_plan"), stages["repair"]["status"])
+            compilation(iteration.get("repaired_compiled_tactics", ()), iteration.get("repair_compilation_diagnostics", ()), stages["repair"]["status"])
+        self.lines.append(f"{prefix}            └─ LEAN RESULTS" + ("" if iteration.get("attempts") else ": not attempted"))
 
     def render(self) -> str:
         problem = self.record["problem"]

@@ -99,6 +99,31 @@ def test_parser_rejects_extra_keys_invalid_stage_and_out_of_range_scores() -> No
         parse_audit_judgment(duplicate)
 
 
+def test_grounded_judge_prompt_preserves_unavailable_stages_and_objective_statuses():
+    from dataclasses import replace
+    item = replace(iteration(), record_kind="grounded_generated", stage_payloads={
+        "grounding": {"status": "failed", "payload": None},
+        "lean": {"status": "unavailable", "payload": []},
+    }, tactics=(), lean_outcomes=(), lean_attempts=(), actual_transition=None)
+    generator = SequenceGenerator((payload(stage="tactic_translation"),))
+    LLMProcessJudge(generator, base_seed=1).evaluate(item)
+    prompt = generator.calls[0][0][-1].content
+    assert '"status": "unavailable"' in prompt
+    assert '"status": "failed"' in prompt
+    assert "not zero-quality proof attempts" in prompt
+    assert "infrastructure" in prompt
+    assert "observer only" in prompt
+
+
+def test_grounded_judge_seeds_isolate_proof_paths():
+    from dataclasses import replace
+    generator = SequenceGenerator((payload(), payload()))
+    judge = LLMProcessJudge(generator, base_seed=1)
+    judge.evaluate(replace(iteration(), proof_path_id="path-one"))
+    judge.evaluate(replace(iteration(), proof_path_id="path-two"))
+    assert generator.calls[0][1] != generator.calls[1][1]
+
+
 def test_prompt_contains_process_evidence_for_accepted_and_rejected_iterations() -> None:
     accepted_generator = SequenceGenerator((payload(),))
     accepted = LLMProcessJudge(

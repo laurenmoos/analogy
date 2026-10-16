@@ -43,6 +43,75 @@ def complex_trace():
                  ]}], "stop_reason": "complete"}}], "termination": "complete"}
 
 
+def grounded_trace(**options):
+    from test_run_audit import grounded_row
+    row = grounded_row(**options)
+    return {"problem": {"id": "p1", "target": "C"}, "rollouts": [
+        {"state_id": row["state_before"]["id"], "analogy_trace": {"iterations": [row], "stop_reason": "complete"}}]}
+
+
+def test_grounded_trace_connects_exact_inventory_plan_compilation_and_attempt():
+    rendered = render_theorem_trace(grounded_trace())
+    labels = ["LOCAL PROOF INVENTORY", "GROUNDED ROLE BINDINGS", "TYPED INFERENCE STEPS", "COMPILED TACTICS", "LEAN RESULTS"]
+    assert [rendered.index(label) for label in labels] == sorted(rendered.index(label) for label in labels)
+    for fragment in ("local:0 → h : C", "binding-0", "step-0", "exact_local", "exact h", "LEAN RESULT: complete"):
+        assert fragment in rendered
+    result_line = next(line for line in rendered.splitlines() if line.endswith("└─ LEAN RESULTS"))
+    tactic_line = next(line for line in rendered.splitlines() if "TACTIC [State" in line)
+    assert tactic_line.index("└─") > result_line.index("└─")
+
+
+def test_grounded_compiled_candidate_without_attempt_has_no_edge():
+    record = grounded_trace()
+    row = record["rollouts"][0]["analogy_trace"]["iterations"][0]
+    row["attempts"] = []
+    rendered = render_theorem_trace(record)
+    assert "exact h" in rendered
+    assert "not attempted" in rendered
+    assert "TACTIC [State" not in rendered
+    assert "COMPLETE: theorem target proved" not in rendered
+
+
+def test_grounded_trace_preserves_repair_and_compilation_failure():
+    repaired = render_theorem_trace(grounded_trace(repair=True))
+    for fragment in ("GROUNDED REPAIR", "select_left", "select_right", "type mismatch", "grounded_compiler_repair"):
+        assert fragment in repaired
+    failed = render_theorem_trace(grounded_trace(failure="compilation"))
+    assert "unsupported_operator" in failed
+    assert "LEAN RESULTS: not attempted" in failed
+    assert "LOCAL PROOF INVENTORY" not in render_theorem_trace(complex_trace())
+
+
+def test_grounded_trace_rejects_future_schema():
+    record = grounded_trace()
+    record["rollouts"][0]["analogy_trace"]["iterations"][0]["grounded_plan_schema_version"] = "grounded-plan-v99"
+    with pytest.raises(ValueError, match="unsupported.*version"):
+        render_theorem_trace(record)
+
+
+def test_grounded_trace_infrastructure_status_cannot_be_read_as_logical_rejection():
+    record = grounded_trace()
+    result = record["rollouts"][0]["analogy_trace"]["iterations"][0]["attempts"][0]["result"]
+    result.update(status="error", proof=None, verification_status="timeout")
+    rendered = render_theorem_trace(record)
+    assert "INFRASTRUCTURE FAILURE: timeout" in rendered
+    assert "verification_status=timeout" in rendered
+
+
+def test_grounded_dataclass_trace_matches_persisted_json_rendering():
+    from dataclasses import dataclass, asdict
+    from test_analogy_transfer_loop import grounded_runner, GroundedEvaluator, run
+    runner, _, _ = grounded_runner()
+    rollout = run(runner, GroundedEvaluator()).rollouts[0]
+    @dataclass
+    class Trace:
+        problem: dict
+        rollouts: tuple
+    trace = Trace({"id": "p1", "target": "C"}, (rollout,))
+    persisted = json.loads(json.dumps(asdict(trace)))
+    assert render_theorem_trace(trace) == render_theorem_trace(persisted)
+
+
 def test_trace_renderer_connects_failures_repeats_and_completion():
     rendered = render_theorem_trace(complex_trace())
     assert "THEOREM TARGET (fixed): R → Q" in rendered

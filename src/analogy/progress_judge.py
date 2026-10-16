@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -25,6 +25,66 @@ class AuditStage(str, Enum):
     WORKING = "working"
 
 
+def persisted_stage_evidence(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Describe saved evidence without running parsing, compilation, or Lean.
+
+    Version gates are intentionally local to the observer; loading an old trace
+    must not invoke current solver logic or reconstruct a missing grounded plan.
+    """
+    for name, supported in (("grounded_plan_schema_version", "grounded-plan-v1"),
+                            ("compiler_version", "grounded-compiler-v1")):
+        value = row.get(name)
+        if value is not None and value != supported:
+            raise ValueError(f"unsupported {name} version: {value!r}")
+    grounded = any(name in row for name in (
+        "inventory", "grounded_plan", "grounded_plan_schema_version", "compiled_tactics"))
+    generated = grounded or "source" in row or "generated_source" in row
+    kind = "grounded_generated" if grounded else "raw_generated" if generated else "legacy"
+    failed = row.get("failed_stage")
+
+    def stage(name: str, payload: Any, available: bool) -> dict[str, Any]:
+        return {"status": "failed" if failed == name else "available" if available else "unavailable",
+                "payload": payload,
+                "diagnostic": row.get("failure_diagnostic") if failed == name else None}
+
+    stages = {}
+    if generated:
+        for name in ("source", "alignment", "transfer"):
+            stages[name] = stage(name, {"record": row.get(name),
+                "generation_attempts": row.get(f"{name}_generation_attempts", [])}, row.get(name) is not None)
+    else:
+        stages["analogy"] = stage("analogy", row.get("hop"), row.get("hop") is not None)
+    if grounded:
+        stages["inventory"] = stage("inventory", row.get("inventory"), row.get("inventory") is not None)
+        stages["grounding"] = stage("grounding", row.get("grounded_plan"), row.get("grounded_plan") is not None)
+        stages["grounding"]["generation_attempts"] = row.get("grounding_generation_attempts", [])
+        stages["compilation"] = stage("compilation", {
+            "candidates": row.get("compiled_tactics", []),
+            "diagnostics": row.get("compilation_diagnostics", []),
+            "compiler_version": row.get("compiler_version"),
+            "schema_version": row.get("grounded_plan_schema_version"),
+        }, bool(row.get("compiled_tactics") or row.get("compilation_diagnostics")))
+        if row.get("compiled_tactics"):
+            # Task 4 labels either compilation failure with the same stage;
+            # an original candidate is persisted evidence that the first compiled.
+            stages["compilation"]["status"] = "available"
+            stages["compilation"]["diagnostic"] = None
+        stages["repair"] = stage("grounding_repair", {
+            "plan": row.get("repaired_grounded_plan"),
+            "generation_attempts": row.get("grounding_repair_attempts", []),
+            "candidates": row.get("repaired_compiled_tactics", []),
+            "diagnostics": row.get("repair_compilation_diagnostics", []),
+        }, row.get("repaired_grounded_plan") is not None)
+        if row.get("repair_compilation_diagnostics") and not row.get("repaired_compiled_tactics"):
+            stages["repair"]["status"] = "failed"
+            stages["repair"]["diagnostic"] = row.get("failure_diagnostic")
+    else:
+        stages["tactic"] = stage("tactic", {"plan": row.get("tactic_plan"),
+            "generation_attempts": row.get("tactic_generation_attempts", [])}, row.get("tactic_plan") is not None)
+    stages["lean"] = stage("lean", row.get("attempts", []), bool(row.get("attempts")))
+    return kind, stages
+
+
 @dataclass(frozen=True, slots=True)
 class LeanAttemptEvidence:
     source: str
@@ -32,10 +92,15 @@ class LeanAttemptEvidence:
     diagnostics: tuple[str, ...]
     discard_reason: str | None
     successor: str | None
+    verification_status: str | None = None
+    infrastructure_failure: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source", _nonblank(self.source, "source"))
         object.__setattr__(self, "status", _nonblank(self.status, "status"))
+        for name in ("verification_status", "infrastructure_failure"):
+            if getattr(self, name) is not None:
+                _nonblank(getattr(self, name), name)
         if isinstance(self.diagnostics, (str, bytes)) or any(
             not isinstance(item, str) for item in self.diagnostics
         ):
@@ -73,8 +138,14 @@ class AuditIteration:
     stop_decision: str
     lean_attempts: tuple[LeanAttemptEvidence, ...]
     proof_path_id: str | None = None
+    record_kind: str = "legacy"
+    stage_payloads: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.record_kind not in {"legacy", "raw_generated", "grounded_generated"}:
+            raise ValueError("unsupported audit record kind")
+        if not isinstance(self.stage_payloads, dict):
+            raise ValueError("stage_payloads must be an object")
         if self.proof_path_id is not None:
             _nonblank(self.proof_path_id, "proof_path_id")
         for name in (
@@ -270,6 +341,11 @@ def _judge_messages(iteration: AuditIteration) -> tuple[Message, ...]:
         "`error` means rejection. Diagnostics attached to complete or accepted results may be linter warnings "
         "or proof-state echoes, not failures. The state before is a residual goal after an accepted tactic prefix, "
         "so judge the current iteration rather than demanding it solve the original target alone.\n"
+        "Missing stages are unavailable, and schema/compiler failures are failed stages, not zero-quality proof attempts. "
+        "Compiled candidates are proposals; only executed Lean attempts provide proof evidence. "
+        "Lean infrastructure statuses (timeout, resource exhaustion, infrastructure_error, etc.) are infrastructure "
+        "failures, not logical rejections or proof progress. Do not infer acceptance from compilation or model prose.\n"
+        "A timeout/internal_error verification_status overrides the legacy error label as an infrastructure failure.\n"
         "Apply these stage constraints: when any Lean status is `complete`, stage must be `working` and "
         "progress_score must be 1. When there is an accepted successor, stage must be `working` or "
         "`proof_progress`, never `lean_execution` or `tactic_translation`; changing the goal is the normal "
@@ -278,6 +354,8 @@ def _judge_messages(iteration: AuditIteration) -> tuple[Message, ...]:
         f"Theorem target:\n{iteration.target}\n"
         f"State before:\n{iteration.state_before}\n"
         f"Analogy card:\n{iteration.analogy_card}\n"
+        f"Record kind: {iteration.record_kind}\n"
+        f"Persisted stage evidence: {json.dumps(iteration.stage_payloads, sort_keys=True)}\n"
         f"Predicted transition:\n{iteration.predicted_transition}\n"
         f"Executed Lean attempts: {json.dumps([asdict(item) for item in iteration.lean_attempts])}\n"
         f"Proposed tactics: {json.dumps(iteration.tactics)}\n"
@@ -315,18 +393,20 @@ def _repair_messages(
 def _operation_seed(
     base_seed: int, iteration: AuditIteration, attempt_index: int
 ) -> int:
-    payload = "\x1f".join(
-        (
-            "post-hoc-analogy-audit-v1",
-            str(base_seed),
-            iteration.run_id,
-            iteration.problem_id,
-            iteration.phase,
-            iteration.rollout_id,
-            str(iteration.iteration_index),
-            str(attempt_index),
-        )
+    identity = (
+        "post-hoc-analogy-audit-v1",
+        str(base_seed),
+        iteration.run_id,
+        iteration.problem_id,
+        iteration.phase,
+        iteration.rollout_id,
+        str(iteration.iteration_index),
+        str(attempt_index),
     )
+    # Preserve historical seeds, while isolating repeated state invocations.
+    if iteration.proof_path_id is not None:
+        identity += (iteration.proof_path_id,)
+    payload = "\x1f".join(identity)
     return int.from_bytes(hashlib.sha256(payload.encode("utf-8")).digest()[:8], "big")
 
 

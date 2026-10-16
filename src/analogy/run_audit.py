@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .lean_gym.corpus import CorpusValidationError, load_problems
-from .progress_judge import AuditIteration, LeanAttemptEvidence, LLMProcessJudge
+from .progress_judge import AuditIteration, LeanAttemptEvidence, LLMProcessJudge, persisted_stage_evidence
 
 
 class AuditRunError(ValueError):
@@ -230,7 +230,8 @@ def _normalize_iteration(
     if problem_id not in problems:
         raise ValueError(f"unknown problem_id {problem_id!r}")
     state_before = _object(row["state_before"], "state_before")
-    generated = "source" in row or "generated_source" in row
+    record_kind, stage_payloads = persisted_stage_evidence(row)
+    generated = record_kind != "legacy"
     if generated:
         card = _generated_card(row)
         tactic_plan = (_object(row["tactic_plan"], "tactic_plan")
@@ -253,17 +254,14 @@ def _normalize_iteration(
     discard_reasons: list[str] = []
     for attempt_index, attempt_value in enumerate(attempts):
         attempt = _object(attempt_value, f"attempts[{attempt_index}]")
-        proposal = _object(
-            attempt["proposal"], f"attempts[{attempt_index}].proposal"
-        )
+        result = _object(attempt["result"], f"attempts[{attempt_index}].result")
         candidate = _object(
-            proposal["candidate"], f"attempts[{attempt_index}].proposal.candidate"
+            result["candidate"], f"attempts[{attempt_index}].result.candidate"
         )
         source = _text(
             candidate["source"],
-            f"attempts[{attempt_index}].proposal.candidate.source",
+            f"attempts[{attempt_index}].result.candidate.source",
         )
-        result = _object(attempt["result"], f"attempts[{attempt_index}].result")
         status = _text(result["status"], f"attempts[{attempt_index}].status")
         tactics.append(source)
         outcomes.append(status)
@@ -301,6 +299,9 @@ def _normalize_iteration(
                 diagnostics=tuple(raw_diagnostics),
                 discard_reason=discard_reason,
                 successor=successor,
+                verification_status=result.get("verification_status"),
+                infrastructure_failure=(result.get("verification_status")
+                    if result.get("verification_status") in {"timeout", "internal_error"} else None),
             )
         )
     planned_tactics = tactic_plan["tactics"]
@@ -337,6 +338,8 @@ def _normalize_iteration(
         stop_decision=_text(reason, "decision.reason"),
         lean_attempts=tuple(evidence),
         proof_path_id=row.get("proof_path_id"),
+        record_kind=record_kind,
+        stage_payloads=stage_payloads,
     )
 
 
@@ -344,7 +347,9 @@ def _generated_card(row: dict[str, Any]) -> dict[str, Any]:
     """Preserve generated stages and failures without inventing a legacy hop."""
     card: dict[str, Any] = {"kind": "generated_domain"}
     for name in ("observation", "need", "generated_source", "source", "alignment",
-                 "transfer", "tactic_plan"):
+                 "transfer", "tactic_plan", "inventory", "grounded_plan", "repaired_grounded_plan"):
+        if name in {"inventory", "grounded_plan", "repaired_grounded_plan"} and name not in row:
+            continue
         value = row.get(name)
         card[name] = None if value is None else _object(value, name)
     for name in ("failed_stage", "failure_diagnostic", "transition_before",
@@ -354,6 +359,11 @@ def _generated_card(row: dict[str, Any]) -> dict[str, Any]:
         stage: row.get(f"{stage}_generation_attempts", [])
         for stage in ("source", "alignment", "transfer", "tactic")
     }
+    if "grounded_plan" in row:
+        for name in ("compiled_tactics", "compilation_diagnostics", "grounding_generation_attempts",
+                     "grounding_repair_attempts", "repaired_compiled_tactics", "repair_compilation_diagnostics",
+                     "compiler_version", "grounded_plan_schema_version"):
+            card[name] = row.get(name)
     return card
 
 

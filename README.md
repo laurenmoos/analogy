@@ -138,7 +138,12 @@ shows no remaining subgoals. Multiple open goals are numbered explicitly.
 
 Generated interventions nest `SOURCE ANALOGY` → `ALIGNMENT` →
 `TRANSFERRED PROOF REASONING` → `TACTIC` → `LEAN RESULT`; legacy cards are labeled
-separately. Ordinary search and conventional finishing attempts retain their
+separately. Grounded rows insert `LOCAL PROOF INVENTORY`, `GROUNDED ROLE BINDINGS`,
+`TYPED INFERENCE STEPS`, and `COMPILED TACTICS` before `LEAN RESULTS`, with exact
+IDs, propositions, compiler provenance and original/repaired plans. Compiled
+proposals create no state edge until an actual attempt is recorded. Historical
+rows omit grounding sections; unavailable or failed stages remain explicit.
+Ordinary search and conventional finishing attempts retain their
 own stage labels. Optional `proof_trace` metadata in `problems.jsonl` preserves
 the theorem, initial state, and ordinary expansions; a `proof_path_id` joins
 only the corresponding existing rollout rows, including repeated curriculum
@@ -236,12 +241,16 @@ PYTHONPATH=src .venv/bin/python -m analogy \
   --audit-max-calls 100
 ```
 
-Only `train`, `validation`, and `analogy_loop` iteration rows are audited; direct,
-conventional, and shuffled-control phases are excluded. Each separate audit
+The auditor accepts legacy, raw generated, and grounded generated records in
+`train`, `validation`, `analogy_loop`, and `generated_*` evaluation phases;
+direct and conventional phases are excluded. Unsupported grounded schema or
+compiler versions are rejected. Each separate audit
 writes `config.json`, append-only `judgments.jsonl`, and `summary.json`. A row
 classifies the earliest apparent failure as analogy choice, tactic translation,
 Lean execution, or proof progress (or `working`) and preserves the raw model
-output plus every executed tactic/result pair, including repair tactics. The
+output plus every executed tactic/result pair, including repair tactics,
+compiler diagnostics, stage availability and typed verifier infrastructure
+failures. Repeated theorem invocations remain isolated by proof path. The
 judge never sees reference proofs and its scores are descriptive—not rewards.
 `--audit-max-calls` bounds total judge calls, including schema repairs. Re-running
 the same output directory resumes by iteration key without duplicating completed

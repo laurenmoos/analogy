@@ -136,7 +136,7 @@ class MLXQwenGenerator:
         return _resolve_decoder_layers(count, through=through, depth=self.decoder_layer_count)
 
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int:
-        prompt_ids, completion_ids = _encode_completion(self.tokenizer, messages, completion)
+        prompt_ids, completion_ids = _encode_completion(self.tokenizer, messages, completion, allow_empty=True)
         return len(prompt_ids) + len(completion_ids)
 
     def capture_completion_trace(

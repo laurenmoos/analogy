@@ -274,3 +274,63 @@ prompts:
       Available items: {{inventory_json}}
       Allowed operators: {{operators_json}}
       Return exactly story, operator, and bindings. Only bindings may contain inventory IDs. bindings must be one JSON object mapping short everyday-role keys to listed inventory-ID values, for example {"key":"local:0"}.
+  activation_source_analogy:
+    version: activation-source-analogy-v1
+    system: >-
+      Generate one concrete non-proof analogy in the required domain. Return only strict JSON.
+      All source text must be tactic-free and contain no proof terminology, Lean syntax,
+      proposition fragments, mathematical symbols, or proof identifiers.
+    user: |-
+      Required domain cue: {{domain_cue}}
+      Neutral structural need: {{need_json}}
+      Return exactly domain, source_before, source_after, source_roles, relation_chain, transformation, and rationale.
+      source_roles is an array of at least two distinct everyday roles. relation_chain has two to four text entries.
+      transformation has exactly operation, input_arity, output_arity, permutation, information_flow, focus_before, focus_after, and domain_neutral_summary.
+      operation is introduce, decompose, select, combine, select_branch, reorder, specialize, rewrite, reuse, replace, remove, restructure, or unknown.
+      Arities are zero, one, two, many, or unknown. permutation is none, swap, general, or unknown.
+      information_flow is a nonempty unique array in this order: preserve, select, add, discard, restructure.
+      Do not supply IDs or tactics. Keep every text field concrete and domain-neutral with respect to proofs.
+  activation_alignment:
+    version: activation-alignment-v1
+    system: >-
+      Align the declared source roles to the declared proof roles explicitly. Return only strict JSON.
+    user: |-
+      Complete source analogy: {{source_json}}
+      Current ProofNeed: {{need_json}}
+      Return exactly mapping, invariant, source_operation, proof_operation, limitation, and confidence.
+      mapping is an object with two to six declared source-role keys and declared proof-role values.
+      Include active_subgoal and at least one other relevant proof role. State a concrete limitation.
+      confidence is a finite number between zero and one. Do not supply IDs or tactics.
+  activation_transfer:
+    version: activation-transfer-v1
+    system: >-
+      Transfer the complete explicit analogy into tactic-free proof reasoning for the exact active subgoal.
+      Return only strict JSON. Do not write Lean tactics or command snippets.
+    user: |-
+      Complete source analogy: {{source_json}}
+      Complete alignment: {{alignment_json}}
+      Current ProofNeed: {{need_json}}
+      Return exactly active_subgoal, premises, reasoning_steps, predicted_next_subgoal, and completion_expected.
+      Copy active_subgoal exactly from ProofNeed. premises is a unique array of text and reasoning_steps is a nonempty array of text.
+      predicted_next_subgoal is tactic-free prose and completion_expected is boolean. Do not supply IDs.
+  activation_tactic:
+    version: activation-tactic-v1
+    system: >-
+      Condition Lean 4 tactic proposals on the entire explicit source, alignment, and reasoning transfer.
+      The current state is verified; the transfer is a proposal. Return only strict JSON.
+    user: |-
+      Overall target:
+      {{overall_target}}
+      Verified current proof state:
+      {{current_state}}
+      Accepted prefix:
+      {{accepted}}
+      Failed tactics:
+      {{failed}}
+      Previous state / accepted transition:
+      {{previous_transition}}
+      Complete explicit candidate:
+      {{candidate_json}}
+      Return exactly predicted_state and tactics, with at most {{candidate_count}} distinct single-line Lean 4 tactics.
+      predicted_state describes expected next goals. The tactics are independent alternatives from the same current proof state.
+      When several ordered steps are needed, combine them into one semicolon-separated tactic string.

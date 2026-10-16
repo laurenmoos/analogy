@@ -240,7 +240,7 @@ class QwenGenerator:
         return _resolve_decoder_layers(count, through=through, depth=self.decoder_layer_count)
 
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int:
-        prompt_ids, completion_ids = _encode_completion(self._tokenizer, messages, completion)
+        prompt_ids, completion_ids = _encode_completion(self._tokenizer, messages, completion, allow_empty=True)
         return len(prompt_ids) + len(completion_ids)
 
     def capture_completion_trace(
@@ -592,8 +592,8 @@ def _finite_delta_values(delta: Any, *, size: int | None = None) -> tuple[float,
     return values
 
 
-def _encode_completion(tokenizer: Any, messages: tuple[Message, ...], completion: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    if not isinstance(completion, str) or not completion.strip():
+def _encode_completion(tokenizer: Any, messages: tuple[Message, ...], completion: str, *, allow_empty: bool = False) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    if not isinstance(completion, str) or (not allow_empty and not completion.strip()):
         raise ModelConfigurationError("scoring completion must be nonempty")
     rendered = tokenizer.apply_chat_template(
         [{"role": item.role, "content": item.content} for item in messages],
@@ -603,7 +603,7 @@ def _encode_completion(tokenizer: Any, messages: tuple[Message, ...], completion
     completion_ids = tuple(int(item) for item in tokenizer.encode(completion, add_special_tokens=False))
     if not prompt_ids:
         raise ModelConfigurationError("scoring prompt tokenization must be nonempty")
-    if not completion_ids:
+    if not completion_ids and not allow_empty:
         raise ModelConfigurationError("completion tokenization must be nonempty")
     return prompt_ids, completion_ids
 

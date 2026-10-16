@@ -27,7 +27,7 @@ class Tokenizer:
 
     def encode(self, text, *, add_special_tokens):
         assert add_special_tokens is False
-        return {"rendered prompt": [1, 2, 3], "answer": [4, 5], "empty tokens": []}[text]
+        return {"rendered prompt": [1, 2, 3], "answer": [4, 5], "empty tokens": [], "": [], " ": [6]}[text]
 
 
 class Block(torch.nn.Module):
@@ -143,12 +143,18 @@ def test_capture_rejects_invalid_or_unordered_decoder_blocks(provider, layers):
 def test_empty_completions_fail_before_forward(provider, completion):
     engine, model, _ = provider
     for call in [
-        lambda: engine.count_token_positions(MESSAGES, completion),
         lambda: engine.capture_completion_trace(MESSAGES, completion, layers=(1,)),
         lambda: engine.score_completion_with_delta(MESSAGES, completion, delta=(1., 2.), layer=0),
     ]:
         with pytest.raises(providers.ModelConfigurationError):
             call()
+    assert model.model.layers[0].inputs == []
+
+
+@pytest.mark.parametrize("completion,want", [("", 3), (" ", 4), ("empty tokens", 3)])
+def test_generation_usage_counts_empty_or_malformed_output_without_scoring_it(provider, completion, want):
+    engine, model, _ = provider
+    assert engine.count_token_positions(MESSAGES, completion) == want
     assert model.model.layers[0].inputs == []
 
 

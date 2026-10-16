@@ -53,3 +53,18 @@ def test_prompt_catalog_rejects_missing_extra_and_unknown_prompt_values(tmp_path
         catalog.messages("story", need="x", operator="y", extra="z")
     with pytest.raises(PromptError, match="unknown prompt"):
         catalog.messages("missing")
+
+
+@pytest.mark.parametrize("name,values", [
+    ("activation_source_analogy", {"domain_cue": "mechanical", "need_json": "{}"}),
+    ("activation_alignment", {"source_json": "{}", "need_json": "{}"}),
+    ("activation_transfer", {"source_json": "{}", "alignment_json": "{}", "need_json": "{}"}),
+    ("activation_tactic", {"overall_target": "P", "current_state": "⊢ P", "accepted": "(none)", "failed": "(none)", "previous_transition": "(omitted)", "candidate_json": "{}", "candidate_count": 4}),
+])
+def test_activation_catalog_renders_explicit_transfer_stages(name, values):
+    catalog = PromptCatalog.load(Path(__file__).parents[1] / "prompts.yaml")
+    messages = catalog.messages(name, **values)
+    assert len(messages) == 2
+    assert all("{{" not in message.content for message in messages)
+    with pytest.raises(PromptError, match="required="):
+        catalog.messages(name)

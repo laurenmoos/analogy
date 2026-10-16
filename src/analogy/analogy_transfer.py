@@ -14,6 +14,8 @@ from enum import Enum
 from typing import Callable
 
 from .proof_views import ProofStructure
+from .grounding import GroundingOperator
+from .proof_inventory import LocalProofInventory
 
 
 class TransferOutputError(ValueError):
@@ -212,6 +214,47 @@ class ProofNeed:
             raise TransferOutputError("proof_roles must declare active_subgoal")
         object.__setattr__(self, "proof_roles", roles)
         _tactic_free((self.focus_before, self.desired_focus_after, self.summary))
+
+
+@dataclass(frozen=True, slots=True)
+class NeutralProofNeed:
+    """Model-facing structural need; deliberately excludes the inferred move."""
+
+    input_arity: Arity
+    output_arity: Arity
+    information_flow: tuple[InformationFlow, ...]
+    focus_before: str
+    desired_focus_after: str
+    proof_roles: tuple[str, ...]
+    summary: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.input_arity, Arity) or not isinstance(self.output_arity, Arity):
+            raise TransferOutputError("need arities must be Arity values")
+        flow = tuple(self.information_flow)
+        canonical = tuple(item for item in InformationFlow if item in flow)
+        if not flow or flow != canonical:
+            raise TransferOutputError("information_flow must be unique and canonical")
+        object.__setattr__(self, "information_flow", flow)
+        _set_texts(self, "focus_before", "desired_focus_after", "summary", guard=_tactic_free)
+        roles = _texts(self.proof_roles, "proof_roles", minimum=1, unique=True)
+        if "active_subgoal" not in roles:
+            raise TransferOutputError("proof_roles must declare active_subgoal")
+        object.__setattr__(self, "proof_roles", roles)
+
+
+@dataclass(frozen=True, slots=True)
+class NeedAnalysis:
+    description: NeutralProofNeed
+    expected_operator: GroundingOperator | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.description, NeutralProofNeed):
+            raise TransferOutputError("description must be a NeutralProofNeed")
+        if self.expected_operator is not None and not isinstance(
+            self.expected_operator, GroundingOperator
+        ):
+            raise TransferOutputError("expected_operator must be a GroundingOperator or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,9 +574,158 @@ def derive_proof_need(structure: ProofStructure, active_subgoal: str, *,
     )
 
 
+def _neutral_need(
+    *, inputs: Arity = Arity.ONE, outputs: Arity = Arity.ONE,
+    flow: tuple[InformationFlow, ...] = (InformationFlow.PRESERVE,),
+    before: str, after: str, role: str | None, summary: str,
+) -> NeutralProofNeed:
+    return NeutralProofNeed(
+        inputs, outputs, flow, before, after,
+        ("active_subgoal", role) if role else ("active_subgoal",), summary,
+    )
+
+
+def _normalized_proposition(value: str) -> str:
+    value = " ".join(value.split())
+    while value.startswith("(") and value.endswith(")"):
+        value = value[1:-1].strip()
+    return value
+
+
+def derive_need_analysis(
+    structure: ProofStructure, inventory: LocalProofInventory,
+) -> NeedAnalysis:
+    """Describe the situation publicly while retaining the expected move privately."""
+    target = _shape(structure.target_shape)
+    hypotheses = tuple(_shape(raw) for raw in structure.hypothesis_shapes)
+    root = target["root"]
+    expected: GroundingOperator | None = None
+    description = _neutral_need(
+        before="an unresolved requirement", after="a resolved requirement", role=None,
+        summary="The available shapes do not identify one expected change.",
+    )
+
+    if any(
+        hypothesis["root"] == "target" for hypothesis in hypotheses
+    ) or any(
+        _normalized_proposition(item.proposition)
+        == _normalized_proposition(inventory.active_subgoal)
+        for item in inventory.locals
+    ):
+        expected = GroundingOperator.EXACT_LOCAL
+        description = _neutral_need(
+            before="a needed item and a matching available item",
+            after="the need fulfilled", role="matching_item",
+            summary="An available item matches what is needed.",
+        )
+    elif root in {"implication", "forall", "not"}:
+        expected = GroundingOperator.INTRODUCE
+        description = _neutral_need(
+            flow=(InformationFlow.ADD,),
+            before="a requirement with an input", after="an available input and the remaining requirement",
+            role="introduced_item",
+            summary="The requirement exposes an input and leaves a smaller requirement.",
+        )
+    elif root == "and":
+        expected = GroundingOperator.SPLIT
+        description = _neutral_need(
+            inputs=Arity.ONE, outputs=Arity.TWO,
+            flow=(InformationFlow.ADD, InformationFlow.RESTRUCTURE),
+            before="one requirement made of two parts", after="two separate required parts",
+            role="two_part_goal",
+            summary="The goal is one item made of two required parts.",
+        )
+    elif root == "or":
+        children = target["children"]
+        if children and _contains_target(children[0]):
+            expected = GroundingOperator.CHOOSE_LEFT
+        elif len(children) > 1 and _contains_target(children[1]):
+            expected = GroundingOperator.CHOOSE_RIGHT
+        description = _neutral_need(
+            flow=(InformationFlow.SELECT,),
+            before="a requirement offering two alternatives", after="one viable alternative",
+            role="alternative_goal",
+            summary="The goal can be met by one of two alternatives.",
+        )
+    else:
+        for hypothesis in hypotheses:
+            children = hypothesis["children"]
+            if hypothesis["root"] == "and" and len(children) == 2:
+                side = next((index for index, child in enumerate(children) if _contains_target(child)), None)
+                if side is not None:
+                    expected = (GroundingOperator.SELECT_LEFT, GroundingOperator.SELECT_RIGHT)[side]
+                    description = _neutral_need(
+                        inputs=Arity.TWO, flow=(InformationFlow.SELECT, InformationFlow.DISCARD),
+                        before="one available item made of two parts",
+                        after="the part matching the goal", role="structured_hypothesis",
+                        summary="There is one item made of two parts, and the goal matches one part.",
+                    )
+                    break
+            if hypothesis["root"] in {"implication", "forall"} and len(children) == 2 and _contains_target(children[1]):
+                expected = GroundingOperator.APPLY_IMPLICATION
+                description = _neutral_need(
+                    flow=(InformationFlow.PRESERVE, InformationFlow.SELECT),
+                    before="an available conditional item", after="its required input",
+                    role="conditional_hypothesis",
+                    summary="An available item can produce the goal once its input is supplied.",
+                )
+                break
+            if hypothesis["root"] == "iff" and len(children) == 2:
+                if _contains_target(children[1]):
+                    expected = GroundingOperator.IFF_FORWARD
+                elif _contains_target(children[0]):
+                    expected = GroundingOperator.IFF_BACKWARD
+                if expected is not None:
+                    description = _neutral_need(
+                        flow=(InformationFlow.PRESERVE, InformationFlow.SELECT),
+                        before="an available two-way relationship", after="the direction leading to the goal",
+                        role="bidirectional_hypothesis",
+                        summary="One direction of an available two-way relationship reaches the goal.",
+                    )
+                    break
+            if hypothesis["root"] == "equality" and len(children) == 2:
+                if _contains_target(children[1]):
+                    expected = GroundingOperator.REWRITE_FORWARD
+                elif _contains_target(children[0]):
+                    expected = GroundingOperator.REWRITE_BACKWARD
+                if expected is not None:
+                    description = _neutral_need(
+                        flow=(InformationFlow.RESTRUCTURE,),
+                        before="two interchangeable representations", after="the representation matching the goal",
+                        role="equality_hypothesis",
+                        summary="An available equality connects two representations, one matching the goal.",
+                    )
+                    break
+            if hypothesis["root"] == "or":
+                expected = GroundingOperator.CASES
+                description = _neutral_need(
+                    outputs=Arity.TWO, flow=(InformationFlow.RESTRUCTURE,),
+                    before="one available item with two alternatives", after="one requirement for each alternative",
+                    role="alternative_hypothesis",
+                    summary="An available item has two alternatives that must each support the goal.",
+                )
+                break
+
+    if expected is None:
+        propositions = {_normalized_proposition(item.proposition) for item in inventory.locals}
+        if any(
+            proposition.startswith("¬") and _normalized_proposition(proposition[1:]) in propositions
+            for proposition in propositions
+        ):
+            expected = GroundingOperator.CONTRADICTION
+            description = _neutral_need(
+                inputs=Arity.TWO, outputs=Arity.ZERO,
+                flow=(InformationFlow.DISCARD,),
+                before="two available items that cannot both hold", after="the requirement follows from impossibility",
+                role="conflicting_items",
+                summary="Two available items conflict with each other.",
+            )
+    return NeedAnalysis(description, expected)
+
+
 __all__ = [
     "OperationClass", "Arity", "Permutation", "InformationFlow", "TransferOutputError",
-    "TransformationRecord", "ProofNeed", "SourceAnalogy", "AnalogyAlignment",
-    "ProofReasoningTransfer", "AnalogyObservation", "derive_proof_need", "parse_transformation_record",
+    "TransformationRecord", "ProofNeed", "NeutralProofNeed", "NeedAnalysis", "SourceAnalogy", "AnalogyAlignment",
+    "ProofReasoningTransfer", "AnalogyObservation", "derive_proof_need", "derive_need_analysis", "parse_transformation_record",
     "parse_source_analogy", "parse_alignment", "parse_proof_reasoning_transfer",
 ]

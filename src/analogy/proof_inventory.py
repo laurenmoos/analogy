@@ -220,4 +220,24 @@ def build_local_inventory(
     )
 
 
-__all__ = ["InventoryEntry", "InventoryError", "InventoryKind", "LocalProofInventory", "build_local_inventory"]
+def render_model_inventory(inventory: LocalProofInventory) -> str:
+    """Compact inventory view without state hashes or Lean local identifiers."""
+    items = []
+    for entry in inventory.locals + inventory.target_entries:
+        try:
+            shape = json.loads(entry.structural_shape)
+        except json.JSONDecodeError as error:
+            raise InventoryError("inventory structural shape must be valid JSON") from error
+        items.append({
+            "inventory_id": entry.inventory_id,
+            "kind": entry.kind.value,
+            "proposition": entry.proposition,
+            "structural_shape": shape,
+        })
+    return json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+__all__ = [
+    "InventoryEntry", "InventoryError", "InventoryKind", "LocalProofInventory",
+    "build_local_inventory", "render_model_inventory",
+]

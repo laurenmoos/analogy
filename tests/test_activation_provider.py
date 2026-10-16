@@ -209,3 +209,31 @@ def test_mlx_cached_generation_wrapper_patches_boundary_once_across_chunks():
     assert torch.equal(wrapped(torch.zeros(1, 2, 2)), torch.ones(1, 2, 2))
     assert torch.equal(wrapped(torch.zeros(1, 2, 2)), torch.tensor([[[11., 21.], [1., 1.]]]))
     assert torch.equal(wrapped(torch.zeros(1, 1, 2)), torch.ones(1, 1, 2))
+
+
+@pytest.mark.parametrize("widths", [(5,), (2, 2, 1)])
+def test_mlx_float32_patch_preserves_float16_residual_dtype_and_nonboundary_rows(widths):
+    mx = SimpleNamespace(concatenate=lambda parts, axis: torch.cat(parts, dim=axis))
+    wrapped = _DeltaLayer(Block(1), torch.tensor([10., 20.], dtype=torch.float32), mx, prompt_tokens=3)
+    inputs = torch.arange(10, dtype=torch.float16).reshape(1, 5, 2)
+    chunks = []
+    start = 0
+    for width in widths:
+        chunk = wrapped(inputs[:, start:start + width])
+        assert chunk.dtype == torch.float16
+        chunks.append(chunk)
+        start += width
+    actual = torch.cat(chunks, dim=1)
+    expected = inputs + 1
+    assert torch.equal(actual[:, :2], expected[:, :2])
+    assert torch.equal(actual[:, 2], expected[:, 2] + torch.tensor([10., 20.], dtype=torch.float16))
+    assert torch.equal(actual[:, 3:], expected[:, 3:])
+
+
+def test_float16_zero_patch_preserves_residual_dtype_and_exact_completion_score(provider):
+    engine, model, _ = provider
+    model.model.embed_tokens = lambda ids: torch.stack((ids.float(), ids.float() * 2), dim=-1).half() / 7
+    baseline = engine.score_completions(MESSAGES, ("answer",))[0]
+    patched = engine.score_completion_with_delta(MESSAGES, "answer", delta=(0., 0.), layer=0)
+    assert patched == baseline
+    assert model.model.layers[1].inputs[-1].dtype == torch.float16

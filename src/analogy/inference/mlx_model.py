@@ -33,10 +33,15 @@ class _DeltaLayer:
         self.tokens_seen += width
         if not self.applied and start < self.prompt_tokens <= self.tokens_seen:
             index = self.prompt_tokens - start - 1
+            delta = (
+                self.delta.astype(output.dtype)
+                if hasattr(self.delta, "astype")
+                else self.delta.to(dtype=output.dtype)
+            )
             output = self.mx.concatenate(
                 [
                     output[:, :index, :],
-                    output[:, index : index + 1, :] + self.delta,
+                    output[:, index : index + 1, :] + delta,
                     output[:, index + 1 :, :],
                 ],
                 axis=1,

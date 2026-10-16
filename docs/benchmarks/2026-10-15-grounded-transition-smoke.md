@@ -292,3 +292,22 @@ Focused follow-up verification passed **129 tests / 1 skip in 4.69 seconds**
 (`tests/test_grounded_training.py`, `tests/test_training.py`, `tests/test_rl.py`,
 `tests/test_cli.py`). No inference or full-suite rerun was performed for this
 diagnostic-only correction.
+
+## Post-review repair-diagnostic correction
+
+New summaries include grounded diagnostic repairs in `diagnostic_repair_*`,
+counting one attempted repair iteration across legacy and grounded fields.
+Grounded success requires an actually executed `grounded_compiler_repair`
+candidate with an accepted/completed, undiscarded Lean result. A valid generated
+or compiled repair alone, a rejected/repeated result, or a conventional finisher
+does not establish repair success. Legacy success flags retain their behavior;
+rows exposing both formats count once.
+
+The select-left → select-right fixture verifies a successful executed repair;
+negative controls cover failed, repeated, unexecuted, and finisher-only results.
+Focused follow-up verification passed **189 tests / 1 skip in 10.21 seconds**
+(the four files above plus `tests/test_analogy_transfer_loop.py`). No inference
+was rerun. Historical machine summaries can omit grounded repair attempts in
+these diagnostic fields; consult their raw grounding-repair calls and Lean
+attempts instead. Sealed artifacts and the published stage-call/completion tables
+are unchanged.

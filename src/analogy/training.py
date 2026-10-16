@@ -994,9 +994,24 @@ def _summarize_condition(
         for iteration in iterations
     )
     repair_attempts = sum(
-        bool(getattr(iteration, "repair_generation_attempts", ())) for iteration in iterations
+        bool(getattr(iteration, "repair_generation_attempts", ())
+             or getattr(iteration, "grounding_repair_attempts", ()))
+        for iteration in iterations
     )
-    repair_successes = sum(getattr(iteration, "repair_succeeded", False) for iteration in iterations)
+    # Count diagnostic-repair iterations once across legacy and grounded rows.
+    # A parsed/compiled plan alone is not a successful repair: Lean must have
+    # accepted its repaired candidate without discarding it, or completed proof.
+    repair_successes = sum(
+        bool(getattr(iteration, "repair_succeeded", False)) or (
+            bool(getattr(iteration, "grounding_repair_attempts", ())) and any(
+                attempt.stage == "grounded_compiler_repair"
+                and attempt.result.status in {TacticStatus.ACCEPTED, TacticStatus.COMPLETE}
+                and attempt.discarded is None
+                for attempt in iteration.attempts
+            )
+        )
+        for iteration in iterations
+    )
     surprise_observations = sum(
         iteration.surprise is not None for iteration in iterations
     )

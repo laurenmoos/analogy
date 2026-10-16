@@ -862,7 +862,8 @@ def test_shuffled_analogies_change_assignment_without_crossing_split() -> None:
     assert all(item.source.split == item.target.split == "test" for item in shuffled)
 
 
-def test_condition_summary_reports_verifier_backed_repair_and_transition_metrics():
+@pytest.mark.parametrize("also_grounded", [False, True])
+def test_condition_summary_reports_verifier_backed_repair_and_transition_metrics(also_grounded):
     def attempt(source, status, diagnostics=()):
         candidate = TacticCandidate(source, 1.0, CandidateOrigin.ANALOGICAL)
         proposal = RescueProposal(candidate, "predicted")
@@ -883,6 +884,8 @@ def test_condition_summary_reports_verifier_backed_repair_and_transition_metrics
     repair_generation = GenerationAttempt(
         1, "{}", GenerationStatus.VALID, repair=True
     )
+    if also_grounded:
+        repaired_progress = replace(repaired_progress, stage="grounded_compiler_repair")
 
     def trace(iteration):
         return AnalogyLoopTrace((iteration,), StopReason.NO_SUCCESSOR, 0, 0)
@@ -898,6 +901,8 @@ def test_condition_summary_reports_verifier_backed_repair_and_transition_metrics
         attempts=(repair_error, repaired_progress),
         repair_generation_attempts=(repair_generation,),
         repair_succeeded=True,
+        # Compatibility rows exposing both representations must count once.
+        grounding_repair_attempts=(repair_generation,) if also_grounded else (),
         actual_transition="⊢ Q",
         surprise=0.4,
     )

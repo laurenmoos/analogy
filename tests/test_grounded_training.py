@@ -149,6 +149,45 @@ def test_legacy_paired_outcomes_fall_back_to_problem_identity():
     assert (summary.solved, summary.attempted, summary.completion_per_lean_call) == (1, 1, 0.5)
 
 
+@pytest.mark.parametrize("repair_outcome,expected_successes", [
+    ("complete", 1), ("accepted", 1), ("repeated", 0),
+    ("error", 0), ("unexecuted", 0), ("finisher", 0),
+])
+def test_grounded_diagnostic_repair_summary_requires_executed_useful_repair(repair_outcome, expected_successes):
+    from analogy.loop import NeverCancelled
+    from analogy.records import DiscardedSuccessor, DiscardReason, SymbolicState, TacticStatus
+    from test_analogy_transfer_loop import grounded_runner, grounded_payload, GroundedEvaluator, state
+    expression = "h : C ∧ C\n⊢ C"
+    initial = grounded_payload(expression, operator="select_left", proposition="C ∧ C")
+    repaired = grounded_payload(expression, operator="select_right", proposition="C ∧ C")
+    runner, _, _ = grounded_runner(initial, extra=[json.dumps(repaired)])
+    outcome = runner.search(SymbolicState("C", expression, "lean4"), state(), (), (),
+        GroundedEvaluator("exact h.right"), NeverCancelled())
+    rollout = outcome.rollouts[0]
+    iteration = rollout.analogy_trace.iterations[0]
+    assert [item.proposal.candidate.source for item in iteration.attempts] == ["exact h.left", "exact h.right"]
+    if repair_outcome == "unexecuted":
+        iteration = replace(iteration, attempts=iteration.attempts[:1])
+    elif repair_outcome == "finisher":
+        iteration = replace(iteration, attempts=(iteration.attempts[0],
+            replace(iteration.attempts[1], stage="conventional_finisher")))
+    elif repair_outcome != "complete":
+        repair_attempt = iteration.attempts[1]
+        status = TacticStatus.ERROR if repair_outcome == "error" else TacticStatus.ACCEPTED
+        result = replace(repair_attempt.result, status=status, proof=None,
+            state=state("D") if status is TacticStatus.ACCEPTED else None)
+        discarded = (DiscardedSuccessor(result, DiscardReason.REPEATED_STATE)
+                     if repair_outcome == "repeated" else None)
+        iteration = replace(iteration, attempts=(iteration.attempts[0],
+            replace(repair_attempt, result=result, discarded=discarded)))
+    rollout = replace(rollout, analogy_trace=replace(rollout.analogy_trace, iterations=(iteration,)))
+    episode = training.ProblemEpisode("p", repair_outcome in {"complete", "finisher"}, (rollout,), (), 0, 2)
+    summary = training._summarize_condition("grounded", (episode,), set())
+    assert summary.diagnostic_repair_attempts == 1
+    assert summary.diagnostic_repair_successes == expected_successes
+    assert summary.diagnostic_repair_success_rate == float(expected_successes)
+
+
 @pytest.mark.parametrize("later_failure", ["compile", "runtime", "malformed"])
 def test_useful_first_action_keeps_credit_after_later_failure(later_failure):
     from test_analogy_transfer_loop import grounded_runner, grounded_payload, run, Evaluator

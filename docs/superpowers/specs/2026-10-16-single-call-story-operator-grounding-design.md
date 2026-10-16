@@ -155,7 +155,7 @@ to the valid Lean 4 next-tactic form:
 cases h
 ```
 
-This leaves the resulting branch goals to later search instead of inventing branch bodies. The normalizer must not rewrite arbitrary `cases` programs or text inside quoted identifiers. Normalization occurs before deduplication and Lean submission and is recorded in diagnostics.
+This leaves the resulting branch goals to later search instead of inventing branch bodies. The normalizer must not rewrite arbitrary `cases` programs or text inside quoted identifiers. Normalization occurs before deduplication and Lean submission.
 
 ## Training
 
@@ -184,10 +184,10 @@ This diagnostic verifies whether different latent deltas change the visible stor
 
 The script imports inventory, neutral need analysis, strict operator validation, deterministic enumeration, compilation, model generation, and Lean verification. It defines two one-call arms using templates from `prompts.yaml`:
 
-- **plain:** select one operator from the neutral description and inventory;
+- **plain:** select one operator from the neutral description alone (plus the allowed operator enum);
 - **story:** write a short story, then select one operator and bindings in the same response.
 
-Both arms use the same problems, saved states, enabled operators, model configuration, latent deltas, seeds, call count, maximum output budget, Lean candidate handling, and scoring. Arm order is deterministically randomized or crossed over per state to control warm-cache and order effects. Neither arm gets a repair call.
+Both arms use the same problems, saved states, enabled operators, model configuration, latent deltas, seeds, call count, maximum output budget, Lean candidate handling, and scoring. The plain arm intentionally does not receive inventory items; this isolates direct choice from story-mediated mapping. Arm order is deterministically randomized or crossed over per state to control warm-cache and order effects. Neither arm gets a repair call.
 
 The script records:
 

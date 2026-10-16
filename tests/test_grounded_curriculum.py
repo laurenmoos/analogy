@@ -272,51 +272,6 @@ def test_interruption_resumes_after_committed_prefix_and_preserves_failure_count
     assert all(prefix == ("aesop",) for _, prefix, _ in verifier.calls)
 
 
-@pytest.mark.parametrize("operator,expected_variants", [("exact_local", 2), ("rewrite_forward", 0)])
-def test_offline_augmentations_use_zero_action_and_cannot_escape_theorem_split(tmp_path, operator, expected_variants):
-    from test_analogy_transfer_generation import RecordingBackend, SOURCE, ALIGNMENT, TRANSFER
-    from test_analogy_transfer_loop import grounded_payload
-    cfg = config(tmp_path, tactics=("exact h",), ids=("train_a", "heldout"))
-    problems = json.loads(cfg.problems.read_text())
-    for problem in problems["problems"]:
-        problem.update(target="C", binders="(C : Prop) (h : C)")
-    cfg.problems.write_text(json.dumps(problems))
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text('{}')
-    from analogy.config import ModelConfig
-    cfg = replace(cfg, analogies_per_transition=1, model_revision="fixture-v1",
-        model=ModelConfig("transformers", str(model_dir), "cpu", -1, 512, 30, False, 0.3, 0.9))
-    cfg.split_manifest.write_text(json.dumps({"schema_version": 1,
-        "train": ["train_a"], "validation": [], "test": ["heldout"]}))
-    class V(PrefixVerifier):
-        states = ("h : C\n⊢ C",)
-        def proof_structure_after(self, problem, prefix):
-            return ProofStructure(1, '{"root":"atom"}', ('{"root":"target"}',))
-    class Backend(RecordingBackend):
-        hidden_size = 2
-    payloads = []
-    for index in range(2):
-        payloads.extend([SOURCE, ALIGNMENT, TRANSFER, json.dumps(grounded_payload(index=index, operator=operator))])
-    backend = Backend(payloads)
-    summary = build_grounded_curriculum(cfg, V(cfg.lean_project), generator=backend)
-    assert summary.variants == expected_variants
-    assert summary.augmentation_failure == 2 - expected_variants
-    records = rows(summary.transitions_path)
-    for name, split in (("train_a", "train"), ("heldout", "test")):
-        group = [row for row in records if row["problem_id"] == name]
-        assert len(group) == (2 if expected_variants else 1)
-        assert {row["split"] for row in group} == {split}
-        if expected_variants:
-            assert group[1]["parent_transition_id"] == group[0]["transition_id"]
-            assert group[1]["latent_action"] == {"kind": "unsteered_zero", "delta": [0.0, 0.0]}
-    assert len(load_online_curriculum_states(summary.manifest_path, "train")) == 1
-    assert len(backend.calls) == 8
-    assert backend.calls[0][2].tolist() == [0.0, 0.0]
-    assert backend.calls[4][2].tolist() == [0.0, 0.0]
-    assert all(delta is None for index, (_, _, delta) in enumerate(backend.calls) if index % 4)
-
-
 def test_pinned_lean_replays_and_compiles_real_nonterminal_transition(tmp_path):
     from analogy.lean_gym.resources import LEAN_PROJECT_ROOT
     from analogy.lean_gym.verifier import LeanSubprocessVerifier

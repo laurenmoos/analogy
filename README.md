@@ -184,10 +184,9 @@ for separate default-curriculum, curated-fixture, and fake-backend evidence.
 The renderer reads machine records without changing them, builds the complete
 Markdown first, then flushes and atomically replaces a temporary file in the
 same directory. A rendering or replacement failure warns and preserves any
-previous Markdown plus all JSONL and summary metrics. The five fixed snapshots
-in `tests/fixtures/generated_analogy_traces/` preserve October 15 Lean outcomes
-with deterministic generated-analogy prose; they test readability, not solver
-performance.
+previous Markdown plus all JSONL and summary metrics. The sealed benchmark
+artifacts under `runs-grounded/grounded-transition-20261015/` preserve the
+October 15 Lean outcomes and readable causal traces.
 
 The main `config.yaml` controls are `min_iterations` / `max_iterations`,
 `surprise_threshold` / `surprise_patience`, `min_surprise_improvement` /

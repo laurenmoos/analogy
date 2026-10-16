@@ -8,7 +8,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ..records import (
     SymbolicState,
@@ -17,6 +17,9 @@ from ..records import (
     TacticStatus,
 )
 from ..proof_views import ProofStructure, ProofViewError
+
+if TYPE_CHECKING:
+    from ..proof_inventory import LocalProofInventory
 
 from .models import Diagnostic, Problem, ProofState, VerificationResult, VerificationStatus
 
@@ -342,6 +345,14 @@ class LeanGymAdapter:
         if extractor is None:
             raise ProofViewError("configured verifier cannot extract proof structure")
         return extractor(self.problem, prefix)
+
+    def local_inventory_for(self, state: SymbolicState) -> LocalProofInventory:
+        """Build exact local grounding from one structure extraction."""
+        from ..proof_inventory import build_local_inventory
+
+        return build_local_inventory(
+            state, self.proof_structure_for(state), fixed_target=self.problem.target,
+        )
 
     def register_replay_state(self, state: SymbolicState) -> SymbolicState:
         """Register a separately reconstructed, verified state with this adapter."""

@@ -7,7 +7,8 @@ import pytest
 
 from analogy.lean_gym.models import Diagnostic, Problem, VerificationStatus
 from analogy.lean_gym.resources import LEAN_PROJECT_ROOT
-from analogy.lean_gym.verifier import LeanRun, LeanSubprocessVerifier
+from analogy.lean_gym.verifier import LeanGymAdapter, LeanRun, LeanSubprocessVerifier
+from analogy.proof_inventory import build_local_inventory
 
 
 def problem(binders: str = "(P : Prop)", target: str = "P → P") -> Problem:
@@ -72,6 +73,32 @@ def test_real_lean_extracts_structural_proof_signature(
     assert structure.hypothesis_shapes
     assert "hidden" not in structure.target_shape
     assert "/tmp/" not in structure.target_shape
+
+
+def test_real_lean_local_inventory_reuses_one_structure_extraction(
+    verifier: LeanSubprocessVerifier, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = LeanGymAdapter(problem("(P Q : Prop) (h : P ∧ Q)", "Q ∧ P"), verifier)
+    state = adapter.initial_state()
+    original = verifier._run_lean
+    calls = []
+
+    def counted(source: str) -> LeanRun:
+        calls.append(source)
+        return original(source)
+
+    monkeypatch.setattr(verifier, "_run_lean", counted)
+    inventory = adapter.local_inventory_for(state)
+    assert [(entry.identifier, entry.proposition) for entry in inventory.locals] == [
+        ("P", "Prop"), ("Q", "Prop"), ("h", "P ∧ Q"),
+    ]
+    assert inventory.fixed_target == "Q ∧ P"
+    assert len(calls) == 1
+    # A caller that already has the structure needs no further Lean run.
+    structure = adapter.proof_structure_for(state)
+    before = len(calls)
+    assert build_local_inventory(state, structure, fixed_target=adapter.problem.target) == inventory
+    assert len(calls) == before
 
 
 @pytest.mark.parametrize("candidate", ["", "   ", "intro h\nend", "intro h\rend", "intro\x00h", "x" * 4097])

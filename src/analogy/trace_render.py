@@ -104,9 +104,19 @@ class _Trace:
         self.state(before)
         self.analogy_number += 1
         self.lines.append(f"    ├─ Analogy {self.analogy_number} at State {self.number(before)}")
+        model_decision = iteration.get("decision") if record_kind == "story_operator" else None
         source = iteration.get("source")
         hop = iteration.get("hop")
-        if source:
+        if model_decision:
+            self.lines.append(f"    │  └─ STORY: {model_decision['story']}")
+            self.lines.append(f"    │     OPERATOR: {model_decision['operator']}")
+            for binding in model_decision.get("bindings", ()):
+                self.lines.append(
+                    f"    │     ROLE: {binding['role']} → {binding['inventory_id']}"
+                )
+            self.story_grounding(iteration, stages)
+            prefix = "    │                 └─ "
+        elif source:
             self.lines.append(f"    │  └─ SOURCE ANALOGY: {source['domain']}")
             for label, field in (("Before", "source_before"), ("After", "source_after")):
                 self.lines.append(f"    │     {label}: {source[field]}")
@@ -146,7 +156,7 @@ class _Trace:
         if record_kind == "grounded_generated":
             self.grounding(iteration, stages)
             prefix = "    │                          └─ "
-        if not iteration.get("attempts") and record_kind != "grounded_generated":
+        if not iteration.get("attempts") and record_kind not in {"grounded_generated", "story_operator"}:
             self.lines.extend([f"{prefix}TACTIC: not verified",
                                "    │              └─ LEAN RESULT: not attempted"])
         for attempt in iteration.get("attempts", ()):
@@ -155,9 +165,35 @@ class _Trace:
             self.attempt(attempt, origin or before, prefix, stage)
         if iteration.get("failed_stage"):
             self.lines.append(f"    [FAILED STAGE: {iteration['failed_stage']}] {iteration.get('failure_diagnostic') or ''}".rstrip())
-        decision = iteration.get("decision")
-        if decision:
-            self.lines.append(f"    [CONTROLLER: {decision['reason']}]")
+        controller = iteration.get("controller_decision")
+        if controller:
+            self.lines.append(f"    [CONTROLLER: {controller['reason']}]")
+
+    def story_grounding(self, iteration: dict, stages: dict) -> None:
+        prefix = "    │     "
+        inventory = iteration.get("inventory")
+        self.lines.append(f"{prefix}└─ INVENTORY [{stages['inventory']['status']}]")
+        if inventory is not None:
+            for entry in (*inventory.get("locals", ()), *inventory.get("target_entries", ())):
+                self.lines.append(
+                    f"{prefix}   {entry['inventory_id']} : {entry['proposition']}"
+                )
+        self.lines.append(f"{prefix}└─ APPLICATIONS [{stages['application']['status']}]")
+        for application in iteration.get("applications", ()):
+            self.lines.append(
+                f"{prefix}   {application['application_id']}: {application['operator']}"
+                f"({', '.join(application['inventory_ids'])}) → {application['output_proposition']}"
+            )
+        self.lines.append(f"{prefix}└─ COMPILED CANDIDATES [{stages['compilation']['status']}]")
+        for candidate in iteration.get("compiled_tactics", ()):
+            self.lines.append(
+                f"{prefix}   {candidate['text']} [{candidate['application_id']}]"
+            )
+        for diagnostic in iteration.get("compilation_diagnostics", ()):
+            self.lines.append(
+                f"{prefix}   {diagnostic['code']} [{diagnostic.get('application_id')}]: "
+                f"{diagnostic['message']}"
+            )
 
     def grounding(self, iteration: dict, stages: dict) -> None:
         """Render persisted premises and proposals; only attempt() creates edges."""

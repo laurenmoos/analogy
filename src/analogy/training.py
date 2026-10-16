@@ -27,10 +27,7 @@ from .analogy_generation import (
 from .analogy_loop import AnalogyLoopRunner
 from .analogy_transfer_loop import GeneratedDomainAnalogyLoopRunner
 from .analogy_transfer import ProofNeed, SourceAnalogy
-from .analogy_transfer_generation import (
-    SourceAnalogyGenerator, AlignmentGenerator, ProofTransferGenerator, TransferredTacticGenerator,
-    GroundedPlanGenerator,
-)
+from .story_operator import StoryOperatorGenerator
 from .analogy_stream import AnalogyHop, AnalogyTacticPlan
 from .config import AppConfig
 from .lean_gym.corpus import load_problems
@@ -424,8 +421,7 @@ def build_evaluation_conditions(config: AppConfig) -> tuple[EvaluationCondition,
     if config.analogy.strategy == "generated_domain":
         return conditions + (EvaluationCondition("analogy_loop", "analogy_loop", **common),) + tuple(
             EvaluationCondition(name, name, **common) for name in (
-                *(("generated_raw",) if config.analogy.decoder == "grounded" else ()),
-                "generated_unsteered", "generated_random", "generated_learned", "generated_shuffled"
+                "generated_unsteered", "generated_random", "generated_learned"
             )
         )
     return conditions + (
@@ -552,18 +548,16 @@ def _curriculum_problem_split(manifest: Path, problems: Sequence[Problem]) -> Pr
 def _artifact_identity(config: AppConfig) -> dict[str, Any] | None:
     if config.analogy.decoder != "grounded" and config.rl.curriculum_manifest is None:
         return None
-    from .analogy_transfer_generation import (SOURCE_PROMPT_VERSION, ALIGNMENT_PROMPT_VERSION,
-        TRANSFER_PROMPT_VERSION, GROUNDING_PROMPT_VERSION, GROUNDING_REPAIR_PROMPT_VERSION, TACTIC_PROMPT_VERSION)
-    from .grounded_plan import GROUNDED_PLAN_SCHEMA_VERSION
     from .tactic_compiler import TACTIC_COMPILER_VERSION
     return {"training_schema_version": "grounded-training-v1",
         "curriculum_manifest_hash": (hashlib.sha256(config.rl.curriculum_manifest.read_bytes()).hexdigest()
                                      if config.rl.curriculum_manifest else None),
-        "inventory_schema": "local-proof-inventory-v1", "grounded_plan_schema": GROUNDED_PLAN_SCHEMA_VERSION,
-        "compiler_version": TACTIC_COMPILER_VERSION, "decoder": config.analogy.decoder,
-        "prompt_versions": {"source": SOURCE_PROMPT_VERSION, "alignment": ALIGNMENT_PROMPT_VERSION,
-            "transfer": TRANSFER_PROMPT_VERSION, "grounding": GROUNDING_PROMPT_VERSION,
-            "grounding_repair": GROUNDING_REPAIR_PROMPT_VERSION, "raw_tactic": TACTIC_PROMPT_VERSION}}
+        "inventory_schema": "local-proof-inventory-v1",
+        "decision_schema": "story-operator-decision-v1",
+        "compiler_version": TACTIC_COMPILER_VERSION,
+        "operators": [item.value for item in config.analogy.grounding_operators],
+        "prompt_catalog_hash": prompt_catalog().content_hash,
+        "prompt_versions": {"story_operator": prompt_catalog().version("story_operator")}}
 
 
 def _check_artifact_identity(saved: Any, expected: Any) -> None:
@@ -1019,28 +1013,40 @@ def _summarize_condition(
         iteration.surprise is not None for iteration in iterations
     )
     funnel = {}
-    for stage in ("source", "alignment", "transfer"):
-        attempts = tuple(attempt for iteration in iterations
-            for attempt in getattr(iteration, f"{stage}_generation_attempts", ()))
-        funnel[stage] = {"accepted": sum(item.status is GenerationStatus.VALID for item in attempts),
-                         "attempted": len(attempts)}
-    grounding_attempts = tuple(attempt for iteration in iterations
-        for attempt in (getattr(iteration, "grounding_generation_attempts", ())
-                        + getattr(iteration, "grounding_repair_attempts", ())))
-    plans = tuple(plan for iteration in iterations for plan in (
-        getattr(iteration, "grounded_plan", None), getattr(iteration, "repaired_grounded_plan", None))
-        if plan is not None)
-    # Binding and plan parsing are one strict transaction: a rejected binding
-    # rejects the plan. Both denominators include repairs and malformed calls.
-    funnel["binding"] = {"accepted": len(plans), "attempted": len(grounding_attempts)}
-    funnel["grounded_plan"] = {"accepted": len(plans), "attempted": len(grounding_attempts)}
-    compiler_success = sum(bool(candidates) for iteration in iterations for candidates in (
-        getattr(iteration, "compiled_tactics", ()), getattr(iteration, "repaired_compiled_tactics", ())))
-    funnel["compiler"] = {"accepted": compiler_success, "attempted": len(plans)}
-    candidate_count = sum(len(candidates) for iteration in iterations for candidates in (
-        getattr(iteration, "compiled_tactics", ()), getattr(iteration, "repaired_compiled_tactics", ())))
-    funnel["compiled_candidates"] = {"accepted": candidate_count, "attempted": len(plans)}
-    funnel["lean_acceptance"] = {"accepted": accepted_tactics, "attempted": len(lean_attempts)}
+    story_iterations = tuple(item for item in iterations if hasattr(item, "decision_attempts"))
+    if story_iterations:
+        decision_attempts = tuple(
+            attempt for iteration in story_iterations for attempt in iteration.decision_attempts
+        )
+        application_count = sum(len(iteration.applications) for iteration in story_iterations)
+        candidate_count = sum(len(iteration.compiled_tactics) for iteration in story_iterations)
+        funnel["decision"] = {
+            "accepted": sum(item.status is GenerationStatus.VALID for item in decision_attempts),
+            "attempted": len(decision_attempts),
+        }
+        funnel["application"] = {
+            "accepted": application_count,
+            "attempted": sum(iteration.decision is not None for iteration in story_iterations),
+        }
+        funnel["compiled_candidate"] = {
+            "accepted": candidate_count,
+            "attempted": application_count,
+        }
+        funnel["lean_attempt"] = {
+            "accepted": accepted_tactics,
+            "attempted": len(lean_attempts),
+        }
+    else:
+        for stage in ("source", "alignment", "transfer"):
+            stage_attempts = tuple(attempt for iteration in iterations
+                for attempt in getattr(iteration, f"{stage}_generation_attempts", ()))
+            funnel[stage] = {
+                "accepted": sum(item.status is GenerationStatus.VALID for item in stage_attempts),
+                "attempted": len(stage_attempts),
+            }
+        candidate_count = sum(len(getattr(iteration, "compiled_tactics", ())) for iteration in iterations)
+        funnel["compiled_candidates"] = {"accepted": candidate_count, "attempted": len(iterations)}
+        funnel["lean_acceptance"] = {"accepted": accepted_tactics, "attempted": len(lean_attempts)}
     funnel["novel_successor"] = {"accepted": sum(
         attempt.result.status is TacticStatus.ACCEPTED and attempt.discarded is None
         for attempt in lean_attempts), "attempted": len(lean_attempts)}
@@ -1049,7 +1055,8 @@ def _summarize_condition(
             for attempt in iteration.attempts)
         and not any(attempt.result.status is TacticStatus.COMPLETE for attempt in iteration.attempts)
         for iteration in iterations)
-    continuations = sum(getattr(iteration, "source", None) is not None
+    continuations = sum((getattr(iteration, "decision", None) is not None
+                         or getattr(iteration, "source", None) is not None)
         and bool(getattr(getattr(iteration, "observation", None), "actual_transition", None))
         for iteration in iterations)
     funnel["second_analogy"] = {"accepted": continuations, "attempted": continuation_opportunities}
@@ -1432,7 +1439,8 @@ def _new_analogy_runner(
 
 def _new_generated_runner(config, generator, adapter, policy, *, condition,
                           iteration_sink, generated_sources, problem_id):
-    if condition not in {"generated_unsteered", "generated_random", "generated_learned", "generated_shuffled"}:
+    del generated_sources, problem_id
+    if condition not in {"generated_unsteered", "generated_random", "generated_learned"}:
         raise ValueError(f"unknown generated evaluation condition: {condition}")
     lean_budget = min(config.analogy.max_lean_calls, config.rl.max_rescue_verifier_calls)
 
@@ -1467,29 +1475,21 @@ def _new_generated_runner(config, generator, adapter, policy, *, condition,
         rng = torch.Generator(device=parameter.device).manual_seed(config.run.seed + index)
         return policy.sample(observation, rng)
 
-    options = dict(hidden_layer=config.model.hidden_layer, base_seed=config.run.seed, max_repair_calls=1)
     return GeneratedDomainAnalogyLoopRunner(
         structure_builder=adapter.proof_structure_for,
         observation_builder=build_observation, action_sampler=sample_action,
-        source_generator=SourceAnalogyGenerator(generator, **options),
-        alignment_generator=AlignmentGenerator(generator, **options),
-        transfer_generator=ProofTransferGenerator(generator, **options),
-        tactic_generator=TransferredTacticGenerator(generator, **options),
-        decoder=config.analogy.decoder,
-        grounded_plan_generator=GroundedPlanGenerator(generator, **options),
-        grounding_repair_calls=config.analogy.grounding_repair_calls,
+        decision_generator=StoryOperatorGenerator(
+            generator, prompt_catalog(), config.analogy.grounding_operators,
+            hidden_layer=config.model.hidden_layer, base_seed=config.run.seed,
+        ),
         transition_comparator=lambda before, predicted, actual: compare_transitions(
             before, predicted, actual, generator, config.analogy.transition_embedding_layer),
         controller=SurpriseController(SurpriseConfig(
             config.analogy.min_iterations, config.analogy.max_iterations,
             config.analogy.surprise_threshold, config.analogy.surprise_patience,
             config.analogy.min_surprise_improvement, config.analogy.improvement_patience)),
-        tactics_per_iteration=config.analogy.tactics_per_iteration,
         max_model_calls=config.analogy.max_model_calls, max_lean_calls=lean_budget,
         structure_lean_cost=1, iteration_sink=iteration_sink, base_seed=config.run.seed,
-        source_transform=(lambda source, need, observation: shuffle_generated_source(
-            source, need, observation, generated_sources, problem_id=problem_id,
-            seed=config.run.seed)) if condition == "generated_shuffled" else None,
     )
 
 

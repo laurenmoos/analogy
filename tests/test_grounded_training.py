@@ -32,7 +32,9 @@ def test_grounded_profile_uses_curriculum_and_matched_raw_ablation():
     assert cfg.rl.curriculum_manifest is not None
     assert cfg.model.max_new_tokens >= 512
     conditions = training.build_evaluation_conditions(cfg)
-    assert {item.name for item in conditions} >= {"generated_raw", "generated_unsteered", "generated_random", "generated_learned", "generated_shuffled", "analogy_loop", "conventional"}
+    names = {item.name for item in conditions}
+    assert names >= {"generated_unsteered", "generated_random", "generated_learned", "analogy_loop", "conventional"}
+    assert names.isdisjoint({"generated_raw", "generated_shuffled"})
     assert len({item.budget for item in conditions}) == 1
 
 

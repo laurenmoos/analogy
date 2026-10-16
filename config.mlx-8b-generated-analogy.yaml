@@ -40,7 +40,7 @@ analogy:
   improvement_patience: 1
   tactics_per_iteration: 4
   max_model_calls: 3
-  max_lean_calls: 6
+  max_lean_calls: 64
   transition_embedding_layer: -1
   discount: 0.95
   iteration_cost: 0.01
@@ -63,7 +63,7 @@ rl:
   invalid_output_reward: -0.05
   empty_output_reward: -0.02
   hop_cost: 0.01
-  max_rescue_verifier_calls: 6
+  max_rescue_verifier_calls: 64
   epochs: 1
   checkpoint_interval: 1
   checkpoint: null

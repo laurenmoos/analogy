@@ -33,14 +33,21 @@ def persisted_stage_evidence(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     must not invoke current solver logic or reconstruct a missing grounded plan.
     """
     for name, supported in (("grounded_plan_schema_version", "grounded-plan-v1"),
-                            ("compiler_version", "grounded-compiler-v1")):
+                            ("decision_schema_version", "story-operator-decision-v1")):
         value = row.get(name)
         if value is not None and value != supported:
             raise ValueError(f"unsupported {name} version: {value!r}")
+    compiler_version = row.get("compiler_version")
+    if compiler_version is not None and compiler_version not in {
+        "grounded-compiler-v1", "grounded-compiler-v2",
+    }:
+        raise ValueError(f"unsupported compiler_version version: {compiler_version!r}")
+    story_operator = "decision_schema_version" in row or "applications" in row
     grounded = any(name in row for name in (
         "inventory", "grounded_plan", "grounded_plan_schema_version", "compiled_tactics"))
     generated = grounded or "source" in row or "generated_source" in row
-    kind = "grounded_generated" if grounded else "raw_generated" if generated else "legacy"
+    kind = ("story_operator" if story_operator else "grounded_generated" if grounded
+            else "raw_generated" if generated else "legacy")
     failed = row.get("failed_stage")
 
     def stage(name: str, payload: Any, available: bool) -> dict[str, Any]:
@@ -49,13 +56,26 @@ def persisted_stage_evidence(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 "diagnostic": row.get("failure_diagnostic") if failed == name else None}
 
     stages = {}
-    if generated:
+    if story_operator:
+        stages["decision"] = stage("decision", {
+            "record": row.get("decision"),
+            "generation_attempts": row.get("decision_attempts", []),
+            "expected_operator": row.get("expected_operator"),
+        }, row.get("decision") is not None)
+        stages["inventory"] = stage("inventory", row.get("inventory"), row.get("inventory") is not None)
+        stages["application"] = stage("application", row.get("applications", []), bool(row.get("applications")))
+        stages["compilation"] = stage("compilation", {
+            "candidates": row.get("compiled_tactics", []),
+            "diagnostics": row.get("compilation_diagnostics", []),
+            "compiler_version": row.get("compiler_version"),
+        }, bool(row.get("compiled_tactics") or row.get("compilation_diagnostics")))
+    elif generated:
         for name in ("source", "alignment", "transfer"):
             stages[name] = stage(name, {"record": row.get(name),
                 "generation_attempts": row.get(f"{name}_generation_attempts", [])}, row.get(name) is not None)
     else:
         stages["analogy"] = stage("analogy", row.get("hop"), row.get("hop") is not None)
-    if grounded:
+    if grounded and not story_operator:
         stages["inventory"] = stage("inventory", row.get("inventory"), row.get("inventory") is not None)
         stages["grounding"] = stage("grounding", row.get("grounded_plan"), row.get("grounded_plan") is not None)
         stages["grounding"]["generation_attempts"] = row.get("grounding_generation_attempts", [])
@@ -79,7 +99,7 @@ def persisted_stage_evidence(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if row.get("repair_compilation_diagnostics") and not row.get("repaired_compiled_tactics"):
             stages["repair"]["status"] = "failed"
             stages["repair"]["diagnostic"] = row.get("failure_diagnostic")
-    else:
+    elif not story_operator:
         stages["tactic"] = stage("tactic", {"plan": row.get("tactic_plan"),
             "generation_attempts": row.get("tactic_generation_attempts", [])}, row.get("tactic_plan") is not None)
     stages["lean"] = stage("lean", row.get("attempts", []), bool(row.get("attempts")))

@@ -192,6 +192,51 @@ def _generation_charge(result, operation: str, candidate_id: str | None = None) 
     return ModelCharge(operation, None if _unknown(result) else result.processed_token_positions, candidate_id)
 
 
+class _GenerationAccounting:
+    """Preserve Task 3's raw attempts when post-generation accounting fails.
+
+    Task 3 counts usage after constructing the prompt-run evidence. Returning a
+    temporary zero lets that evidence reach this boundary; ``finish`` annotates
+    every failed count as a runtime error before any charge or validity decision.
+    Consequently the enclosing charge is always unknown, never valid zero usage.
+    This adapter is used only for generation, never for admission estimates.
+    """
+
+    def __init__(self, provider):
+        self.provider = provider
+        self.failures = {}
+
+    def generate(self, messages, *, seed):
+        return self.provider.generate(messages, seed=seed)
+
+    def count_token_positions(self, messages, completion):
+        try:
+            return self.provider.count_token_positions(messages, completion)
+        except Exception as error:
+            self.failures[(messages, completion)] = f"token accounting: {type(error).__name__}: {error}"
+            return 0
+
+    def finish(self, result):
+        attempts, errors = [], []
+        # Task 3 permits exactly one attempt per rendered stage.
+        for messages, attempt in zip(result.messages, result.attempts, strict=True):
+            diagnostic = self.failures.get((messages, attempt.raw_text))
+            if diagnostic is not None:
+                errors.append(diagnostic)
+                attempt = replace(attempt, status=GenerationStatus.RUNTIME_ERROR,
+                                  error_kind="token_accounting", diagnostic="; ".join(
+                                      value for value in (attempt.diagnostic, diagnostic) if value))
+            attempts.append(attempt)
+        if not errors:
+            return result
+        updates = {"attempts": tuple(attempts)}
+        if isinstance(result, GeneratedTacticSlate):
+            updates["error"] = "; ".join(value for value in (result.error, *errors) if value)
+        elif isinstance(result, CandidateGenerationFailure):
+            updates["diagnostic"] = "; ".join((result.diagnostic, *errors))
+        return replace(result, **updates)
+
+
 def collect_prelean(
     config: ActivationEvalConfig, app_config: AppConfig, anchors: Sequence[AnchorRecord],
     generator: ModelProvider, *, proof_structures: Mapping[tuple[str, int], ProofStructure],
@@ -214,7 +259,6 @@ def collect_prelean(
         raise ValueError("proof structure mapping must cover exactly the stuck anchors")
     configure_prompt_catalog(app_config.prompts.path)
     layers = tuple(generator.resolve_decoder_layers(config.activation_layer_count, through=app_config.model.hidden_layer))
-    service = ActivationAnalogyGenerator(generator, config)
     cells = []
     for anchor in anchors:
         context = _context(anchor)
@@ -222,16 +266,18 @@ def collect_prelean(
             cells.append(PreLeanCell(anchor, context, None, (), (), (), (), (), "no_stuck_anchor"))
             continue
         structure = structures[(anchor.problem_id, anchor.seed)]
-        neutral = generate_neutral_slate(generator, context, seed=generation_seed(anchor, "neutral"),
-                                         tactics_per_slate=config.tactics_per_slate)
-        candidates = service.generate_candidates(context, structure, derive_proof_need(
+        accounting = _GenerationAccounting(generator)
+        service = ActivationAnalogyGenerator(accounting, config)
+        neutral = accounting.finish(generate_neutral_slate(accounting, context, seed=generation_seed(anchor, "neutral"),
+                                                           tactics_per_slate=config.tactics_per_slate))
+        candidates = tuple(accounting.finish(candidate) for candidate in service.generate_candidates(context, structure, derive_proof_need(
             structure, context.state.expression, fixed_target=context.goal.expression),
-            seed=(1 << 40) + generation_seed(anchor, "candidates") * (4 * config.analogy_candidates))
+            seed=(1 << 40) + generation_seed(anchor, "candidates") * (4 * config.analogy_candidates)))
         charges = [_generation_charge(neutral, "neutral_generation")]
         charges.extend(_generation_charge(c, "candidate_generation", c.candidate_id if isinstance(c, CandidateGenerationFailure)
                                          else c.record.candidate_id) for c in candidates)
         union = build_tactic_union(neutral, candidates, limit=config.tactic_union_limit)
-        traces, evidence, diagnostics = [], [], []
+        traces, evidence, diagnostics = [], [], list(accounting.failures.values())
         status = "invalid_usage" if any(c.processed_token_positions is None for c in charges) else "ready"
         if status == "ready":
             for tactic in union:
@@ -386,7 +432,8 @@ def _topup(slate: _ArmSlate, arm: ActivationCondition, cell: PreLeanCell, genera
         seed = generation_seed(cell.anchor, f"topup:{arm.value}", index)
         # Reuse attempt_index=0: the estimate and generated prompt are identical.
         generate = generate_neutral_slate if arm is ActivationCondition.NEUTRAL else generate_prompted_slate
-        generated = generate(generator, cell.context, seed=seed, tactics_per_slate=config.tactics_per_slate)
+        accounting = _GenerationAccounting(generator)
+        generated = accounting.finish(generate(accounting, cell.context, seed=seed, tactics_per_slate=config.tactics_per_slate))
         extra = _arm_slate(generated, seed=seed)
         if extra.messages != result.messages:
             raise ValueError("top-up prompt changed after admission")
@@ -582,7 +629,8 @@ def run_lean_conditions(
                     slate = _arm_slate(cell.neutral, seed=generation_seed(cell.anchor, "neutral"))
                 elif arm is ActivationCondition.PROMPTED:
                     try:
-                        slate = _arm_slate(generate_prompted_slate(generator, cell.context, **kwargs), seed=seed)
+                        accounting = _GenerationAccounting(generator)
+                        slate = _arm_slate(accounting.finish(generate_prompted_slate(accounting, cell.context, **kwargs)), seed=seed)
                     except Exception as error:
                         slate = _ArmSlate(cost=None, seeds=(seed,), diagnostics=(f"final generation: {type(error).__name__}: {error}",),
                                           charges=(ModelCharge("final_generation", None),))
@@ -597,9 +645,10 @@ def run_lean_conditions(
                             baseline[arm] = _ArmSlate(diagnostics=(str(error),))
                             continue
                     try:
-                        generated = generate(generator, cell.context, selected,
+                        accounting = _GenerationAccounting(generator)
+                        generated = accounting.finish(generate(accounting, cell.context, selected,
                                              previous_state=cell.anchor.predecessor_state.expression if cell.anchor.predecessor_state else None,
-                                             last_tactic=cell.anchor.accepted_prefix[-1] if cell.anchor.accepted_prefix else None, **kwargs)
+                                             last_tactic=cell.anchor.accepted_prefix[-1] if cell.anchor.accepted_prefix else None, **kwargs))
                         slate = _arm_slate(generated, seed=seed, charges=cell.charges if arm is ActivationCondition.SELECTED else ())
                     except Exception as error:
                         slate = _ArmSlate(cost=None, seeds=(seed,), diagnostics=(f"final generation: {type(error).__name__}: {error}",),
@@ -636,13 +685,18 @@ def run_lean_conditions(
                                                arm, slate, view=view, ceiling=ceiling, final_cap=final_cap,
                                                lean_cap=cap, max_expansions=app.search.max_steps, unavailable=unavailable))
             outcomes_by_view.append(tuple(outcomes))
+        diagnostics = cell.diagnostics
+        if any(outcome.continuation_processed_token_positions is None
+               for outcomes in outcomes_by_view for outcome in outcomes):
+            status = "invalid_usage"
+            diagnostics += ("unknown continuation model usage; trial excluded from valid experimental evidence",)
         records.append(MatchedActivationTrialRecord(
             cell.anchor.problem_id, cell.anchor.seed, cell.anchor,
             tuple(c.record for c in cell.candidates if isinstance(c, GeneratedAnalogyCandidate)),
             frozen.measurements, outcomes_by_view[0], equal_compute_outcomes=outcomes_by_view[1], compute_ceiling=ceiling,
             status=status, rescue_eligible=status not in ("no_stuck_anchor", "invalid_usage"),
             selected_candidate_id=frozen.winner.candidate_id if frozen.winner else None,
-            calibration=frozen.calibration, execution_order=order, prelean_charges=cell.charges, diagnostics=cell.diagnostics,
+            calibration=frozen.calibration, execution_order=order, prelean_charges=cell.charges, diagnostics=diagnostics,
             causal_ranking_changes=tuple((e.candidate.record.candidate_id, _ranking_change(cell, e)) for e in cell.evidence),
             generation_failures=tuple(c for c in cell.candidates if isinstance(c, CandidateGenerationFailure)),
         ))

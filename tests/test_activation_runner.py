@@ -460,3 +460,100 @@ def test_final_generation_accounting_error_cannot_become_zero_cost_selection():
     records = runner.run_lean_conditions(frozen, data[2], data[4], generator=BrokenCounter(), max_topups=0)
     assert all(r.status == "invalid_usage" for r in records)
     assert all(next(o for o in r.outcomes if o.condition is Arm.SELECTED).processed_token_positions is None for r in records)
+
+
+@pytest.mark.parametrize("stage", ["neutral", "candidate"])
+def test_collection_accounting_failure_keeps_raw_evidence_and_continues_other_cells(stage):
+    data = list(setup())
+
+    class BrokenCollectionCounter(Provider):
+        failed = False
+
+        def count_token_positions(self, messages, completion):
+            target = "Use Lean feedback" if stage == "neutral" else "Generate one concrete non-proof"
+            if not self.failed and completion and messages[0].content.startswith(target):
+                self.failed = True
+                raise ValueError("collection accounting failed after model work")
+            return super().count_token_positions(messages, completion)
+
+    data[5] = BrokenCollectionCounter()
+    collection = collect(data)
+    broken, healthy = collection.cells
+    assert broken.status == "invalid_usage" and broken.processed_token_positions is None
+    assert healthy.status == "ready" and healthy.processed_token_positions == 180
+    evidence = broken.neutral if stage == "neutral" else broken.candidates[0]
+    assert evidence.raw_outputs[0]
+    assert evidence.attempts[0].raw_text == evidence.raw_outputs[0]
+    assert any("collection accounting" in (attempt.diagnostic or "") for attempt in evidence.attempts)
+    assert any(c.processed_token_positions is None for c in broken.charges)
+
+
+def test_admitted_topup_accounting_failure_excludes_only_affected_cell_and_preserves_evidence():
+    data = setup()
+    frozen = runner.freeze_selections(collect(data))
+
+    class BrokenTopupCounter(Provider):
+        fail_next_count = False
+        failed = False
+
+        def generate(self, messages, *, seed):
+            self.fail_next_count = seed % 2 == 1 and seed < 2**40 and not self.failed
+            return super().generate(messages, seed=seed)
+
+        def count_token_positions(self, messages, completion):
+            if self.fail_next_count and completion:
+                self.failed = True
+                self.fail_next_count = False
+                raise ValueError("admitted topup accounting failed after model work")
+            return super().count_token_positions(messages, completion)
+
+    data[4].allowed = True
+    records = runner.run_lean_conditions(frozen, data[2], data[4], generator=BrokenTopupCounter(), lean_call_cap=1, max_topups=1)
+    broken, healthy = records
+    assert broken.status == "invalid_usage" and not broken.rescue_eligible
+    assert healthy.status == "ready" and healthy.rescue_eligible
+    assert broken.compute_ceiling == healthy.compute_ceiling == 192
+    failed_arm = next(o for o in broken.equal_compute_outcomes if o.processed_token_positions is None)
+    assert failed_arm.topup_admitted == (True,)
+    assert failed_arm.generations[-1].raw_outputs
+    assert failed_arm.generations[-1].attempts[0].raw_text == failed_arm.generations[-1].raw_outputs[0]
+    assert any("admitted topup accounting" in d for d in failed_arm.diagnostics)
+    assert failed_arm.charges[-1].processed_token_positions is None
+    assert all(o.lean_calls == 0 for o in (*broken.outcomes, *broken.equal_compute_outcomes))
+
+
+@pytest.mark.parametrize("failure", ["timeout", "accounting"])
+def test_unknown_continuation_usage_invalidates_trial_without_rewriting_selection_or_outcomes(failure):
+    data = setup()
+    frozen = runner.freeze_selections(collect(data))
+    winners = tuple(c.winner for c in frozen.cells)
+
+    class BrokenContinuation(Provider):
+        failed = False
+
+        def generate(self, messages, *, seed):
+            if failure == "timeout" and not self.failed and "Propose ranked next tactics" in messages[0].content:
+                self.failed = True
+                raise TimeoutError("continuation usage unknown")
+            return super().generate(messages, seed=seed)
+
+        def count_token_positions(self, messages, completion):
+            if failure == "accounting" and not self.failed and completion and "Propose ranked next tactics" in messages[0].content:
+                self.failed = True
+                raise ValueError("continuation usage unknown")
+            return super().count_token_positions(messages, completion)
+
+    data[4].allowed = True
+    records = runner.run_lean_conditions(frozen, data[2], data[4], generator=BrokenContinuation(), lean_call_cap=2, max_topups=0)
+    broken, healthy = records
+    assert broken.status == "invalid_usage" and not broken.rescue_eligible
+    assert healthy.status == "ready" and healthy.rescue_eligible
+    assert broken.compute_ceiling == healthy.compute_ceiling == 192
+    assert tuple(c.winner for c in frozen.cells) == winners
+    assert broken.selected_candidate_id == winners[0].candidate_id
+    prompted = next(o for o in broken.outcomes if o.condition is Arm.PROMPTED)
+    assert prompted.immediate_utility == "accepted_progressing"
+    assert prompted.continuation_processed_token_positions is None
+    assert prompted.rescue_lean_calls == 1 and prompted.continuation_lean_calls == 0
+    assert any("continuation" in d and "unknown" in d for d in broken.diagnostics)
+    assert len(broken.outcomes) == len(broken.equal_compute_outcomes) == 4

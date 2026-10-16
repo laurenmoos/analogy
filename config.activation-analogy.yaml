@@ -1,0 +1,24 @@
+schema_version: activation-analogy-v1
+base_config: config.yaml
+problem_ids:
+  - imp_intro_05
+  - iff_intro_03
+  - iff_intro_05
+  - not_intro_05
+  - or_intro_05
+  - or_intro_06
+seed_start: 0
+seed_count: 16
+domain_cues:
+  - physical/mechanical
+  - biological/ecological
+  - social/economic
+  - information/control
+analogy_candidates: 4
+tactics_per_slate: 4
+tactic_union_limit: 8
+activation_layer_count: 3
+score_weights: [1.0, 1.0, 1.0]
+variance_floor: 0.000001
+persist_full_activations: false
+output_namespace: activation_analogy

@@ -1,6 +1,8 @@
 experiment:
   stage: train_rescue
   minimum_solved: 1
+prompts:
+  path: prompts.yaml
 model:
   backend: mlx
   name: mlx-community/Qwen3-8B-4bit
@@ -20,6 +22,10 @@ search:
 analogy:
   strategy: generated_domain
   decoder: grounded
+  grounding_operators:
+    [exact_local, introduce, apply_implication, iff_forward, iff_backward,
+     rewrite_forward, rewrite_backward, split, select_left, select_right,
+     choose_left, choose_right, cases, contradiction]
   enabled: true
   samples: 1
   min_iterations: 2
@@ -29,7 +35,7 @@ analogy:
   min_surprise_improvement: 0.05
   improvement_patience: 1
   tactics_per_iteration: 4
-  max_model_calls: 8
+  max_model_calls: 3
   max_lean_calls: 6
   transition_embedding_layer: -1
   discount: 0.95
@@ -38,7 +44,7 @@ analogy:
 rl:
   enabled: true
   algorithm: reinforce
-  rollouts_per_state: 1
+  rollouts_per_state: 4
   tactics_per_rollout: 4
   hidden_width: 128
   max_delta_norm: 2.0

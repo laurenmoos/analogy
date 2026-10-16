@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 from .records import Embedding
+from .prompts import prompt_catalog
 from .rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
 
 if TYPE_CHECKING:
@@ -81,12 +82,14 @@ class TransitionComparison:
 
 
 def render_language_view(context: ProofRescueContext) -> str:
-    return (
-        f"Overall target:\n{context.goal.expression}\n"
-        f"Current proof state:\n{context.state.expression}\n"
-        f"Accepted tactics:\n{_lines(context.accepted_tactics)}\n"
-        f"Failed tactics:\n{_lines(context.failed_tactics)}"
+    messages = prompt_catalog().messages(
+        "proof_language_view",
+        overall_target=context.goal.expression,
+        current_state=context.state.expression,
+        accepted=_lines(context.accepted_tactics),
+        failed=_lines(context.failed_tactics),
     )
+    return "\n".join(item.content for item in messages)
 
 
 def render_structure_view(structure: ProofStructure) -> str:
@@ -102,20 +105,22 @@ def render_structure_view(structure: ProofStructure) -> str:
 
 
 def render_transition(before: str, after: str) -> str:
-    return (
-        "Before proof state:\n"
-        f"{_normalize_proof_state_text(before)}\n"
-        "After proof state:\n"
-        f"{_normalize_proof_state_text(after)}"
+    messages = prompt_catalog().messages(
+        "transition_embedding",
+        before=_normalize_proof_state_text(before),
+        after=_normalize_proof_state_text(after),
     )
+    return "\n".join(item.content for item in messages)
 
 
 def render_observed_transition(previous: str, tactic: str | None, current: str) -> str:
-    return (
-        f"Before proof state:\n{_normalize_proof_state_text(previous)}\n"
-        f"Verified tactic:\n{tactic if tactic is not None else '(none)'}\n"
-        f"After proof state:\n{_normalize_proof_state_text(current)}"
+    messages = prompt_catalog().messages(
+        "observed_transition_embedding",
+        before=_normalize_proof_state_text(previous),
+        tactic=tactic if tactic is not None else "(none)",
+        after=_normalize_proof_state_text(current),
     )
+    return "\n".join(item.content for item in messages)
 
 
 def render_transfer_observation(
@@ -146,8 +151,11 @@ def build_policy_representation(
     scalar_features: tuple[float, ...] = (0.0, 1.0, 1.0, 0.0),
 ) -> ProofRepresentation:
     """Embed fixed target, current state, and optional verified trajectory."""
-    target_text = f"Fixed theorem target:\n{context.goal.expression}"
-    current_text = f"{render_language_view(context)}\nStructure:\n{render_structure_view(structure)}"
+    target_text = "\n".join(item.content for item in prompt_catalog().messages(
+        "policy_target_embedding", target=context.goal.expression))
+    current_text = "\n".join(item.content for item in prompt_catalog().messages(
+        "policy_current_embedding", language_view=render_language_view(context),
+        structure=render_structure_view(structure)))
     language = _embedded(target_text, encoder.embed_text(target_text, layer=layer))
     structural = _embedded(current_text, encoder.embed_text(current_text, layer=layer))
     transition_text = verified_transition

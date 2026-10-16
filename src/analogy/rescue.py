@@ -24,6 +24,7 @@ from .records import (
     _text_tuple,
     _typed_tuple,
 )
+from .prompts import prompt_catalog
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,28 +415,22 @@ def render_direct_rescue_prompt(context: ProofRescueContext) -> str:
         raise ValueError("context must be a ProofRescueContext")
     accepted = "\n".join(context.accepted_tactics) or "(none)"
     failed = "\n".join(context.failed_tactics) or "(none)"
-    return (
-        f"Overall target:\n{context.goal.expression}\n\n"
-        f"Current goals:\n{context.state.expression}\n\n"
-        f"Accepted prefix:\n{accepted}\n\n"
-        f"Failed tactics:\n{failed}\n\n"
-        'Return one JSON object with exactly the keys "predicted_state" and '
-        '"tactics". predicted_state must describe the expected next Lean goals; '
-        "tactics must be a non-empty list of single-line Lean tactics."
-    )
+    return prompt_catalog().messages(
+        "direct_rescue",
+        overall_target=context.goal.expression,
+        current_goals=context.state.expression,
+        accepted=accepted,
+        failed=failed,
+    )[1].content
 
 
 def render_repair_prompt(raw_text: str, diagnostic: str) -> str:
     if not isinstance(raw_text, str):
         raise ValueError("raw_text must be text")
     _require_text(diagnostic, "diagnostic")
-    return (
-        "The prior response did not satisfy the required JSON schema.\n\n"
-        f"Parser diagnostic:\n{diagnostic}\n\n"
-        f"Prior response:\n{raw_text}\n\n"
-        'Return only one JSON object with exactly "predicted_state" and '
-        '"tactics". Do not include prose or Markdown fences.'
-    )
+    return prompt_catalog().messages(
+        "rescue_repair", diagnostic=diagnostic, raw_text=raw_text
+    )[1].content
 
 
 def render_proof_embeddings(context: ProofRescueContext) -> tuple[str, str]:
@@ -443,20 +438,20 @@ def render_proof_embeddings(context: ProofRescueContext) -> tuple[str, str]:
         raise ValueError("context must be a ProofRescueContext")
     accepted = "\n".join(context.accepted_tactics) or "(none)"
     failed = "\n".join(context.failed_tactics) or "(none)"
-    language = (
-        "Explain the proof's current reasoning need without solving it.\n\n"
-        f"Overall target:\n{context.goal.expression}\n\n"
-        f"Current goals:\n{context.state.expression}\n\n"
-        f"Accepted prefix:\n{accepted}\n\n"
-        f"Failed tactics:\n{failed}"
+    language_messages = prompt_catalog().messages(
+        "proof_language_embedding",
+        overall_target=context.goal.expression,
+        current_goals=context.state.expression,
+        accepted=accepted,
+        failed=failed,
     )
-    structure = (
-        "Describe the Current Lean goals structurally: propositions, hypotheses, "
-        "constructors, dependencies, and unresolved relationships. Abstract from "
-        "identifier spelling. Do not propose tactics.\n\n"
-        f"Overall target:\n{context.goal.expression}\n\n"
-        f"Current Lean goals:\n{context.state.expression}"
+    structure_messages = prompt_catalog().messages(
+        "proof_structure_embedding",
+        overall_target=context.goal.expression,
+        current_goals=context.state.expression,
     )
+    language = "\n\n".join(item.content for item in language_messages)
+    structure = "\n\n".join(item.content for item in structure_messages)
     return language, structure
 
 
@@ -589,13 +584,14 @@ class DirectRescueRunner:
             transition_embedding=zero_embedding_like(representation.language_embedding),
             analogy_embedding=zero_embedding_like(representation.language_embedding),
         )
-        prompt = render_direct_rescue_prompt(context)
-        messages = (
-            Message(
-                "system",
-                "Predict the immediate next proof state and propose bounded Lean 4 rescue tactics.",
-            ),
-            Message("user", prompt),
+        accepted = "\n".join(context.accepted_tactics) or "(none)"
+        failed = "\n".join(context.failed_tactics) or "(none)"
+        messages = prompt_catalog().messages(
+            "direct_rescue",
+            overall_target=context.goal.expression,
+            current_goals=context.state.expression,
+            accepted=accepted,
+            failed=failed,
         )
         attempted = {_canonical_tactic(item.candidate.source) for item in ordinary_attempts}
         rollouts: list[RescueRollout] = []

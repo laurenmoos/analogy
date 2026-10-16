@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from .grounding import GroundingOperator
+
 
 class ConfigError(ValueError):
     """Raised when configuration is missing, malformed, or unexpected."""
@@ -31,6 +33,11 @@ class ModelConfig:
     do_sample: bool
     temperature: float
     top_p: float
+
+
+@dataclass(frozen=True)
+class PromptConfig:
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -64,7 +71,8 @@ class AnalogyConfig:
     rerank_tactics: bool
     strategy: str = "legacy"
     decoder: str = "raw"
-    grounding_repair_calls: int = 1
+    grounding_repair_calls: int = 0
+    grounding_operators: tuple[GroundingOperator, ...] = tuple(GroundingOperator)
 
 
 @dataclass(frozen=True)
@@ -118,6 +126,7 @@ class CurriculumConfig:
     analogies_per_transition: int
     model: ModelConfig | None = None
     model_revision: str = "none"
+    prompts: PromptConfig = PromptConfig(Path("prompts.yaml"))
 
     def __post_init__(self) -> None:
         if self.schema_version != "grounded-curriculum-v1":
@@ -136,7 +145,8 @@ def load_curriculum_config(path: Path) -> CurriculumConfig:
     path = Path(path).expanduser().resolve()
     try:
         root = _mapping(yaml.safe_load(path.read_text()), "config")
-        _validate_keys(root, frozenset({"curriculum", "model"}), "config")
+        root = {"prompts": {"path": "prompts.yaml"}, **root}
+        _validate_keys(root, frozenset({"curriculum", "model", "prompts"}), "config")
         raw = _mapping(root["curriculum"], "curriculum")
         _validate_keys(raw, frozenset({"problems", "reference_proofs", "split_manifest", "output_dir",
                                      "lean_project", "seed", "schema_version", "analogies_per_transition",
@@ -154,18 +164,22 @@ def load_curriculum_config(path: Path) -> CurriculumConfig:
                 _positive_number(item["timeout_seconds"], "model.timeout_seconds"),
                 _boolean(item["do_sample"], "model.do_sample"),
                 _positive_number(item["temperature"], "model.temperature"), _probability(item["top_p"], "model.top_p"))
+        prompt_raw = _mapping(root["prompts"], "prompts")
+        _validate_keys(prompt_raw, frozenset({"path"}), "prompts")
         return CurriculumConfig(**{key: _path(raw[key], f"curriculum.{key}", path.parent)
             for key in ("problems", "reference_proofs", "split_manifest", "output_dir", "lean_project")},
             seed=_integer(raw["seed"], "curriculum.seed"),
             schema_version=_string(raw["schema_version"], "curriculum.schema_version"),
             analogies_per_transition=_integer(raw["analogies_per_transition"], "curriculum.analogies_per_transition"),
-            model=model, model_revision=_string(raw["model_revision"], "curriculum.model_revision"))
+            model=model, model_revision=_string(raw["model_revision"], "curriculum.model_revision"),
+            prompts=PromptConfig(_path(prompt_raw["path"], "prompts.path", path.parent)))
     except (OSError, yaml.YAMLError) as error:
         raise ConfigError(f"curriculum config could not be read: {error}") from error
 
 
 @dataclass(frozen=True)
 class AppConfig:
+    prompts: PromptConfig
     experiment: ExperimentConfig
     model: ModelConfig
     benchmark: BenchmarkConfig
@@ -177,6 +191,7 @@ class AppConfig:
 
 
 _SCHEMA: dict[str, frozenset[str]] = {
+    "prompts": frozenset({"path"}),
     "experiment": frozenset({"stage", "minimum_solved"}),
     "model": frozenset(
         {
@@ -201,6 +216,7 @@ _SCHEMA: dict[str, frozenset[str]] = {
             "tactics_per_iteration", "max_model_calls", "max_lean_calls",
             "transition_embedding_layer", "discount", "iteration_cost",
             "rerank_tactics", "strategy", "decoder", "grounding_repair_calls",
+            "grounding_operators",
         }
     ),
     "rl": frozenset(
@@ -355,7 +371,7 @@ def load_config(path: Path) -> AppConfig:
     for name, keys in _SCHEMA.items():
         section = _mapping(root[name], f"config.{name}")
         if name == "analogy":
-            section = {"strategy": "legacy", "decoder": "raw", "grounding_repair_calls": 1, **section}
+            section = {"strategy": "legacy", "decoder": "raw", "grounding_repair_calls": 0, **section}
         if name == "rl":
             section = {"curriculum_manifest": None, **section}
         _validate_keys(section, keys, f"config.{name}")
@@ -366,6 +382,7 @@ def load_config(path: Path) -> AppConfig:
     benchmark = sections["benchmark"]
     search = sections["search"]
     analogy = sections["analogy"]
+    prompts = sections["prompts"]
     strategy = _string(analogy["strategy"], "config.analogy.strategy")
     if strategy not in {"legacy", "generated_domain"}:
         raise ConfigError("config.analogy.strategy must be legacy or generated_domain")
@@ -375,6 +392,15 @@ def load_config(path: Path) -> AppConfig:
     grounding_repair_calls = _integer(analogy["grounding_repair_calls"], "config.analogy.grounding_repair_calls")
     if grounding_repair_calls not in (0, 1):
         raise ConfigError("config.analogy.grounding_repair_calls must be 0 or 1")
+    operator_names = _string_tuple(
+        analogy["grounding_operators"], "config.analogy.grounding_operators"
+    )
+    try:
+        grounding_operators = tuple(GroundingOperator(name) for name in operator_names)
+    except ValueError as error:
+        raise ConfigError(
+            "config.analogy.grounding_operators must contain GroundingOperator values"
+        ) from error
     rl = sections["rl"]
     run = sections["run"]
     data = sections["data"]
@@ -447,6 +473,9 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError("rl connective splits must be pairwise disjoint")
 
     return AppConfig(
+        prompts=PromptConfig(
+            path=_path(prompts["path"], "config.prompts.path", base)
+        ),
         experiment=ExperimentConfig(
             stage=_string(experiment["stage"], "config.experiment.stage"),
             minimum_solved=_positive_integer(
@@ -483,6 +512,7 @@ def load_config(path: Path) -> AppConfig:
             strategy=strategy,
             decoder=decoder,
             grounding_repair_calls=grounding_repair_calls,
+            grounding_operators=grounding_operators,
             enabled=_boolean(analogy["enabled"], "config.analogy.enabled"),
             samples=_positive_integer(analogy["samples"], "config.analogy.samples"),
             min_iterations=min_iterations,
@@ -581,6 +611,7 @@ __all__ = [
     "DataConfig",
     "ExperimentConfig",
     "ModelConfig",
+    "PromptConfig",
     "RLConfig",
     "RunConfig",
     "SearchConfig",

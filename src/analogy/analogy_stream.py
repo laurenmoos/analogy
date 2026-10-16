@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 
 from .records import Message
+from .prompts import prompt_catalog
 from .rescue import ProofRescueContext, RescueRollout
 
 
@@ -111,29 +112,23 @@ def render_analogy_hop_prompt(
     context: ProofRescueContext, stream: AnalogyStream
 ) -> tuple[Message, ...]:
     history = json.dumps([asdict(hop) for hop in stream.hops], sort_keys=True)
-    return (
-        Message("system", "Generate one explicit analogy step, not a tactic."),
-        Message(
-            "user",
-            f"Target: {context.goal.expression}\nCurrent proof state: {context.state.expression}\n"
-            f"Accepted prefix: {list(context.accepted_tactics)}\nFailed tactics: {list(context.failed_tactics)}\n"
-            f"Prior analogy hops: {history}\nReturn exactly domain, situation, relation_chain, mapping, "
-            "continuation, predicted_consequence, rationale, and boolean stop as JSON.",
-        ),
+    return prompt_catalog().messages(
+        "legacy_analogy_hop",
+        target=context.goal.expression,
+        current_state=context.state.expression,
+        accepted=list(context.accepted_tactics),
+        failed=list(context.failed_tactics),
+        history=history,
     )
 
 
 def render_analogy_tactic_prompt(
     context: ProofRescueContext, stream: AnalogyStream
 ) -> tuple[Message, ...]:
-    return (
-        Message("system", "Decode the cited analogy continuation into Lean tactics."),
-        Message(
-            "user",
-            f"Current proof state: {context.state.expression}\nAnalogy stream: "
-            f"{json.dumps([asdict(hop) for hop in stream.hops], sort_keys=True)}\n"
-            "Return exactly predicted_state, tactics, and motivating_hop_id as JSON.",
-        ),
+    return prompt_catalog().messages(
+        "legacy_analogy_tactic",
+        current_state=context.state.expression,
+        stream=json.dumps([asdict(hop) for hop in stream.hops], sort_keys=True),
     )
 
 

@@ -2,6 +2,9 @@ experiment:
   stage: train_rescue
   minimum_solved: 1
 
+prompts:
+  path: prompts.yaml
+
 model:
   backend: mlx
   name: mlx-community/Qwen3-8B-4bit
@@ -23,7 +26,11 @@ search:
 
 analogy:
   decoder: raw
-  grounding_repair_calls: 1
+  grounding_repair_calls: 0
+  grounding_operators:
+    [exact_local, introduce, apply_implication, iff_forward, iff_backward,
+     rewrite_forward, rewrite_backward, split, select_left, select_right,
+     choose_left, choose_right, cases, contradiction]
   strategy: legacy
   enabled: true
   samples: 1

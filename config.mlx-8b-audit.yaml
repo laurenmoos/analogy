@@ -2,6 +2,9 @@ experiment:
   stage: audit_analogy
   minimum_solved: 1
 
+prompts:
+  path: prompts.yaml
+
 model:
   backend: mlx
   name: mlx-community/Qwen3-8B-4bit
@@ -23,6 +26,10 @@ search:
 
 analogy:
   enabled: true
+  grounding_operators:
+    [exact_local, introduce, apply_implication, iff_forward, iff_backward,
+     rewrite_forward, rewrite_backward, split, select_left, select_right,
+     choose_left, choose_right, cases, contradiction]
   samples: 1
   min_iterations: 1
   max_iterations: 3

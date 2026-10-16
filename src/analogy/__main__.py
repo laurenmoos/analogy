@@ -13,6 +13,7 @@ from .lean_gym.resources import LEAN_PROJECT_ROOT
 from .lean_gym.verifier import LeanSubprocessVerifier
 from .model import ModelConfigurationError, QwenGenerator, run_baseline, run_capability
 from .model_backend import load_model_backend
+from .prompts import configure_prompt_catalog
 from .run_audit import AuditRunError, audit_analogy_run
 from .training import evaluate_direct_rescue, train_direct_rescue
 
@@ -57,6 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "build-grounded-curriculum":
         try:
             curriculum = load_curriculum_config(args.config)
+            configure_prompt_catalog(curriculum.prompts.path)
             summary = build_grounded_curriculum(curriculum, LeanSubprocessVerifier(curriculum.lean_project))
         except (ConfigError, CurriculumError, ValueError, OSError) as error:
             print(f"Curriculum error: {error}", file=sys.stderr)
@@ -70,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 2
+    configure_prompt_catalog(config.prompts.path)
 
     if config.experiment.stage not in {
         "capability",

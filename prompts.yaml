@@ -1,0 +1,333 @@
+prompts:
+  conventional_ranker:
+    version: conventional-ranker-v2
+    system: >-
+      Propose ranked next tactics for Lean 4. Return only a nonempty JSON array of objects with exactly
+      `tactic` and `score`. Each tactic must be one complete line. Scores are nonnegative relative weights.
+      Use only visible identifiers and do not repeat failed tactics. Use Lean 4 syntax: a standalone case
+      split is `cases h`; branch programs use `cases h with | inl hp => ... | inr hq => ...`, never Lean 3
+      syntax such as `cases h with hp hq`.
+    user: |-
+      Overall target:
+      {{overall_target}}
+      Current goals:
+      {{current_goals}}
+      Accepted prefix:
+      {{accepted}}
+      Failed tactics:
+      {{failed}}
+      Return at most {{top_k}} candidates.
+  capability:
+    version: capability-v3
+    system: |-
+      You produce correct, short Lean 4 tactic proofs. Return only a nonempty JSON array of tactic strings, with no Markdown or explanation. Use only identifiers visible in the binders or introduced by you. Do not invent identifiers, theorem names, or tactic names. Binders are already in the local context; introduce only a target implication or negation.
+      Adapt these Lean 4 patterns to the visible names and types:
+      (A : Prop) (ha : A) ⊢ A => ["exact ha"]
+      (A : Prop) ⊢ A → A => ["intro ha", "exact ha"]
+      (A B : Prop) (ha : A) (hb : B) ⊢ A ∧ B => ["constructor", "exact ha", "exact hb"]
+      (A B : Prop) (h : A ∧ B) ⊢ B ∧ A => ["constructor", "exact h.2", "exact h.1"]
+      (A B : Prop) (f : A → B) (ha : A) ⊢ B => ["apply f", "exact ha"]
+      (A B : Prop) (h : A ∨ B) ⊢ B ∨ A => ["cases h with | inl ha => right; exact ha | inr hb => left; exact hb"]
+      (A B : Prop) (h : A ↔ B) ⊢ A → B => ["intro ha", "exact h.mp ha"]
+      (A B : Prop) (f : A → B) (nb : ¬B) ⊢ ¬A => ["intro ha", "apply nb", "exact f ha"]
+      (none) ⊢ ¬False => ["intro h", "exact h"]
+      Return tactics in execution order. No holes.
+    user: |-
+      Binders: {{binders}}
+      Target: {{target}}
+      Return only the JSON tactic array.
+  direct_rescue:
+    version: direct-rescue-v2
+    system: >-
+      Predict the immediate next proof state and propose bounded Lean 4 rescue tactics.
+    user: |-
+      Overall target:
+      {{overall_target}}
+
+      Current goals:
+      {{current_goals}}
+
+      Accepted prefix:
+      {{accepted}}
+
+      Failed tactics:
+      {{failed}}
+
+      Return one JSON object with exactly the keys "predicted_state" and "tactics". predicted_state must describe the expected next Lean goals; tactics must be a non-empty list of single-line Lean tactics.
+  rescue_repair:
+    version: rescue-repair-v1
+    system: >-
+      Repair an invalid proof-rescue JSON response.
+    user: |-
+      The prior response did not satisfy the required JSON schema.
+
+      Parser diagnostic:
+      {{diagnostic}}
+
+      Prior response:
+      {{raw_text}}
+
+      Return only one JSON object with exactly "predicted_state" and "tactics". Do not include prose or Markdown fences.
+  proof_language_embedding:
+    version: proof-language-embedding-v1
+    system: >-
+      Explain the proof's current reasoning need without solving it.
+    user: |-
+      Overall target:
+      {{overall_target}}
+
+      Current goals:
+      {{current_goals}}
+
+      Accepted prefix:
+      {{accepted}}
+
+      Failed tactics:
+      {{failed}}
+  proof_structure_embedding:
+    version: proof-structure-embedding-v1
+    system: >-
+      Describe the current Lean goals structurally: propositions, hypotheses, constructors, dependencies, and unresolved relationships. Abstract from identifier spelling. Do not propose tactics.
+    user: |-
+      Overall target:
+      {{overall_target}}
+
+      Current Lean goals:
+      {{current_goals}}
+  proof_language_view:
+    version: proof-language-view-v1
+    system: >-
+      Represent this proof-search state for a frozen embedding model.
+    user: |-
+      Overall target:
+      {{overall_target}}
+      Current proof state:
+      {{current_state}}
+      Accepted tactics:
+      {{accepted}}
+      Failed tactics:
+      {{failed}}
+  policy_target_embedding:
+    version: policy-target-embedding-v1
+    system: >-
+      Represent the fixed theorem target.
+    user: '{{target}}'
+  policy_current_embedding:
+    version: policy-current-embedding-v1
+    system: >-
+      Represent the current proof need and structural signature.
+    user: |-
+      {{language_view}}
+      Structure:
+      {{structure}}
+  transition_embedding:
+    version: transition-embedding-v1
+    system: >-
+      Represent the change between two proof states.
+    user: |-
+      Before proof state:
+      {{before}}
+      After proof state:
+      {{after}}
+  observed_transition_embedding:
+    version: observed-transition-embedding-v1
+    system: >-
+      Represent one verified proof-state transition.
+    user: |-
+      Before proof state:
+      {{before}}
+      Verified tactic:
+      {{tactic}}
+      After proof state:
+      {{after}}
+  analogy_hop:
+    version: analogy-hop-v2
+    system: >-
+      Generate one explicit analogy reasoning card, not a tactic.
+    user: |-
+      Overall target:
+      {{overall_target}}
+      Current proof state:
+      {{current_state}}
+      Language view hash: {{language_hash}}
+      Structure view hash: {{structure_hash}}
+      Lean structural signature: {{structure}}
+      Accepted tactics: {{accepted}}
+      Failed tactics: {{failed}}
+      Prior analogy hops: {{history}}
+      Prior verified iterations: {{prior}}
+      Generate the next analogy refinement. Return exactly one JSON object with domain, situation, relation_chain, mapping, continuation, predicted_consequence, rationale, and boolean stop. Keep the JSON at most 120 words total.
+  analogy_tactic:
+    version: analogy-tactic-v2
+    system: >-
+      Decode the cited analogy into Lean tactics.
+    user: |-
+      Current proof state:
+      {{current_state}}
+      Lean structural signature: {{structure}}
+      Complete analogy stream: {{stream}}
+      Active motivating hop: {{hop_id}}
+      Generate exactly {{candidate_count}} distinct single-line Lean 4 tactics, ordered strongest first and conditioned on the complete analogy stream. Use Lean 4 syntax only. Return exactly predicted_state, tactics, and motivating_hop_id as JSON.
+  analogy_tactic_repair:
+    version: analogy-tactic-repair-v1
+    system: >-
+      Repair rejected analogy-conditioned tactics using Lean 4 diagnostics.
+    user: |-
+      Current proof state:
+      {{current_state}}
+      Lean structural signature: {{structure}}
+      Complete analogy stream: {{stream}}
+      Rejected plan: {{failed_plan}}
+      Lean verifier feedback: {{rejected}}
+      Generate exactly {{candidate_count}} distinct corrected single-line Lean 4 tactics. Preserve the analogy's line of reasoning, fix the concrete syntax or type error, and do not repeat a rejected tactic. Return exactly predicted_state, tactics, and motivating_hop_id as JSON.
+  schema_repair:
+    version: schema-repair-v1
+    system: >-
+      Correct the prior response to match the requested JSON schema.
+    user: |-
+      {{original_prompt}}
+      The prior output was invalid: {{diagnostic}}
+      Prior output:
+      {{raw}}
+      Return only a corrected JSON object matching the requested schema.
+  source_analogy:
+    version: source-analogy-v3
+    system: >-
+      Generate a concrete non-proof source situation as strict JSON.
+    user: |-
+      Trajectory observation: {{observation}}
+      Neutral proof need: {{need}}
+      Generate a concrete everyday before/after situation that exhibits the needed transformation without restating the proof. Return exactly domain, source_before, source_after, source_roles, relation_chain, transformation, and rationale. Do not emit caller-owned IDs. Allowed enum values: {{enums}}.
+  analogy_alignment:
+    version: analogy-alignment-v2
+    system: >-
+      Align declared source and proof roles as strict JSON.
+    user: |-
+      Trajectory observation: {{observation}}
+      Neutral proof need: {{need}}
+      Source analogy: {{source}}
+      Return exactly mapping, invariant, source_operation, proof_operation, limitation, and confidence. Use only declared roles and do not emit caller-owned IDs.
+  proof_transfer:
+    version: proof-transfer-v2
+    system: >-
+      Translate the alignment into tactic-free proof reasoning as strict JSON.
+    user: |-
+      Trajectory observation: {{observation}}
+      Neutral proof need: {{need}}
+      Source analogy: {{source}}
+      Alignment: {{alignment}}
+      Return exactly active_subgoal, premises, reasoning_steps, predicted_next_subgoal, and completion_expected. Do not emit tactics or caller-owned IDs.
+  transferred_tactic:
+    version: transferred-tactic-v2
+    system: >-
+      Decode the cited proof reasoning transfer into Lean 4 tactics as strict JSON.
+    user: |-
+      Current proof state:
+      {{state}}
+      Lean structural signature: {{structure}}
+      Source analogy: {{source}}
+      Alignment: {{alignment}}
+      Transferred proof reasoning: {{transfer}}
+      Generate exactly {{candidate_count}} distinct single-line Lean 4 tactics. Return exactly predicted_state, tactics, and motivating_transfer_id. motivating_transfer_id must equal {{transfer_id}}.
+  grounded_plan:
+    version: grounded-plan-v2
+    system: >-
+      Ground transferred reasoning as strict typed JSON; never emit raw Lean.
+    user: |-
+      Current verified local proof inventory: {{inventory}}
+      Transferred proof reasoning: {{transfer}}
+      Use only listed inventory IDs and allowed operators. Return exactly motivating_transfer_id, state_fingerprint, bindings, steps, expected_next_subgoal, completion_expected, and surface_hints. Allowed operators: {{operators}}. Lean alone decides correctness.
+  grounded_plan_repair:
+    version: grounded-plan-repair-v2
+    system: >-
+      Repair grounded typed JSON using Lean diagnostics; never emit raw Lean.
+    user: |-
+      Current verified local proof inventory: {{inventory}}
+      Transferred proof reasoning: {{transfer}}
+      Failed grounded plan: {{failed_plan}}
+      Compiled tactics: {{compiled_tactics}}
+      Lean failures: {{failed_attempts}}
+      Return one corrected grounded plan using only listed inventory IDs and allowed operators: {{operators}}.
+  legacy_analogy_hop:
+    version: legacy-analogy-hop-v1
+    system: >-
+      Generate one explicit analogy step, not a tactic.
+    user: |-
+      Target: {{target}}
+      Current proof state: {{current_state}}
+      Accepted prefix: {{accepted}}
+      Failed tactics: {{failed}}
+      Prior analogy hops: {{history}}
+      Return exactly domain, situation, relation_chain, mapping, continuation, predicted_consequence, rationale, and boolean stop as JSON.
+  legacy_analogy_tactic:
+    version: legacy-analogy-tactic-v1
+    system: >-
+      Decode the cited analogy continuation into Lean tactics.
+    user: |-
+      Current proof state: {{current_state}}
+      Analogy stream: {{stream}}
+      Return exactly predicted_state, tactics, and motivating_hop_id as JSON.
+  tactic_rerank:
+    version: tactic-rerank-v1
+    system: >-
+      Rank candidate Lean tactics for the current proof state.
+    user: '{{context}}'
+  progress_audit:
+    version: progress-audit-v2
+    system: >-
+      Audit a logged proof-search iteration without affecting it.
+    user: |-
+      Diagnose this completed analogy-loop iteration after the experiment. You are an observer only: do not assign reward or claim proof correctness.
+      Interpret Lean status as objective evidence: complete is objective proof completion; accepted means a valid tactic and a new remaining goal; error means rejection. Missing stages are unavailable, and schema/compiler failures are failed stages, not zero-quality proof attempts. Compiled candidates are proposals; only executed Lean attempts provide proof evidence. Infrastructure statuses are not logical rejection.
+      Theorem target:
+      {{target}}
+      State before:
+      {{state_before}}
+      Analogy card:
+      {{analogy_card}}
+      Record kind: {{record_kind}}
+      Persisted stage evidence: {{stage_payloads}}
+      Predicted transition:
+      {{predicted_transition}}
+      Executed Lean attempts: {{lean_attempts}}
+      Proposed tactics: {{tactics}}
+      Lean outcomes: {{lean_outcomes}}
+      Lean diagnostics: {{lean_diagnostics}}
+      Search discard reasons: {{discard_reasons}}
+      Actual successor:
+      {{successor}}
+      Embedding surprise: {{surprise}}
+      Loop decision: {{stop_decision}}
+      Choose the earliest stage that best explains the result: analogy, tactic_translation, lean_execution, proof_progress, or working. Return exactly one JSON object with stage, progress_score in [-1,1], analogy_quality in [0,1], confidence in [0,1], diagnosis, evidence, and suggested_fix.
+  progress_audit_repair:
+    version: progress-audit-repair-v1
+    system: >-
+      Repair an invalid post-hoc audit response.
+    user: >-
+      The output failed validation: {{failure}}. Prior output: {{raw}}. Return only the required JSON object with no Markdown or commentary.
+  story_operator:
+    version: story-operator-v1
+    system: >-
+      Choose one configured proof operation through a short everyday story. Return only strict JSON.
+    user: |-
+      Neutral need: {{need_json}}
+      Available items: {{inventory_json}}
+      Allowed operators: {{operators_json}}
+      Return exactly story, operator, and bindings. Bindings map short story roles to listed inventory IDs.
+  ablation_plain:
+    version: ablation-plain-v1
+    system: >-
+      Choose one configured proof operation directly. Return only strict JSON.
+    user: |-
+      Neutral need: {{need_json}}
+      Allowed operators: {{operators_json}}
+      Return exactly operator.
+  ablation_story:
+    version: ablation-story-v1
+    system: >-
+      Write a short everyday story, then choose one configured proof operation. Return only strict JSON.
+    user: |-
+      Neutral need: {{need_json}}
+      Available items: {{inventory_json}}
+      Allowed operators: {{operators_json}}
+      Return exactly story, operator, and bindings.

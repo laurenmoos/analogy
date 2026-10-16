@@ -1,5 +1,7 @@
 # Offline replay uses the pinned package project and explicit theorem groups.
 # To augment, set a local model config, immutable revision, and positive count.
+prompts:
+  path: prompts.yaml
 curriculum:
   schema_version: grounded-curriculum-v1
   problems: src/analogy/lean_gym/corpus/problems.json

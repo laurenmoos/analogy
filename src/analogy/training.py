@@ -48,6 +48,7 @@ from .loop import (
 from .model import QwenProofEncoder, QwenTacticRanker
 from .proof_views import build_proof_views, build_policy_representation, compare_transitions
 from .records import Message, SearchStatus, SymbolicState, TacticStatus
+from .prompts import configure_prompt_catalog, prompt_catalog
 from .replay import (
     JsonlStuckStateStore,
     StuckStateRecord,
@@ -587,6 +588,7 @@ def train_direct_rescue(
     run_id: str | None = None,
     replay_records: Sequence[StuckStateRecord] | None = None,
 ) -> TrainingSummary:
+    configure_prompt_catalog(config.prompts.path)
     if not config.rl.enabled:
         raise ValueError("rescue training requires rl.enabled=true")
     manifest = config.rl.curriculum_manifest
@@ -792,6 +794,7 @@ def evaluate_direct_rescue(
     verifier: Any,
     checkpoint: Path,
 ) -> EvaluationSummary:
+    configure_prompt_catalog(config.prompts.path)
     if not config.rl.enabled:
         raise ValueError("rescue evaluation requires rl.enabled=true")
     checkpoint = Path(checkpoint)
@@ -1380,12 +1383,8 @@ def _new_analogy_runner(
 
     def rerank_tactics(context, plan):
         scores = generator.score_completions(
-            (
-                Message(
-                    "system",
-                    "Rank candidate Lean tactics for the current proof state.",
-                ),
-                Message("user", render_tactic_prompt(context)),
+            prompt_catalog().messages(
+                "tactic_rerank", context=render_tactic_prompt(context)
             ),
             plan.tactics,
         )

@@ -19,6 +19,7 @@ from .analogy_stream import (
 )
 from .proof_views import ProofStructure, ProofViews, render_structure_view
 from .records import Message
+from .prompts import prompt_catalog
 from .rescue import GenerationAttempt, GenerationStatus, ProofRescueContext
 from .rescue import RescueAttempt
 
@@ -70,6 +71,10 @@ class AnalogyGenerationFailure(AnalogyOutputError):
 
 
 def render_hop_prompt(context: AnalogyGenerationContext) -> str:
+    return prompt_catalog().messages("analogy_hop", **_hop_prompt_values(context))[1].content
+
+
+def _hop_prompt_values(context: AnalogyGenerationContext) -> dict[str, object]:
     history = json.dumps(
         [asdict(item) for item in context.stream.hops],
         sort_keys=True,
@@ -80,24 +85,17 @@ def render_hop_prompt(context: AnalogyGenerationContext) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return (
-        f"Overall target:\n{context.proof.goal.expression}\n"
-        f"Current proof state:\n{context.proof.state.expression}\n"
-        f"Language view hash: {context.views.language.provenance.text_hash}\n"
-        f"Structure view hash: {context.views.structure.provenance.text_hash}\n"
-        f"Lean structural signature: {render_structure_view(context.structure)}\n"
-        f"Accepted tactics: {json.dumps(context.proof.accepted_tactics)}\n"
-        f"Failed tactics: {json.dumps(context.proof.failed_tactics)}\n"
-        f"Prior analogy hops: {history}\n"
-        f"Prior verified iterations: {prior}\n"
-        "Generate the next analogy refinement. Return exactly one JSON object with "
-        "domain, situation, relation_chain, mapping, continuation, "
-        "predicted_consequence, rationale, and boolean stop. Keep the JSON at most "
-        "120 words total: domain at most 3 words; situation at most 18 words; "
-        "relation_chain: 2-4 strings of at most 10 words each; mapping: at most "
-        "4 entries with short values; continuation, predicted_consequence, and "
-        "rationale at most 15 words each."
-    )
+    return {
+        "overall_target": context.proof.goal.expression,
+        "current_state": context.proof.state.expression,
+        "language_hash": context.views.language.provenance.text_hash,
+        "structure_hash": context.views.structure.provenance.text_hash,
+        "structure": render_structure_view(context.structure),
+        "accepted": json.dumps(context.proof.accepted_tactics),
+        "failed": json.dumps(context.proof.failed_tactics),
+        "history": history,
+        "prior": prior,
+    }
 
 
 def render_tactic_prompt(
@@ -109,24 +107,24 @@ def render_tactic_prompt(
         or candidate_count <= 0
     ):
         raise ValueError("candidate_count must be a positive integer")
+    return prompt_catalog().messages(
+        "analogy_tactic", **_tactic_prompt_values(context, candidate_count)
+    )[1].content
+
+
+def _tactic_prompt_values(context: TacticGenerationContext, candidate_count: int) -> dict[str, object]:
     stream = json.dumps(
         [asdict(item) for item in context.analogy.stream.hops],
         sort_keys=True,
         separators=(",", ":"),
     )
-    return (
-        f"Current proof state:\n{context.analogy.proof.state.expression}\n"
-        f"Lean structural signature: {render_structure_view(context.analogy.structure)}\n"
-        f"Complete analogy stream: {stream}\n"
-        f"Active motivating hop: {context.active_hop_id}\n"
-        f"Generate exactly {candidate_count} distinct single-line Lean 4 tactics, "
-        "ordered strongest first and conditioned on the complete analogy stream. "
-        "Use Lean 4 syntax only. Prefer short terms built from `intro`, `exact`, "
-        "`apply`, `fun`, `.mp`, `.mpr`, and `rw` when they fit the state. "
-        "Do not use `assume`, `iff.elim`, `iff.elim_left`, semicolon-packed terms, "
-        "or comma-separated tactic programs. Return exactly predicted_state, "
-        "tactics, and motivating_hop_id as JSON."
-    )
+    return {
+        "current_state": context.analogy.proof.state.expression,
+        "structure": render_structure_view(context.analogy.structure),
+        "stream": stream,
+        "hop_id": context.active_hop_id,
+        "candidate_count": candidate_count,
+    }
 
 
 def render_semantic_repair_prompt(
@@ -154,20 +152,15 @@ def render_semantic_repair_prompt(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return (
-        f"Current proof state (repair the same current proof state):\n"
-        f"{context.analogy.proof.state.expression}\n"
-        f"Lean structural signature: {render_structure_view(context.analogy.structure)}\n"
-        f"Complete analogy stream: {stream}\n"
-        f"Rejected plan: {json.dumps(asdict(failed_plan), sort_keys=True)}\n"
-        f"Lean verifier feedback: {json.dumps(rejected, sort_keys=True)}\n"
-        f"Generate exactly {candidate_count} distinct corrected single-line Lean 4 "
-        "tactics. Preserve the analogy's line of reasoning, but fix the concrete "
-        "syntax or type error identified by Lean. Do not repeat a rejected tactic. "
-        "Use Lean 4 syntax only; prefer `intro`, `exact`, `apply`, `fun`, `.mp`, "
-        "`.mpr`, and `rw` when appropriate. Return exactly predicted_state, "
-        "tactics, and motivating_hop_id as JSON."
-    )
+    return prompt_catalog().messages(
+        "analogy_tactic_repair",
+        current_state=context.analogy.proof.state.expression,
+        structure=render_structure_view(context.analogy.structure),
+        stream=stream,
+        failed_plan=json.dumps(asdict(failed_plan), sort_keys=True),
+        rejected=json.dumps(rejected, sort_keys=True),
+        candidate_count=candidate_count,
+    )[1].content
 class AnalogyGenerator:
     def __init__(
         self,
@@ -188,10 +181,7 @@ class AnalogyGenerator:
         parent_id = context.stream.hops[-1].hop_id if context.stream.hops else None
         return _generate_strict(
             generator=self.generator,
-            messages=(
-                Message("system", "Generate one explicit analogy reasoning card, not a tactic."),
-                Message("user", render_hop_prompt(context)),
-            ),
+            messages=prompt_catalog().messages("analogy_hop", **_hop_prompt_values(context)),
             delta=action.delta,
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10,
@@ -231,14 +221,8 @@ class AnalogyTacticGenerator:
     ) -> GeneratedTacticPlan:
         return _generate_strict(
             generator=self.generator,
-            messages=(
-                Message("system", "Decode the cited analogy into Lean tactics."),
-                Message(
-                    "user",
-                    render_tactic_prompt(
-                        context, candidate_count=self.candidate_count
-                    ),
-                ),
+            messages=prompt_catalog().messages(
+                "analogy_tactic", **_tactic_prompt_values(context, self.candidate_count)
             ),
             delta=action.delta,
             hidden_layer=self.hidden_layer,
@@ -264,21 +248,15 @@ class AnalogyTacticGenerator:
         count = self.candidate_count if candidate_count is None else candidate_count
         return _generate_strict(
             generator=self.generator,
-            messages=(
-                Message(
-                    "system",
-                    "Repair rejected analogy-conditioned tactics using Lean 4 diagnostics.",
-                ),
-                Message(
-                    "user",
-                    render_semantic_repair_prompt(
-                        context,
-                        failed_plan,
-                        failed_attempts,
-                        candidate_count=count,
-                    ),
-                ),
-            ),
+            messages=prompt_catalog().messages("analogy_tactic_repair",
+                current_state=context.analogy.proof.state.expression,
+                structure=render_structure_view(context.analogy.structure),
+                stream=json.dumps([asdict(item) for item in context.analogy.stream.hops], sort_keys=True, separators=(",", ":")),
+                failed_plan=json.dumps(asdict(failed_plan), sort_keys=True),
+                rejected=json.dumps([{"tactic": item.proposal.candidate.source,
+                    "diagnostics": list(item.result.diagnostics) or ["Lean rejected tactic"]}
+                    for item in failed_attempts], sort_keys=True),
+                candidate_count=count),
             delta=action.delta,
             hidden_layer=self.hidden_layer,
             seed=self.base_seed + iteration_index * 10 + 6,
@@ -353,14 +331,11 @@ def _generate_strict(
                     diagnostic=str(error),
                 )
             )
-            active_messages = (
-                messages[0],
-                Message(
-                    "user",
-                    (f"{messages[1].content}\n\n" if preserve_repair_context else "")
-                    + f"The prior output was invalid: {error}\nPrior output:\n{raw}\n"
-                    "Return only a corrected JSON object matching the requested schema.",
-                ),
+            active_messages = prompt_catalog().messages(
+                "schema_repair",
+                original_prompt=(messages[1].content if preserve_repair_context else ""),
+                diagnostic=error,
+                raw=raw,
             )
             continue
         attempts.append(

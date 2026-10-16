@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
 
 from .analogy_transfer import (
     ProofReasoningTransfer, TransferOutputError, _exact_object, _parse_object,
 )
+from .grounding import GroundingOperator
 from .proof_inventory import InventoryError, LocalProofInventory
 
 
@@ -17,24 +17,6 @@ GROUNDED_PLAN_SCHEMA_VERSION = "grounded-plan-v1"
 
 class GroundedPlanError(TransferOutputError):
     """A plan does not match the strict schema or its supplied verified state."""
-
-
-class GroundingOperator(str, Enum):
-    EXACT_LOCAL = "exact_local"
-    INTRODUCE = "introduce"
-    APPLY_IMPLICATION = "apply_implication"
-    IFF_FORWARD = "iff_forward"
-    IFF_BACKWARD = "iff_backward"
-    REWRITE_FORWARD = "rewrite_forward"
-    REWRITE_BACKWARD = "rewrite_backward"
-    SPLIT = "split"
-    SELECT_LEFT = "select_left"
-    SELECT_RIGHT = "select_right"
-    CHOOSE_LEFT = "choose_left"
-    CHOOSE_RIGHT = "choose_right"
-    CASES = "cases"
-    CONTRADICTION = "contradiction"
-    COMPOSE = "compose"
 
 
 def _text(value: object, name: str) -> str:

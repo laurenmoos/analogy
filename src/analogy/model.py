@@ -47,6 +47,7 @@ from .records import (
     TacticCandidate,
     TacticStatus,
 )
+from .prompts import configure_prompt_catalog, prompt_catalog
 
 
 class ModelOutputError(ValueError):
@@ -484,22 +485,13 @@ class QwenTacticRanker:
         accepted = "\n".join(state.context) if state.context else "(none)"
         failed_values = tuple(self._failed_tactics_for(state.id))
         failed = "\n".join(failed_values) if failed_values else "(none)"
-        messages = (
-            Message(
-                "system",
-                "Propose ranked next tactics for Lean 4. Return only a nonempty "
-                "JSON array of objects with exactly `tactic` and `score`. Each tactic "
-                "must be one complete line. Scores are nonnegative relative weights. "
-                "Use only visible identifiers and do not repeat failed tactics.",
-            ),
-            Message(
-                "user",
-                f"Overall target:\n{goal.expression}\n"
-                f"Current goals:\n{state.expression}\n"
-                f"Accepted prefix:\n{accepted}\n"
-                f"Failed tactics:\n{failed}\n"
-                f"Return at most {self._top_k} candidates.",
-            ),
+        messages = prompt_catalog().messages(
+            "conventional_ranker",
+            overall_target=goal.expression,
+            current_goals=state.expression,
+            accepted=accepted,
+            failed=failed,
+            top_k=self._top_k,
         )
         try:
             generated = self._generator.generate(messages, seed=self._seed)
@@ -589,39 +581,10 @@ def parse_tactic_candidates(
 def capability_prompt(problem: Problem) -> tuple[Message, ...]:
     """Build a proof prompt without source metadata or reference proofs."""
 
-    return (
-        Message(
-            "system",
-            "You produce correct, short Lean 4 tactic proofs. Return only a "
-            "nonempty JSON array of tactic strings, with no Markdown or explanation. "
-            "Use only identifiers visible in the binders or introduced by you. "
-            "Do not invent identifiers, theorem names, or tactic names. "
-            "Binders are already in the local context; introduce only a target "
-            "implication or negation. Do not invent identifiers.\n"
-            "Adapt these Lean patterns to the visible names and types:\n"
-            '(A : Prop) (ha : A) ⊢ A => ["exact ha"]\n'
-            '(A : Prop) ⊢ A → A => ["intro ha", "exact ha"]\n'
-            '(A B : Prop) (ha : A) (hb : B) ⊢ A ∧ B => '
-            '["constructor", "exact ha", "exact hb"]\n'
-            '(A B : Prop) (h : A ∧ B) ⊢ B ∧ A => '
-            '["constructor", "exact h.2", "exact h.1"]\n'
-            '(A B : Prop) (f : A → B) (ha : A) ⊢ B => '
-            '["apply f", "exact ha"]\n'
-            '(A B : Prop) (h : A ∨ B) ⊢ B ∨ A => '
-            '["cases h with | inl ha => right; exact ha | inr hb => left; exact hb"]\n'
-            '(A B : Prop) (h : A ↔ B) ⊢ A → B => '
-            '["intro ha", "exact h.mp ha"]\n'
-            '(A B : Prop) (f : A → B) (nb : ¬B) ⊢ ¬A => '
-            '["intro ha", "apply nb", "exact f ha"]\n'
-            '(none) ⊢ ¬False => ["intro h", "exact h"]\n'
-            "Return tactics in execution order. No holes.",
-        ),
-        Message(
-            "user",
-            f"Binders: {problem.binders or '(none)'}\n"
-            f"Target: {problem.target}\n"
-            "Return only the JSON tactic array.",
-        ),
+    return prompt_catalog().messages(
+        "capability",
+        binders=problem.binders or "(none)",
+        target=problem.target,
     )
 
 
@@ -653,6 +616,7 @@ def run_capability(
 ) -> tuple[CapabilityResult, ...]:
     """Generate and Lean-verify one tactic sequence for every benchmark problem."""
 
+    configure_prompt_catalog(config.prompts.path)
     run_started = time.monotonic()
     run_id = uuid.uuid4().hex
     run_directory = config.run.output_dir / "capability" / run_id
@@ -817,6 +781,7 @@ def run_baseline(
 ) -> BenchmarkRun:
     """Run the conventional top-k proof-state search without analogy or RL."""
 
+    configure_prompt_catalog(config.prompts.path)
     if config.analogy.enabled or config.rl.enabled:
         raise ModelConfigurationError(
             "baseline requires analogy.enabled=false and rl.enabled=false"

@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 from .records import Message
+from .prompts import prompt_catalog
 
 
 class AuditStage(str, Enum):
@@ -333,61 +334,32 @@ class LLMProcessJudge:
 
 def _judge_messages(iteration: AuditIteration) -> tuple[Message, ...]:
     successor = iteration.actual_transition or "No accepted successor"
-    prompt = (
-        "Diagnose this completed analogy-loop iteration after the experiment. "
-        "You are an observer only: do not assign reward or claim proof correctness.\n"
-        "Interpret Lean status as objective evidence: `complete` is objective proof completion; "
-        "`accepted` means a valid tactic with the actual successor as the new remaining goal after the tactic; "
-        "`error` means rejection. Diagnostics attached to complete or accepted results may be linter warnings "
-        "or proof-state echoes, not failures. The state before is a residual goal after an accepted tactic prefix, "
-        "so judge the current iteration rather than demanding it solve the original target alone.\n"
-        "Missing stages are unavailable, and schema/compiler failures are failed stages, not zero-quality proof attempts. "
-        "Compiled candidates are proposals; only executed Lean attempts provide proof evidence. "
-        "Lean infrastructure statuses (timeout, resource exhaustion, infrastructure_error, etc.) are infrastructure "
-        "failures, not logical rejections or proof progress. Do not infer acceptance from compilation or model prose.\n"
-        "A timeout/internal_error verification_status overrides the legacy error label as an infrastructure failure.\n"
-        "Apply these stage constraints: when any Lean status is `complete`, stage must be `working` and "
-        "progress_score must be 1. When there is an accepted successor, stage must be `working` or "
-        "`proof_progress`, never `lean_execution` or `tactic_translation`; changing the goal is the normal "
-        "meaning of tactic application. Use `proof_progress` only when the valid successor stalls, repeats, "
-        "or moves away from completion.\n"
-        f"Theorem target:\n{iteration.target}\n"
-        f"State before:\n{iteration.state_before}\n"
-        f"Analogy card:\n{iteration.analogy_card}\n"
-        f"Record kind: {iteration.record_kind}\n"
-        f"Persisted stage evidence: {json.dumps(iteration.stage_payloads, sort_keys=True)}\n"
-        f"Predicted transition:\n{iteration.predicted_transition}\n"
-        f"Executed Lean attempts: {json.dumps([asdict(item) for item in iteration.lean_attempts])}\n"
-        f"Proposed tactics: {json.dumps(iteration.tactics)}\n"
-        f"Lean outcomes: {json.dumps(iteration.lean_outcomes)}\n"
-        f"Lean diagnostics: {json.dumps(iteration.lean_diagnostics)}\n"
-        f"Search discard reasons: {json.dumps(iteration.discard_reasons)}\n"
-        f"Actual successor:\n{successor}\n"
-        f"Embedding surprise: {iteration.surprise}\n"
-        f"Loop decision: {iteration.stop_decision}\n"
-        "Choose the earliest stage that best explains the result: analogy, "
-        "tactic_translation, lean_execution, proof_progress, or working. Return "
-        "exactly one JSON object with stage, progress_score in [-1,1], "
-        "analogy_quality in [0,1], confidence in [0,1], diagnosis, evidence, "
-        "and suggested_fix. Keep each text field under 400 characters."
-    )
-    return (
-        Message("system", "Audit a logged proof-search iteration without affecting it."),
-        Message("user", prompt),
+    return prompt_catalog().messages(
+        "progress_audit",
+        target=iteration.target,
+        state_before=iteration.state_before,
+        analogy_card=iteration.analogy_card,
+        record_kind=iteration.record_kind,
+        stage_payloads=json.dumps(iteration.stage_payloads, sort_keys=True),
+        predicted_transition=iteration.predicted_transition,
+        lean_attempts=json.dumps([asdict(item) for item in iteration.lean_attempts]),
+        tactics=json.dumps(iteration.tactics),
+        lean_outcomes=json.dumps(iteration.lean_outcomes),
+        lean_diagnostics=json.dumps(iteration.lean_diagnostics),
+        discard_reasons=json.dumps(iteration.discard_reasons),
+        successor=successor,
+        surprise=iteration.surprise,
+        stop_decision=iteration.stop_decision,
     )
 
 
 def _repair_messages(
     original: tuple[Message, ...], raw: str, failure: str
 ) -> tuple[Message, ...]:
-    return original + (
-        Message("assistant", raw or "<empty output>"),
-        Message(
-            "user",
-            f"The output failed validation: {failure}. Return only the required "
-            "JSON object with no Markdown or commentary.",
-        ),
+    repair = prompt_catalog().messages(
+        "progress_audit_repair", failure=failure, raw=raw or "<empty output>"
     )
+    return original + (Message("assistant", raw or "<empty output>"), repair[1])
 
 
 def _operation_seed(

@@ -1,0 +1,13 @@
+# Offline replay uses the pinned package project and explicit theorem groups.
+# To augment, set a local model config, immutable revision, and positive count.
+curriculum:
+  schema_version: grounded-curriculum-v1
+  problems: src/analogy/lean_gym/corpus/problems.json
+  reference_proofs: src/analogy/lean_gym/corpus/reference_proofs.json
+  split_manifest: src/analogy/lean_gym/corpus/curriculum_splits.json
+  lean_project: src/analogy/lean_gym/lean_project
+  output_dir: runs/grounded-curriculum
+  seed: 0
+  analogies_per_transition: 0
+  model_revision: none
+model: null

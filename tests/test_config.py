@@ -10,6 +10,33 @@ def _config_module():
     return importlib.import_module("analogy.config")
 
 
+def test_curriculum_profile_loads_strict_pinned_paths_and_rejects_unknown_keys(tmp_path):
+    import yaml
+    module = _config_module()
+    profile = Path(__file__).parents[1] / "config.grounded-curriculum.yaml"
+    config = module.load_curriculum_config(profile)
+    assert config.problems.is_file() and config.reference_proofs.is_file()
+    assert config.split_manifest.is_file()
+    assert (config.lean_project / "lean-toolchain").is_file()
+    assert config.analogies_per_transition == 0
+    assert config.model is None
+    raw = yaml.safe_load(profile.read_text())
+    raw["curriculum"]["guess_splits"] = True
+    invalid = tmp_path / "invalid.yaml"
+    invalid.write_text(yaml.safe_dump(raw))
+    with pytest.raises(module.ConfigError, match="unknown"):
+        module.load_curriculum_config(invalid)
+
+
+@pytest.mark.parametrize("field,value", [("seed", True), ("analogies_per_transition", -1),
+    ("schema_version", "future"), ("model_revision", "")])
+def test_curriculum_rejects_invalid_identity_fields(tmp_path, field, value):
+    from dataclasses import replace
+    from test_grounded_curriculum import config
+    with pytest.raises(_config_module().ConfigError):
+        replace(config(tmp_path), **{field: value})
+
+
 def _valid_yaml() -> str:
     return """\
 experiment:

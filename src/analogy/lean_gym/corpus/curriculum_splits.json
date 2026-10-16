@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "train": [
+    "and_intro_01", "and_intro_02", "and_intro_03",
+    "imp_intro_01", "imp_intro_02", "imp_intro_03", "imp_intro_04", "imp_intro_05",
+    "or_intro_01", "or_intro_03", "or_intro_04", "or_intro_05", "or_intro_06", "iff_intro_05"
+  ],
+  "validation": ["and_intro_04", "not_intro_01", "not_intro_02", "not_intro_03", "not_intro_04", "not_intro_05"],
+  "test": ["and_intro_05", "iff_intro_01", "iff_intro_02", "iff_intro_03", "iff_intro_04"]
+}

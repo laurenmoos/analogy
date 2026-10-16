@@ -11,6 +11,17 @@ from analogy.records import BaselineProblemResult, BaselineStatus, BenchmarkRun,
 ROOT = Path(__file__).parents[1]
 
 
+def test_curriculum_cli_builds_without_loading_any_model(monkeypatch, tmp_path, capsys):
+    from test_grounded_curriculum import config, PrefixVerifier, rows
+    cfg = config(tmp_path)
+    monkeypatch.setattr(cli, "load_curriculum_config", lambda path: cfg)
+    monkeypatch.setattr(cli, "LeanSubprocessVerifier", PrefixVerifier)
+    monkeypatch.setattr(cli, "load_model_backend", lambda config: (_ for _ in ()).throw(AssertionError("model load")))
+    assert cli.main(["build-grounded-curriculum", "--config", "unused.yaml"]) == 0
+    assert "2/2 retained" in capsys.readouterr().out
+    assert len(rows(cfg.output_dir / "transitions.jsonl")) == 2
+
+
 def test_generated_profile_cli_writes_connected_trace(monkeypatch, tmp_path, capsys):
     """Catch broken generated-profile composition or missing trace finalization."""
     import json

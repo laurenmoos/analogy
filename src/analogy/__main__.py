@@ -7,7 +7,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, load_curriculum_config
+from .grounded_curriculum import CurriculumError, build_grounded_curriculum
 from .lean_gym.resources import LEAN_PROJECT_ROOT
 from .lean_gym.verifier import LeanSubprocessVerifier
 from .model import ModelConfigurationError, QwenGenerator, run_baseline, run_capability
@@ -18,6 +19,7 @@ from .training import evaluate_direct_rescue, train_direct_rescue
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analogical Lean experiment runner")
+    parser.add_argument("command", nargs="?", choices=("build-grounded-curriculum",))
     parser.add_argument(
         "--config",
         type=Path,
@@ -52,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "build-grounded-curriculum":
+        try:
+            curriculum = load_curriculum_config(args.config)
+            summary = build_grounded_curriculum(curriculum, LeanSubprocessVerifier(curriculum.lean_project))
+        except (ConfigError, CurriculumError, ValueError, OSError) as error:
+            print(f"Curriculum error: {error}", file=sys.stderr)
+            return 2
+        print(f"build-grounded-curriculum: {summary.retained}/{summary.attempted} retained; "
+              f"nonterminal={summary.nonterminal}; completions={summary.completions}; variants={summary.variants}")
+        print(f"manifest: {summary.manifest_path}")
+        return 0
     try:
         config = load_config(args.config)
     except ConfigError as error:

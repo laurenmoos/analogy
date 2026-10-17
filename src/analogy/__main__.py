@@ -1,4 +1,4 @@
-"""Command-line composition root for configured experiments."""
+"""Single command-line composition root for proof search."""
 
 from __future__ import annotations
 
@@ -6,182 +6,105 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from .experiments.activation_cli import build_activation_parser, run_activation_eval
 
-from .config import ConfigError, load_config, load_curriculum_config
-from .grounded_curriculum import CurriculumError, build_grounded_curriculum
-from .lean_gym.resources import LEAN_PROJECT_ROOT
-from .lean_gym.verifier import LeanSubprocessVerifier
-from .model import ModelConfigurationError, QwenGenerator, run_baseline, run_capability
-from .model_backend import load_model_backend
-from .prompts import configure_prompt_catalog
-from .run_audit import AuditRunError, audit_analogy_run
-from .training import evaluate_direct_rescue, train_direct_rescue
+from .config import ConfigError
+from .inference.model_provider import ModelConfigurationError
+from .runtime import get_runtime, with_analogy_enabled
+from .solver.inference import SolveRun, solve_problems
+
+
+def render_report(run: SolveRun) -> str:
+    """Render one runtime invocation."""
+
+    lines: list[str] = []
+    for result in run.inference.results:
+        lines.append(
+            f"{result.status.value.upper()} {result.problem_id}: "
+            f"lean_calls={result.verifier_call_count}, "
+            f"analogy_fallbacks={result.analogy_fallback_count}"
+        )
+    fallback_count = sum(
+        result.analogy_fallback_count for result in run.inference.results
+    )
+    lines.extend((
+        "",
+        f"SUMMARY: analogy={'on' if run.analogy_enabled else 'off'}, "
+        f"solved={run.inference.solved_count}/{run.inference.attempted_count}, "
+        f"analogy_fallbacks={fallback_count}",
+    ))
+    return "\n".join(lines)
+
+
+def run_solve(args: argparse.Namespace) -> int:
+    """Solve configured problems, using analogy retries only when Lean gets stuck."""
+
+    runtime = get_runtime(args.config)
+    config = with_analogy_enabled(runtime.config, args.analogy_enabled)
+
+    print(f"MODEL: {config.model.name}")
+    print(f"PROBLEMS: {len(runtime.problems)} from {config.benchmark.corpus}")
+    print(
+        f"SEARCH: top_k={config.search.top_k}, "
+        f"max_steps={config.search.max_steps}, seed={config.run.seed}"
+    )
+    print(
+        f"ANALOGY: {'enabled' if config.analogy.enabled else 'disabled'}; "
+        f"schema calls per stuck state={config.analogy.max_model_calls}"
+    )
+    print("DIVERSITY: frozen-model 3-nearest-neighbor cosine novelty")
+    print("JUDGE: Lean\n")
+    run = solve_problems(
+        config,
+        runtime.problems,
+        runtime.model,
+        runtime.verifier,
+    )
+    print(render_report(run))
+    print(f"\nDETAILS: {run.output_directory}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analogical Lean experiment runner")
-    parser.add_argument("command", nargs="?", choices=("build-grounded-curriculum",))
-    parser.add_argument(
+    parser = argparse.ArgumentParser(description="Lean proof model runner")
+    commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser(
+        "solve", help="solve every configured problem with analogy retries"
+    )
+    command.add_argument(
         "--config",
         type=Path,
         default=Path("config.yaml"),
-        help="path to the experiment configuration",
+        help="configuration file (default: config.yaml)",
     )
-    parser.add_argument(
-        "--audit-source",
-        type=Path,
-        help="completed rescue run to inspect after an audit_analogy experiment",
+    analogy = command.add_mutually_exclusive_group()
+    analogy.add_argument(
+        "--analogy",
+        dest="analogy_enabled",
+        action="store_true",
+        help="enable one-tactic analogy fallback after conventional stuckness",
     )
-    parser.add_argument(
-        "--audit-output",
-        type=Path,
-        help="separate output directory for post-hoc audit artifacts",
+    analogy.add_argument(
+        "--no-analogy",
+        dest="analogy_enabled",
+        action="store_false",
+        help="disable analogy fallback",
     )
-    parser.add_argument("--audit-seed", type=int, help="post-hoc judge seed")
-    parser.add_argument(
-        "--audit-max-calls",
-        type=int,
-        default=100,
-        help="maximum total judge model calls, including schema repairs",
-    )
-    parser.add_argument(
-        "--audit-max-repair-calls",
-        type=int,
-        default=1,
-        help="schema-repair attempts per judgment",
-    )
-    parser.epilog = "Standalone measurement: analogy activation-eval --help"
+    command.set_defaults(analogy_enabled=None)
+    command.set_defaults(handler=run_solve)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] == "activation-eval":
-        try:
-            args = build_activation_parser().parse_args(arguments)
-            return args.handler(args)
-        except (ConfigError, ModelConfigurationError, OSError, ValueError) as error:
-            print(f"Error: {error}", file=sys.stderr)
-            return 2
     args = build_parser().parse_args(argv)
-    if args.command == "build-grounded-curriculum":
-        try:
-            curriculum = load_curriculum_config(args.config)
-            configure_prompt_catalog(curriculum.prompts.path)
-            summary = build_grounded_curriculum(curriculum, LeanSubprocessVerifier(curriculum.lean_project))
-        except (ConfigError, CurriculumError, ValueError, OSError) as error:
-            print(f"Curriculum error: {error}", file=sys.stderr)
-            return 2
-        print(f"build-grounded-curriculum: {summary.retained}/{summary.attempted} retained; "
-              f"nonterminal={summary.nonterminal}; completions={summary.completions}; variants={summary.variants}")
-        print(f"manifest: {summary.manifest_path}")
-        return 0
     try:
-        config = load_config(args.config)
-    except ConfigError as error:
-        print(f"Configuration error: {error}", file=sys.stderr)
+        return args.handler(args)
+    except (ConfigError, ModelConfigurationError, OSError, ValueError) as error:
+        print(f"Error: {error}", file=sys.stderr)
         return 2
-    configure_prompt_catalog(config.prompts.path)
-
-    if config.experiment.stage not in {
-        "capability",
-        "baseline",
-        "train_rescue",
-        "evaluate_rescue",
-        "audit_analogy",
-    }:
-        print(
-            f"Unsupported experiment stage: {config.experiment.stage}",
-            file=sys.stderr,
-        )
-        return 2
-    if config.experiment.stage in {"train_rescue", "evaluate_rescue"}:
-        if not config.rl.enabled:
-            print(
-                "Rescue stages require rl.enabled=true",
-                file=sys.stderr,
-            )
-            return 2
-        if config.experiment.stage == "evaluate_rescue" and config.rl.checkpoint is None:
-            print(
-                "evaluate_rescue requires rl.checkpoint",
-                file=sys.stderr,
-            )
-            return 2
-    if config.experiment.stage == "audit_analogy":
-        missing = [
-            name
-            for name, value in (
-                ("--audit-source", args.audit_source),
-                ("--audit-output", args.audit_output),
-            )
-            if value is None
-        ]
-        if missing:
-            print(
-                f"audit_analogy requires {' and '.join(missing)}",
-                file=sys.stderr,
-            )
-            return 2
-    try:
-        generator = load_model_backend(config.model)
-    except ModelConfigurationError as error:
-        print(f"Model configuration error: {error}", file=sys.stderr)
-        return 2
-    if config.experiment.stage == "audit_analogy":
-        assert args.audit_source is not None and args.audit_output is not None
-        try:
-            summary = audit_analogy_run(
-                args.audit_source,
-                args.audit_output,
-                generator,
-                config.benchmark.corpus,
-                seed=(config.run.seed if args.audit_seed is None else args.audit_seed),
-                max_calls=args.audit_max_calls,
-                max_repair_calls=args.audit_max_repair_calls,
-            )
-        except (AuditRunError, ValueError) as error:
-            print(f"Audit error: {error}", file=sys.stderr)
-            return 2
-        print(
-            f"audit_analogy: {summary.judged}/{summary.attempted} judged; "
-            f"failures={summary.failures}"
-        )
-        return 0
-    verifier = LeanSubprocessVerifier(LEAN_PROJECT_ROOT)
-    if config.experiment.stage == "capability":
-        results = run_capability(config, generator, verifier)
-        solved = sum(item.solved for item in results)
-        print(f"capability: {solved}/{len(results)} solved")
-        for result in results:
-            disposition = "solved" if result.solved else result.failure
-            print(f"{result.problem_id}: {disposition}; tactics={list(result.tactics)!r}")
-        passed = solved >= config.experiment.minimum_solved
-        print(f"gate: {'passed' if passed else 'failed'}")
-        return 0 if passed else 1
-
-    if config.experiment.stage == "train_rescue":
-        train_direct_rescue(config, generator, verifier, progress=print)
-        return 0
-
-    if config.experiment.stage == "evaluate_rescue":
-        assert config.rl.checkpoint is not None
-        evaluate_direct_rescue(
-            config, generator, verifier, config.rl.checkpoint, progress=print
-        )
-        return 0
-
-    run = run_baseline(config, generator, verifier)
-    print(f"baseline: {run.solved_count}/{run.attempted_count} solved")
-    print(f"stuck states: {run.stuck_state_count}")
-    print(f"invalid tactics: {run.invalid_tactic_count}")
-    print(f"verifier calls: {run.verifier_call_count}")
-    return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["build_parser", "main"]
+__all__ = ["build_parser", "main", "render_report", "run_solve"]

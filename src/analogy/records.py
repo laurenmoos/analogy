@@ -289,7 +289,7 @@ class SearchStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class BaselineStatus(str, Enum):
+class InferenceStatus(str, Enum):
     COMPLETE = "complete"
     EXHAUSTED = "exhausted"
     BUDGET_EXHAUSTED = "budget_exhausted"
@@ -442,29 +442,6 @@ class Message:
         _require_text(self.content, "content")
 
 
-@dataclass(frozen=True, slots=True)
-class CapabilityResult:
-    problem_id: str
-    tactics: tuple[str, ...]
-    solved: bool
-    failure: str | None
-    elapsed_seconds: float
-
-    def __post_init__(self) -> None:
-        _require_text(self.problem_id, "problem_id")
-        object.__setattr__(self, "tactics", _text_tuple(self.tactics, "tactics"))
-        if not isinstance(self.solved, bool):
-            raise ValueError("solved must be a bool")
-        if self.failure is not None:
-            _require_text(self.failure, "failure")
-        if self.solved and self.failure is not None:
-            raise ValueError("solved results must not include a failure")
-        elapsed = _finite_float(self.elapsed_seconds, "elapsed_seconds")
-        if elapsed < 0.0:
-            raise ValueError("elapsed_seconds must be non-negative")
-        object.__setattr__(self, "elapsed_seconds", elapsed)
-
-
 def _nonnegative_integer(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field} must be a non-negative integer")
@@ -472,9 +449,9 @@ def _nonnegative_integer(value: object, field: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class BaselineProblemResult:
+class InferenceProblemResult:
     problem_id: str
-    status: BaselineStatus
+    status: InferenceStatus
     proof: str | None
     failure: str | None
     expansion_count: int
@@ -483,12 +460,13 @@ class BaselineProblemResult:
     repeated_state_count: int
     no_progress_count: int
     stuck_state_count: int
+    analogy_fallback_count: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.problem_id, "problem_id")
-        if not isinstance(self.status, BaselineStatus):
-            raise ValueError("status must be a BaselineStatus")
-        if self.status is BaselineStatus.COMPLETE:
+        if not isinstance(self.status, InferenceStatus):
+            raise ValueError("status must be an InferenceStatus")
+        if self.status is InferenceStatus.COMPLETE:
             _require_text(self.proof, "proof")
             if self.failure is not None:
                 raise ValueError("complete results must not include failure")
@@ -503,14 +481,15 @@ class BaselineProblemResult:
             "repeated_state_count",
             "no_progress_count",
             "stuck_state_count",
+            "analogy_fallback_count",
         ):
             _nonnegative_integer(getattr(self, field), field)
 
 
 @dataclass(frozen=True, slots=True)
-class BenchmarkRun:
+class InferenceRun:
     run_id: str
-    results: tuple[BaselineProblemResult, ...]
+    results: tuple[InferenceProblemResult, ...]
     elapsed_seconds: float
 
     def __post_init__(self) -> None:
@@ -518,7 +497,7 @@ class BenchmarkRun:
         object.__setattr__(
             self,
             "results",
-            _typed_tuple(self.results, BaselineProblemResult, "results"),
+            _typed_tuple(self.results, InferenceProblemResult, "results"),
         )
         elapsed = _finite_float(self.elapsed_seconds, "elapsed_seconds")
         if elapsed < 0.0:
@@ -531,12 +510,12 @@ class BenchmarkRun:
 
     @property
     def solved_count(self) -> int:
-        return sum(item.status is BaselineStatus.COMPLETE for item in self.results)
+        return sum(item.status is InferenceStatus.COMPLETE for item in self.results)
 
     @property
     def model_failure_count(self) -> int:
         return sum(
-            item.status is BaselineStatus.MODEL_FAILURE for item in self.results
+            item.status is InferenceStatus.MODEL_FAILURE for item in self.results
         )
 
     @property

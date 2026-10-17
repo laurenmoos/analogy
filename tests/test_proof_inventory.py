@@ -5,10 +5,10 @@ from dataclasses import FrozenInstanceError, asdict
 
 import pytest
 
-from analogy.proof_inventory import InventoryError, InventoryKind, build_local_inventory
-from analogy.proof_views import ProofStructure
+from analogy.solver.proof_inventory import InventoryError, InventoryKind, build_local_inventory
+from analogy.solver.proof_views import ProofStructure
 from analogy.records import SymbolicState
-from analogy.replay import proof_state_fingerprint
+from analogy.solver.replay import proof_state_fingerprint
 
 
 def shape(root: str, *children: str) -> str:

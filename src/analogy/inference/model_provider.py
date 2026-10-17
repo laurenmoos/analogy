@@ -122,6 +122,8 @@ class ModelProvider(TextGenerator, Protocol):
 
     def embed_text(self, text: str, *, layer: int) -> Embedding: ...
 
+    def embed_text_with_usage(self, text: str, *, layer: int) -> tuple[Embedding, int]: ...
+
     def score_completions(
         self,
         messages: tuple[Message, ...],
@@ -416,12 +418,7 @@ class QwenGenerator:
     ) -> tuple[CompletionScore, ...]:
         if not completions or any(not item.strip() for item in completions):
             raise ModelConfigurationError("scoring completions must be nonempty")
-        rendered = self._tokenizer.apply_chat_template(
-            [{"role": item.role, "content": item.content} for item in messages],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
+        rendered = _render_completion_prompt(self._tokenizer, messages)
         prompt_ids = tuple(
             int(item)
             for item in self._tokenizer.encode(rendered, add_special_tokens=False)
@@ -580,6 +577,18 @@ class QwenGenerator:
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
+    def embed_text_with_usage(self, text: str, *, layer: int) -> tuple[Embedding, int]:
+        embedding = self.embed_text(text, layer=layer)
+        encoded = self._tokenizer([text], padding=True)
+        mask = encoded.get("attention_mask")
+        if mask is None:
+            raise ModelConfigurationError("tokenizer must return an attention mask")
+        row = mask[0]
+        count = int(row.sum().item()) if hasattr(row, "sum") and hasattr(row.sum(), "item") else int(sum(row))
+        if count <= 0:
+            raise ModelConfigurationError("embedding tokenization must be nonempty")
+        return embedding, count
+
 
 def _resolve_hidden_layer(layer: int, count: int) -> int:
     if isinstance(layer, bool) or not isinstance(layer, int):
@@ -629,10 +638,7 @@ def _finite_delta_values(delta: Any, *, size: int | None = None) -> tuple[float,
 def _encode_completion(tokenizer: Any, messages: tuple[Message, ...], completion: str, *, allow_empty: bool = False) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if not isinstance(completion, str) or (not allow_empty and not completion.strip()):
         raise ModelConfigurationError("scoring completion must be nonempty")
-    rendered = tokenizer.apply_chat_template(
-        [{"role": item.role, "content": item.content} for item in messages],
-        tokenize=False, add_generation_prompt=True, enable_thinking=False,
-    )
+    rendered = _render_completion_prompt(tokenizer, messages)
     prompt_ids = tuple(int(item) for item in tokenizer.encode(rendered, add_special_tokens=False))
     completion_ids = tuple(int(item) for item in tokenizer.encode(completion, add_special_tokens=False))
     if not prompt_ids:
@@ -640,6 +646,18 @@ def _encode_completion(tokenizer: Any, messages: tuple[Message, ...], completion
     if not completion_ids and not allow_empty:
         raise ModelConfigurationError("completion tokenization must be nonempty")
     return prompt_ids, completion_ids
+
+
+def _render_completion_prompt(tokenizer: Any, messages: tuple[Message, ...]) -> str:
+    rendered = [{"role": item.role, "content": item.content} for item in messages]
+    if messages and messages[-1].role == "assistant":
+        return tokenizer.apply_chat_template(
+            rendered, tokenize=False, add_generation_prompt=False,
+            continue_final_message=True, enable_thinking=False,
+        )
+    return tokenizer.apply_chat_template(
+        rendered, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+    )
 
 
 def _create_model_provider(config: ModelConfig) -> ModelProvider:

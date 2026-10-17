@@ -1,17 +1,13 @@
-experiment:
-  stage: baseline
-  minimum_solved: 1
-
 prompts:
   path: prompts.yaml
 
 model:
-  backend: transformers
-  name: Qwen/Qwen3-8B
-  device: auto
+  backend: mlx
+  name: mlx-community/Qwen3-8B-4bit
+  device: mps
   hidden_layer: -1
-  max_new_tokens: 256
-  timeout_seconds: 60.0
+  max_new_tokens: 512
+  timeout_seconds: 45.0
   do_sample: false
   temperature: 0.3
   top_p: 0.9
@@ -20,63 +16,14 @@ benchmark:
   corpus: src/analogy/lean_gym/corpus/problems.json
 
 search:
-  top_k: 8
-  max_steps: 32
-  stuck_after: 3
+  top_k: 3
+  max_steps: 8
+  stuck_after: 2
 
 analogy:
-  decoder: raw
-  grounding_repair_calls: 0
-  grounding_operators:
-    [exact_local, introduce, apply_implication, iff_forward, iff_backward,
-     rewrite_forward, rewrite_backward, split, select_left, select_right,
-     choose_left, choose_right, cases, contradiction]
-  strategy: legacy
-  enabled: false
-  samples: 4
-  min_iterations: 1
-  max_iterations: 6
-  surprise_threshold: 0.2
-  surprise_patience: 2
-  min_surprise_improvement: 0.05
-  improvement_patience: 2
-  tactics_per_iteration: 4
-  max_model_calls: 18
-  max_lean_calls: 12
-  transition_embedding_layer: -1
-  discount: 0.95
-  iteration_cost: 0.01
-  rerank_tactics: false
-
-rl:
-  enabled: false
-  algorithm: reinforce
-  rollouts_per_state: 4
-  tactics_per_rollout: 4
-  hidden_width: 256
-  max_delta_norm: 2.0
-  initial_log_scale: -2.0
-  learning_rate: 0.0001
-  entropy_weight: 0.001
-  max_gradient_norm: 1.0
-  completion_reward: 1.0
-  progress_reward: 0.1
-  rejection_reward: -0.1
-  invalid_output_reward: -0.05
-  empty_output_reward: -0.02
-  hop_cost: 0.01
-  max_rescue_verifier_calls: 8
-  epochs: 10
-  checkpoint_interval: 1
-  checkpoint: null
-  train_connectives: [implication, and, or]
-  validation_connectives: [not]
-  test_connectives: [iff]
+  enabled: true
+  max_model_calls: 3
 
 run:
-  output_dir: runs
+  output_dir: .artifacts/runs
   seed: 0
-
-data:
-  root: /tmp/analogy-data
-

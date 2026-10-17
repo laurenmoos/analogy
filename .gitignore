@@ -5,11 +5,8 @@ node_modules/
 .superpowers/
 .worktrees/
 data/
-results/
+.artifacts/
 .venv/
-runs/
-runs-fast/
-runs-grounded/
 __pycache__/
 *.py[cod]
 *.egg-info/

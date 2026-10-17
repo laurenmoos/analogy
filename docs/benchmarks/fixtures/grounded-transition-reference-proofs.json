@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "proofs": [
-    {"problem_id": "imp_intro_02", "tactics": ["intro analogy_h", "exact analogy_h"]},
-    {"problem_id": "not_intro_05", "tactics": ["intro analogy_h", "exact h2 (h1 analogy_h)"]},
-    {"problem_id": "iff_intro_03", "tactics": ["intro analogy_h", "exact h1.mp (h2 analogy_h)"]},
-    {"problem_id": "iff_intro_04", "tactics": ["intro analogy_h", "apply h2", "exact h1.mpr analogy_h"]}
-  ]
-}

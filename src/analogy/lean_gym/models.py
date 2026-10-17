@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from types import MappingProxyType
-from typing import Any, Mapping
 
 
 _TEMP_PATH = re.compile(r"(?:/[^\s:]+/)?lean-gym-[^/\s:]+/[^\s:]+\.lean(?::\d+:\d+)?")
@@ -82,40 +80,3 @@ class VerificationResult:
 class ReferenceProof:
     problem_id: str
     tactics: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class TraceEvent:
-    schema_version: int
-    session_id: str
-    problem_id: str
-    event_index: int
-    event_type: str
-    timestamp: str
-    payload: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
-
-    def to_dict(self) -> dict[str, Any]:
-        envelope = {
-            "schema_version": self.schema_version,
-            "session_id": self.session_id,
-            "problem_id": self.problem_id,
-            "event_index": self.event_index,
-            "event_type": self.event_type,
-            "timestamp": self.timestamp,
-        }
-        collisions = envelope.keys() & self.payload.keys()
-        if collisions:
-            raise ValueError(f"trace payload collides with envelope: {sorted(collisions)}")
-        return {**envelope, **self.payload}
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayResult:
-    matched: bool
-    checked_events: int
-    divergent_event_index: int | None = None
-    expected: Mapping[str, Any] | None = None
-    actual: Mapping[str, Any] | None = None

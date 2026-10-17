@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from analogy.prompts import PromptCatalog, PromptError
+from analogy.inference.prompts import (
+    PromptCatalog,
+    PromptError,
+    render_lean_goal_for_model,
+)
+
+
+ROOT = Path(__file__).parents[1]
 
 
 def write_catalog(path: Path, text: str) -> Path:
@@ -55,16 +62,27 @@ def test_prompt_catalog_rejects_missing_extra_and_unknown_prompt_values(tmp_path
         catalog.messages("missing")
 
 
-@pytest.mark.parametrize("name,values", [
-    ("activation_source_analogy", {"domain_cue": "mechanical", "need_json": "{}"}),
-    ("activation_alignment", {"source_json": "{}", "need_json": "{}"}),
-    ("activation_transfer", {"source_json": "{}", "alignment_json": "{}", "need_json": "{}"}),
-    ("activation_tactic", {"overall_target": "P", "current_state": "⊢ P", "accepted": "(none)", "failed": "(none)", "previous_transition": "(omitted)", "candidate_json": "{}", "candidate_count": 4}),
-])
-def test_activation_catalog_renders_explicit_transfer_stages(name, values):
-    catalog = PromptCatalog.load(Path(__file__).parents[1] / "prompts.yaml")
-    messages = catalog.messages(name, **values)
-    assert len(messages) == 2
-    assert all("{{" not in message.content for message in messages)
-    with pytest.raises(PromptError, match="required="):
-        catalog.messages(name)
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("¬P", "¬P  [definitionally: P → False]"),
+        ("P : Prop\n⊢ ¬P", "P : Prop\n⊢ ¬P  [definitionally: P → False]"),
+        ("P : Prop\n⊢ P", "P : Prop\n⊢ P"),
+    ],
+)
+def test_negation_goals_are_also_shown_as_implications(source, expected):
+    assert render_lean_goal_for_model(source) == expected
+
+
+def test_analogy_fallback_requests_exactly_one_tactic():
+    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
+    values = {
+        "overall_target": "P",
+        "current_goals": "P",
+        "accepted": "(none)",
+        "failed": "(none)",
+    }
+    prompt = "\n".join(message.content for message in catalog.messages("analogy_rescue", **values))
+
+    assert 'singular "tactic"' in prompt
+    assert "exactly one complete single-line Lean 4 command" in prompt

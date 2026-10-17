@@ -12,7 +12,8 @@ from typing import Any, Callable
 from ..config import ModelConfig
 from .model_provider import (
     CompletionActivationTrace, CompletionScore, LayerActivation, ModelConfigurationError,
-    _encode_completion, _finite_delta_values, _resolve_decoder_layers, _validate_capture_layers,
+    _encode_completion, _finite_delta_values, _render_completion_prompt,
+    _resolve_decoder_layers, _validate_capture_layers,
 )
 from ..records import Embedding, Message
 
@@ -317,6 +318,13 @@ class MLXQwenGenerator:
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
+    def embed_text_with_usage(self, text: str, *, layer: int) -> tuple[Embedding, int]:
+        embedding = self.embed_text(text, layer=layer)
+        token_ids = tuple(int(item) for item in self.tokenizer.encode(text, add_special_tokens=False))
+        if not token_ids:
+            raise ModelConfigurationError("embedding tokenization must be nonempty")
+        return embedding, len(token_ids)
+
     def score_completions(
         self,
         messages: tuple[Message, ...],
@@ -324,12 +332,7 @@ class MLXQwenGenerator:
     ) -> tuple[CompletionScore, ...]:
         if not completions or any(not item.strip() for item in completions):
             raise ModelConfigurationError("scoring completions must be nonempty")
-        prompt = self.tokenizer.apply_chat_template(
-            [{"role": item.role, "content": item.content} for item in messages],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
+        prompt = _render_completion_prompt(self.tokenizer, messages)
         prompt_ids = tuple(
             int(item)
             for item in self.tokenizer.encode(prompt, add_special_tokens=False)

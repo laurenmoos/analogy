@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import subprocess
 import os
-import sys
-from pathlib import Path
 
 from analogy.lean_gym.resources import LEAN_PROJECT_ROOT
 
 
-ROOT = Path(__file__).parents[1]
 LEAN_ENV = {**os.environ, "ELAN_TOOLCHAIN": "leanprover/lean4:v4.29.1"}
 
 
@@ -33,16 +30,3 @@ def test_pinned_lean_project_builds_with_expected_version() -> None:
         env=LEAN_ENV,
     )
     assert build.returncode == 0, build.stderr
-
-
-def test_module_entry_point_displays_help() -> None:
-    result = subprocess.run(
-        [sys.executable, "-m", "analogy.lean_gym", "--help"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"PYTHONPATH": str(ROOT / "src")},
-    )
-    assert result.returncode == 0, result.stderr
-    assert "Lean logic proof REPL" in result.stdout

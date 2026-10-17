@@ -287,3 +287,16 @@ def test_signed_configured_weights_are_renormalized_and_zero_sum_is_unscorable()
     assert result.weighted_components == (-2.0, 2.0, None)
     assert result.selection_score == 0.0
     assert score_candidate(raw, calibration=calibration(), weights=(-1.0, 1.0, 0.0)).selection_score is None
+
+
+def test_two_layer_selection_patches_only_configured_intervention_layer():
+    neutral = (trace(((1, (0., 0.)), (3, (0., 0.)))),)
+    target = calibration(mean=(0.,) * 4, variance=(1.,) * 4,
+                         component_center=(0., 0., 0.), component_scale=(1., 1., 1.))
+    first = measured(candidate_id="early", neutral_traces=neutral,
+        analogy_traces=(trace(((1, (100., 0.)), (3, (0., 0.)))),), calibration=target, weights=(0., 1., 0.))
+    second = measured(candidate_id="late", neutral_traces=neutral,
+        analogy_traces=(trace(((1, (0., 0.)), (3, (2., 0.)))),), calibration=target, weights=(0., 1., 0.))
+    assert first.reasoning_displacement == 10000.0 and first.causal_effect == 0.0
+    assert second.reasoning_displacement == 4.0 and second.causal_effect == 2.0
+    assert select_candidate((first, second), calibration=target, weights=(0., 1., 0.)).candidate_id == "late"

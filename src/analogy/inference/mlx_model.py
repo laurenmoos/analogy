@@ -147,6 +147,25 @@ class MLXQwenGenerator:
             self._generation_prompt_tokens(messages), seed=seed
         )
 
+    def generate_with_usage(self, messages: tuple[Message, ...], *, seed: int):
+        from .model_provider import GenerationResult
+        layers = self._layers()
+        original = layers[0]
+        class Counter:
+            positions = 0
+            def __getattr__(self, name):
+                return getattr(original, name)
+            def __call__(self, hidden, *args, **kwargs):
+                self.positions += int(hidden.shape[0]) * int(hidden.shape[1])
+                return original(hidden, *args, **kwargs)
+        counter = Counter()
+        layers[0] = counter
+        try:
+            text = self.generate(messages, seed=seed)
+        finally:
+            layers[0] = original
+        return GenerationResult(text, counter.positions or None, None if counter.positions else "no measured decoder steps")
+
     @property
     def decoder_layer_count(self) -> int:
         return len(self._layers())
@@ -157,6 +176,9 @@ class MLXQwenGenerator:
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int:
         prompt_ids, completion_ids = _encode_completion(self.tokenizer, messages, completion, allow_empty=True)
         return len(prompt_ids) + len(completion_ids)
+
+    def estimate_generation_positions(self, messages: tuple[Message, ...]) -> int:
+        return len(self._generation_prompt_tokens(messages)) + self.max_new_tokens
 
     def capture_completion_trace(
         self, messages: tuple[Message, ...], completion: str, *, layers: tuple[int, ...]

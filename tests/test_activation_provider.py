@@ -243,3 +243,110 @@ def test_float16_zero_patch_preserves_residual_dtype_and_exact_completion_score(
     patched = engine.score_completion_with_delta(MESSAGES, "answer", delta=(0., 0.), layer=0)
     assert patched == baseline
     assert model.model.layers[1].inputs[-1].dtype == torch.float16
+
+
+def test_generation_usage_counts_real_steps_including_invisible_tokens(provider, monkeypatch):
+    engine, model, backend = provider
+    # A prefill of three IDs, a visible token and an invisible special token
+    # actually consumed by the model: decode returns only "answer" (two IDs
+    # if retokenized). Counting decoder inputs must yield six, not five.
+    def generation(*args, **kwargs):
+        for ids in ([[1, 2, 3]], [[4]], [[0]], [[5]]):
+            model(torch.tensor(ids))
+        return "answer"
+    if backend == "transformers":
+        monkeypatch.setattr(engine, "_prepare_generation", lambda _: {})
+    else:
+        monkeypatch.setattr(engine, "_generation_prompt_tokens", lambda _: [1, 2, 3])
+    monkeypatch.setattr(engine, "_run_generation", generation)
+    original = model.model.layers[0]
+    result = engine.generate_with_usage(MESSAGES, seed=9)
+    assert result.text == "answer" and result.processed_token_positions == 6
+    assert model.model.layers[0] is original
+    assert not original._forward_pre_hooks
+
+
+def test_capture_and_usage_hooks_cleanup_on_failure(provider, monkeypatch):
+    engine, model, backend = provider
+    original = model.model.layers[0]
+    model.fail = True
+    with pytest.raises(RuntimeError):
+        engine.capture_completion_trace(MESSAGES, "answer", layers=(0, 1))
+    assert model.model.layers[0] is original and not original._forward_hooks
+    def failure(*args, **kwargs):
+        model(torch.tensor([[1, 2, 3]]))
+    monkeypatch.setattr(engine, "_run_generation", failure)
+    if backend == "transformers":
+        monkeypatch.setattr(engine, "_prepare_generation", lambda _: {})
+    else:
+        monkeypatch.setattr(engine, "_generation_prompt_tokens", lambda _: [1, 2, 3])
+    with pytest.raises(RuntimeError):
+        engine.generate_with_usage(MESSAGES, seed=9)
+    assert model.model.layers[0] is original and not original._forward_pre_hooks
+
+
+def test_transformers_tuple_outputs_preserve_metadata_and_cleanup():
+    class TupleBlock(Block):
+        def forward(self, hidden):
+            return super().forward(hidden), "cache-metadata"
+    class TupleModel(TinyModel):
+        def forward(self, input_ids, **kwargs):
+            hidden, metadata = self.model.layers[0](self.model.embed_tokens(input_ids))
+            assert metadata == "cache-metadata"
+            return SimpleNamespace(logits=hidden[..., :1] * torch.arange(8) / 200)
+    model = TupleModel()
+    model.model.layers = [TupleBlock(1)]
+    engine = providers.QwenGenerator(tokenizer=Tokenizer(), model=model, torch_module=torch,
+        device="cpu", max_new_tokens=8, timeout_seconds=60)
+    baseline = engine.capture_completion_trace(MESSAGES, "answer", layers=(0,))
+    assert baseline.activations[0].values == (5.5, 10.0)
+    changed = engine.score_completion_with_delta(MESSAGES, "answer", delta=(2., 0.), layer=0)
+    assert changed.total_log_likelihood != baseline.score.total_log_likelihood
+    assert not model.model.layers[0]._forward_hooks
+
+
+def test_seeded_sampling_topups_add_distinct_canonical_tactics(provider, monkeypatch):
+    from analogy.experiments import activation_runner as runner
+    from analogy.experiments.activation_generation import generate_neutral_slate
+    from analogy.experiments.activation_records import ActivationCondition
+    from test_activation_runner import setup
+    from test_activation_generation import tactics
+    engine, model, backend = provider
+    data = setup()
+    cfg = data[0]
+    app = cfg.generation_config(data[1])
+    def sampled(*args, **kwargs):
+        model(torch.tensor([[1, 2, 3]]))
+        if backend == "transformers":
+            assert kwargs["do_sample"] and kwargs["temperature"] == app.model.temperature
+            token = int(torch.randint(1, 1000, (1,)).item())
+            return [[1, 2, 3, token]]
+        assert kwargs["sampler"] == {"temp": app.model.temperature, "top_p": app.model.top_p}
+        return tactics(f"exact h{int(torch.randint(1, 1000, (1,)).item())}")
+    if backend == "transformers":
+        engine._do_sample, engine._temperature, engine._top_p = True, app.model.temperature, app.model.top_p
+        monkeypatch.setattr(engine, "_prepare_generation", lambda _: {"input_ids": torch.tensor([[1, 2, 3]])})
+        monkeypatch.setattr(model, "generate", sampled, raising=False)
+        monkeypatch.setattr(engine._tokenizer, "decode", lambda ids, **kwargs: tactics(f"exact h{ids[-1]}"), raising=False)
+    else:
+        engine.do_sample, engine.temperature, engine.top_p = True, app.model.temperature, app.model.top_p
+        engine.mx.random = SimpleNamespace(seed=torch.manual_seed)
+        engine._make_sampler = lambda **kwargs: kwargs
+        engine._generate_fn = sampled
+        monkeypatch.setattr(engine, "_generation_prompt_tokens", lambda _: [1, 2, 3])
+    context = runner._context(data[3][0])
+    initial = generate_neutral_slate(engine, context, seed=4)
+    slate = runner._arm_slate(initial, seed=4)
+    cell = runner.PreLeanCell(data[3][0], context, initial, (), (), (), (), (), "ready")
+    topped = runner._topup(slate, ActivationCondition.NEUTRAL, cell, engine, cfg, app, 10000, 8)
+    assert len(topped.tactics) > 1
+    assert runner._topup(slate, ActivationCondition.NEUTRAL, cell, engine, cfg, app, 10000, 8).tactics == topped.tactics
+
+
+@pytest.mark.parametrize("name", [None, "organization/model"])
+def test_transformers_repository_label_is_unresolved_provenance(name):
+    model = TinyModel()
+    model.config.name_or_path = name
+    engine = providers.QwenGenerator(tokenizer=Tokenizer(), model=model, torch_module=torch,
+        device="cpu", max_new_tokens=8, timeout_seconds=60)
+    assert engine.model_revision == "unresolved:" + (name or "unknown")

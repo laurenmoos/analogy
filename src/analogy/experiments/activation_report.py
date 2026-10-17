@@ -1,7 +1,7 @@
 """Exclusive, append-and-flush experiment journals and descriptive reports.
 
-Resume starts only at a fully frozen selection checkpoint. Default checkpoints
-retain pooled-vector summary statistics, likelihoods and the *recorded* winner;
+Collection resumes from atomic working checkpoints. After freezing, default
+artifacts retain vector summaries, likelihoods and the *recorded* winner;
 they cannot recalibrate or reselect. No pickle or arbitrary imports are used.
 """
 from __future__ import annotations
@@ -23,13 +23,13 @@ from typing import get_args, get_origin, get_type_hints
 
 from .. import config as config_module, records as records_module
 from ..inference import model_provider
-from ..solver import diversity, rescue
+from ..solver import diversity, rescue, proof_views
 from ..transfer import domain
 from . import activation_generation, activation_metrics, activation_records, activation_runner as runner
 from .activation_records import ActivationCondition
 
-SCHEMA_VERSION = "activation-analogy-artifacts-v2"
-_MODULES = (config_module, records_module, model_provider, diversity, rescue, domain,
+SCHEMA_VERSION = "activation-analogy-artifacts-v3"
+_MODULES = (config_module, records_module, model_provider, diversity, rescue, proof_views, domain,
             activation_generation, activation_metrics, activation_records, runner)
 _TYPES = {cls.__name__: cls for module in _MODULES for cls in vars(module).values()
           if isinstance(cls, type) and is_dataclass(cls)}
@@ -60,7 +60,11 @@ def _encode(value, *, vectors=False):
     if isinstance(value, Path):
         return {"$path": str(value)}
     if is_dataclass(value):
-        return {"$type": type(value).__name__, **{f.name: _encode(getattr(value, f.name), vectors=vectors) for f in fields(value)}}
+        result = {"$type": type(value).__name__, **{f.name: _encode(getattr(value, f.name), vectors=vectors) for f in fields(value)}}
+        if isinstance(value, activation_metrics.ScoredCandidateMeasurement) and not vectors:
+            result["patch_deltas"] = []
+            result["patch_delta_summaries"] = [{"dimensions": len(v), "norm": math.hypot(*v), "sha256": _hash(v)} for v in value.patch_deltas] or list(value.patch_delta_summaries)
+        return result
     if isinstance(value, dict):
         return {str(k): _encode(v, vectors=vectors) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
@@ -124,6 +128,20 @@ def _atomic_new(path, text):
         os.link(temporary, path)  # atomic, exclusive publication
     finally:
         os.unlink(temporary)
+
+
+def _atomic_replace(path, text):
+    """Commit a whole transaction; interruption leaves the previous file intact."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _rows(path):
@@ -274,6 +292,24 @@ class ActivationArtifactWriter:
     def evaluation_cells(self):
         return tuple(tuple(key) for key in self._metadata()["evaluation_cells"])
 
+    def load_manifest(self):
+        saved = self.load_collection()
+        anchors = tuple(_decode(a) for a in _rows(self.path / "anchors.jsonl"))
+        cells = tuple(runner.PreLeanCell(a, runner._context(a), None, (), (), (), (), (), "pending") for a in anchors)
+        return replace(saved, cells=cells)
+
+    def write_structures(self, structures):
+        self._mutable()
+        payload = [[list(key), _encode(value)] for key, value in structures.items()]
+        _atomic_new(self.path / "structures.json", _json({"identity_hash": self._metadata()["identity_hash"],
+                     "structures": payload, "sha256": _hash(payload)}) + "\n")
+
+    def load_structures(self):
+        payload = json.loads((self.path / "structures.json").read_text())
+        if payload["identity_hash"] != self._metadata()["identity_hash"] or payload["sha256"] != _hash(payload["structures"]):
+            raise ValueError("structure checkpoint identity/hash mismatch")
+        return {tuple(key): _decode(value) for key, value in payload["structures"]}
+
     def validate_identity(self, identity):
         self._require_lock()
         saved = self._metadata()["identity"]
@@ -302,22 +338,91 @@ class ActivationArtifactWriter:
             os.fsync(stream.fileno())
 
     def append_collection(self, cell):
-        self._append("collection.jsonl", _encode(cell))
+        self._mutable()
+        if (self.path / "frozen.json").exists():
+            raise FileExistsError("collection is already frozen")
+        saved = self.load_collection()
+        index = len(saved.cells)
+        anchors = _rows(self.path / "anchors.jsonl")
+        if index >= len(anchors) or _encode(cell.anchor) != anchors[index]:
+            raise ValueError("collection cell must match next manifest anchor")
+        payload = _encode(cell, vectors=True)
+        # Working recovery data is needed for cross-fit; deleted after freeze.
+        envelope = {"identity_hash": self._metadata()["identity_hash"], "cell": payload, "sha256": _hash(payload)}
+        _atomic_new(self.path / f".collection-{index:06d}.json", _json(envelope) + "\n")
+        _atomic_replace(self.path / "collection.jsonl", "".join(_json(_encode(c)) + "\n" for c in (*saved.cells, cell)))
+
+    def collection_provider(self, provider, anchor):
+        """Replay durable model results within an interrupted collection cell.
+
+        This private working journal contains vectors needed for calibration;
+        it is removed once the immutable frozen checkpoint is published.
+        """
+        self._mutable()
+        if (self.path / "frozen.json").exists():
+            raise FileExistsError("collection is already frozen")
+        metadata = self._metadata()
+        if _encode(anchor) not in _rows(self.path / "anchors.jsonl"):
+            raise ValueError("collection provider anchor is outside the manifest")
+        writer = self
+        prefix = _hash(_encode(anchor))
+        operations = {"generate_with_usage", "capture_completion_trace", "score_completion_with_delta", "score_completions"}
+        class CheckpointProvider:
+            index = 0
+            def __getattr__(self, name):
+                method = getattr(provider, name)
+                if name not in operations:
+                    return method
+                def invoke(*args, **kwargs):
+                    writer._mutable()
+                    path = writer.path / f".model-{prefix}-{self.index:06d}.json"
+                    request = _encode((name, args, kwargs), vectors=True)
+                    if path.exists():
+                        saved = json.loads(path.read_text())
+                        if saved["identity_hash"] != metadata["identity_hash"] or saved["request"] != request:
+                            raise ValueError("collection operation request/identity mismatch")
+                        if saved["sha256"] != _hash(saved["result"]):
+                            raise ValueError("collection operation result hash mismatch")
+                        result = _decode(saved["result"])
+                    else:
+                        result = method(*args, **kwargs)
+                        payload = _encode(result, vectors=True)
+                        _atomic_new(path, _json({"identity_hash": metadata["identity_hash"], "request": request,
+                                               "result": payload, "sha256": _hash(payload)}) + "\n")
+                    self.index += 1
+                    return result
+                return invoke
+        return CheckpointProvider()
+
+    def load_collection(self):
+        metadata = self._metadata()
+        anchors = _rows(self.path / "anchors.jsonl")
+        cells = []
+        for path in sorted(self.path.glob(".collection-*.json")):
+            envelope = json.loads(path.read_text())
+            payload = envelope["cell"]
+            if envelope["identity_hash"] != metadata["identity_hash"] or envelope["sha256"] != _hash(payload):
+                raise ValueError("collection checkpoint identity/hash mismatch")
+            if len(cells) >= len(anchors) or payload["anchor"] != anchors[len(cells)]:
+                raise ValueError("collection checkpoint anchor order mismatch")
+            cells.append(_decode(payload))
+        return runner.PreLeanCollection(_decode(metadata["config"]), _decode(metadata["app_config"]), tuple(cells),
+                                       tuple(metadata["layers"]), metadata["model_revision"])
 
     def write_frozen(self, selections):
         self._mutable()
-        if (self.path / "prelean.jsonl").stat().st_size or (self.path / "frozen.json").exists():
+        if (self.path / "frozen.json").exists():
             raise FileExistsError("frozen selections already recorded")
         metadata = self._metadata()
         self.validate_identity(resume_identity(selections.collection, evaluation_cells=self.evaluation_cells()))
         if [_encode(c.prelean.anchor) for c in selections.cells] != _rows(self.path / "anchors.jsonl"):
             raise ValueError("frozen checkpoint anchor manifest mismatch")
-        for cell in selections.cells:
-            self._append("prelean.jsonl", _encode(cell))
+        _atomic_replace(self.path / "prelean.jsonl", "".join(_json(_encode(cell, vectors=selections.collection.config.persist_full_activations)) + "\n" for cell in selections.cells))
         metadata["prelean_sha256"] = hashlib.sha256((self.path / "prelean.jsonl").read_bytes()).hexdigest()
         metadata["checkpoint_hash"] = _hash({"identity_hash": metadata["identity_hash"],
                                             "prelean_sha256": metadata["prelean_sha256"]})
         _atomic_new(self.path / "frozen.json", _json(metadata) + "\n")
+        self._discard_working_collection()
         if selections.collection.config.persist_full_activations:
             with (self.path / "activation_vectors.jsonl.gz").open("xb") as raw:
                 with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as stream:
@@ -344,6 +449,12 @@ class ActivationArtifactWriter:
         collection = runner.PreLeanCollection(_decode(resolved["config"]), _decode(resolved["app_config"]),
             tuple(c.prelean for c in cells), tuple(resolved["layers"]), resolved["model_revision"])
         return runner.FrozenSelections(collection, cells)
+
+    def _discard_working_collection(self):
+        self._require_lock()
+        for pattern in (".collection-*.json", ".model-*.json"):
+            for path in self.path.glob(pattern):
+                path.unlink()
 
     @staticmethod
     def _trial_rows(trial):
@@ -386,8 +497,7 @@ class ActivationArtifactWriter:
             raise FileExistsError("trial cell already journaled")
         additions = self._trial_rows(trial)
         self._validated_trials([*rows, *additions])
-        for row in additions:
-            self._append("trials.jsonl", row)
+        _atomic_replace(self.path / "trials.jsonl", "".join(_json(row) + "\n" for row in (*rows, *additions)))
 
     def load_trials(self, *, require_complete=False):
         return self._validated_trials(_rows(self.path / "trials.jsonl"), require_complete=require_complete)
@@ -409,6 +519,7 @@ class ActivationArtifactWriter:
     def finalize(self, run):
         self._require_lock()
         frozen = self.load_frozen()
+        self._discard_working_collection()
         journal = self.load_trials(require_complete=True)
         if _encode(journal) != _encode(run.trials):
             raise ValueError("finalization run does not match the trial journal")
@@ -487,6 +598,8 @@ def summarize_activation_run(run):
                 positions = [o.processed_token_positions for _, o in all_pairs]
                 calls = sum(o.lean_calls for _, o in all_pairs)
                 progressed = sum(o.immediate_utility == "accepted_progressing" for o in outcomes)
+                rescue_calls = sum(o.rescue_lean_calls for o in outcomes)
+                causal = [value for o in outcomes for _, value in o.verified_tactic_causal_effects]
                 rows.append({
                     "problem_id": problem, "role": "positive control" if problem in _POSITIVE else "hard negative" if problem in _HARD else "test",
                     "condition": arm.value, "budget_view": view, "cells": len(trials), "eligible": len(outcomes),
@@ -495,7 +608,14 @@ def summarize_activation_run(run):
                     "failed_selection": sum(t.status == "failed_selection" for t in trials),
                     "solves": sum(values), "solve_rate": _mean(values),
                     "solve_rate_descriptive_ci95": descriptive_interval(values, seed=config.seed_start),
-                    "accepted_progressing": progressed, "progress_per_lean_call": progressed / calls if calls else None,
+                    "accepted_progressing": progressed, "progress_per_lean_call": progressed / rescue_calls if rescue_calls else None,
+                    "eligible_rescue_lean_calls": rescue_calls,
+                    "immediate_rescue_solves": sum(o.immediate_utility == "completed" for o in outcomes),
+                    "continuation_solves": sum(o.completed and o.immediate_utility != "completed" for o in outcomes),
+                    "verified_tactic_causal_effect": _mean(causal),
+                    "verified_tactic_causal_coverage": sum(v is not None for v in causal) / len(causal) if causal else None,
+                    "verified_tactic_causal_measured": sum(v is not None for v in causal),
+                    "verified_tactic_causal_submitted": len(causal),
                     "tactic_rejections": labels["rejected"], "infrastructure_failures": infrastructure,
                     "reasoning_displacement": _mean(m.reasoning_displacement for m in scores if m),
                     "patch_likelihood_effect": _mean(m.causal_effect for m in scores if m),
@@ -559,7 +679,7 @@ def render_activation_report(run) -> str:
     lines = ["# Activation-selected analogy evaluation", "",
              f"Model revision: `{run.collection.model_revision}`; resolved layers: {run.collection.layers}.",
              "Uncertainty is descriptive paired-seed bootstrap (95% percentile intervals), not inferential; six problems do not support population claims.",
-             "Equal tactic/Lean budget measures selection quality including its extra model work. Equal compute caps rescue model token positions; continuation work is separately metered.",
+             "Equal tactic/Lean budget measures selection quality including its extra model work. Equal compute caps all solve-contributing token positions, including continuation and post-selection causal diagnostics. Continuation is separately metered and stops before a call that cannot fit.",
              "no_stuck_anchor and invalid_usage cells are excluded from rescue denominators; failed_selection remains a failed rescue. Infrastructure failures retain their typed labels.", "",
              "| Problem | Role | Budget | Condition | Eligible | no_stuck_anchor | invalid_usage | failed_selection | solves | solve rate [CI95] | accepted_progressing / Lean call | Infrastructure | Rejections |",
              "|---|---|---|---|---:|---:|---:|---:|---:|---|---|---|---:|"]
@@ -578,6 +698,12 @@ def render_activation_report(run) -> str:
         lines.append("| " + " | ".join(_display(row[k]) for k in ("problem_id", "budget_view", "condition", "reasoning_displacement",
             "patch_likelihood_effect", "predecessor_value", "causal_ranking_changes", "unique_successor_states", "proof_state_novelty",
             "processed_token_positions", "continuation_token_positions", "lean_calls", "elapsed_seconds")) + " |")
+    lines.extend(["", "Post-selection causal effect on tactics actually submitted to Lean (including rejected submissions). The selected arm reuses union scores; new final tactics receive separately charged diagnostics after the winner freezes. Coverage is measured/submitted immediate-rescue tactics; continuation tactics are outside this metric. Union-wide patch likelihood above is a separate selection statistic.", "",
+                  "| Problem | Budget | Condition | Immediate solves | Continuation solves | Verified-tactic causal effect | Coverage |",
+                  "|---|---|---|---:|---:|---:|---:|"])
+    for row in summary["rows"]:
+        lines.append("| " + " | ".join(_display(row[k]) for k in ("problem_id", "budget_view", "condition",
+            "immediate_rescue_solves", "continuation_solves", "verified_tactic_causal_effect", "verified_tactic_causal_coverage")) + " |")
     lines.extend(["", "Exact paired solve counts (selected vs comparator):", "",
                   "| Problem | Budget | Comparator | Selected only | Comparator only | Both | Neither | Difference CI95 |",
                   "|---|---|---|---:|---:|---:|---:|---|"])

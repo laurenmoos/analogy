@@ -1,4 +1,7 @@
 schema_version: activation-analogy-v1
+decoding:
+  temperature: 0.8
+  top_p: 0.95
 base_config: config.yaml
 problem_ids:
   - imp_intro_05

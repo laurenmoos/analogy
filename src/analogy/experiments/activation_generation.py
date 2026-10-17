@@ -75,13 +75,21 @@ def _limit(value: int) -> int:
 
 
 def _run(provider: Any, messages: tuple[Message, ...], parser: Callable, seed: int):
-    run = PromptRunner(provider).run(messages, parser=parser, seed=seed, max_attempts=1)
-    # Runtime failures carry no completion; exact usage is unavailable rather
-    # than an estimated word/character count. Keep the runtime diagnostic.
-    positions = sum(
-        provider.count_token_positions(messages, attempt.raw_text)
-        for attempt in run.attempts if attempt.status is not GenerationStatus.RUNTIME_ERROR
-    )
+    positions = 0
+    usage_error = None
+    def generate(active, active_seed):
+        nonlocal positions, usage_error
+        result = provider.generate_with_usage(active, seed=active_seed)
+        if result.processed_token_positions is None:
+            usage_error = result.diagnostic or "generation usage unavailable"
+        else:
+            positions += result.processed_token_positions
+        return result.text
+    run = PromptRunner(provider).run(messages, parser=parser, seed=seed, max_attempts=1, generate=generate)
+    if usage_error:
+        run = replace(run, attempts=tuple(replace(a, status=GenerationStatus.RUNTIME_ERROR,
+                      error_kind="token_accounting", diagnostic=usage_error) for a in run.attempts),
+                      error=RuntimeError(usage_error))
     return run, positions
 
 
@@ -260,9 +268,20 @@ def generate_shuffled_slate(
     provider: Any, context: ProofRescueContext, candidate: GeneratedAnalogyCandidate, *, seed: int,
     previous_state: str | None = None, last_tactic: str | None = None,
     tactics_per_slate: int = 4, catalog: PromptCatalog | None = None,
+    donor: GeneratedAnalogyCandidate | None = None,
 ) -> GeneratedTacticSlate:
-    alignment = shuffle_alignment(candidate.alignment, problem_id=context.goal.id, seed=seed)
-    shuffled = replace(candidate, alignment=alignment)
+    if donor is not None:
+        shuffled = donor
+    else:
+        alignment = shuffle_alignment(candidate.alignment, problem_id=context.goal.id, seed=seed)
+        # Rebuild every proof-side explanatory field from the rotated mapping.
+        # Retaining any original transfer would leak the selected solution.
+        operation = "; ".join(f"Treat {left} as {right}." for left, right in alignment.mapping)
+        alignment = replace(alignment, proof_operation=operation, invariant=operation,
+                            limitation="This rotated role assignment need not preserve the target reasoning.")
+        transfer = replace(candidate.transfer, premises=tuple(right for _, right in alignment.mapping),
+                           reasoning_steps=(operation,), predicted_next_subgoal=operation, completion_expected=False)
+        shuffled = replace(candidate, alignment=alignment, transfer=transfer)
     return generate_selected_slate(
         provider, context, shuffled, seed=seed, previous_state=previous_state, last_tactic=last_tactic,
         tactics_per_slate=tactics_per_slate, catalog=catalog,

@@ -154,3 +154,35 @@ def test_cli_recovers_final_publication_and_validates_seed_override(tmp_path, mo
     before = {p.name: p.read_bytes() for p in path.iterdir()}
     assert cli.main(["activation-eval", "--resume", str(path), "--seed", "8"]) == 2
     assert before == {p.name: p.read_bytes() for p in path.iterdir()}
+
+
+def test_cli_resumes_mid_collection_without_repeating_durable_work_or_using_lean(tmp_path, monkeypatch):
+    cfg, app, problems, _, _, provider, _ = setup()
+    class StructuredLean(Lean):
+        def proof_structure_after(self, problem, prefix):
+            return STRUCTURE
+    lean = StructuredLean()
+    monkeypatch.setattr(activation_cli, "load_activation_eval_config", lambda _: cfg)
+    monkeypatch.setattr(activation_cli, "get_runtime", lambda _: SimpleNamespace(config=app, model=provider, verifier=lean, problems=problems))
+    append = report.ActivationArtifactWriter.append_collection
+    def interrupt(self, cell):
+        append(self, cell)
+        raise KeyboardInterrupt("mid collection")
+    monkeypatch.setattr(report.ActivationArtifactWriter, "append_collection", interrupt)
+    path = tmp_path / "collection-resume"
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["activation-eval", "--output-dir", str(path)])
+    assert not (path / "frozen.json").exists() and not (path / "trials.jsonl").read_bytes()
+    count = len(provider.calls)
+    monkeypatch.setattr(report.ActivationArtifactWriter, "append_collection", append)
+    freeze = report.ActivationArtifactWriter.write_frozen
+    def assert_freeze(self, selections):
+        # The first cell's completed model work is never repeated.
+        assert len(provider.calls) == count * 2 - 2  # two ordinary anchor calls are shared preparation
+        freeze(self, selections)
+    monkeypatch.setattr(report.ActivationArtifactWriter, "write_frozen", assert_freeze)
+    def no_structure(*args):
+        pytest.fail("Lean structure extraction leaked into collection resume")
+    lean.proof_structure_after = no_structure
+    assert cli.main(["activation-eval", "--resume", str(path)]) == 0
+    assert not list(path.glob(".model-*.json")) and not list(path.glob(".collection-*.json"))

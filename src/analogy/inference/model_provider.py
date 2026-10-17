@@ -76,11 +76,28 @@ class TextGenerator(Protocol):
     def generate(self, messages: tuple[Message, ...], *, seed: int) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationResult:
+    """Text plus measured decoder input positions, never retokenized output."""
+
+    text: str
+    processed_token_positions: int | None
+    diagnostic: str | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.text, str) or (self.processed_token_positions is not None and (isinstance(self.processed_token_positions, bool) or not isinstance(self.processed_token_positions, int) or self.processed_token_positions <= 0)):
+            raise ModelConfigurationError("generation requires text and positive measured token positions")
+
+
 class ModelProvider(TextGenerator, Protocol):
     hidden_size: int
     model_revision: str
     timeout_seconds: float
     decoder_layer_count: int
+
+    def generate_with_usage(self, messages: tuple[Message, ...], *, seed: int) -> GenerationResult: ...
+
+    def estimate_generation_positions(self, messages: tuple[Message, ...]) -> int: ...
 
     def resolve_decoder_layers(self, count: int, *, through: int) -> tuple[int, ...]: ...
 
@@ -137,11 +154,9 @@ class QwenGenerator:
         self._do_sample = do_sample
         self._temperature = temperature
         self._top_p = top_p
-        self.model_revision = str(
-            getattr(getattr(model, "config", None), "_commit_hash", None)
-            or getattr(getattr(model, "config", None), "name_or_path", None)
-            or "unknown"
-        )
+        revision = getattr(getattr(model, "config", None), "_commit_hash", None)
+        self.model_revision = str(revision) if revision else "unresolved:" + str(
+            getattr(getattr(model, "config", None), "name_or_path", None) or "unknown")
         raw_hidden_size = getattr(getattr(model, "config", None), "hidden_size", None)
         self.hidden_size = int(raw_hidden_size) if raw_hidden_size is not None else 0
         for parameter in model.parameters():
@@ -226,6 +241,19 @@ class QwenGenerator:
         model_inputs = self._prepare_generation(messages)
         return self._run_generation(model_inputs, seed=seed)
 
+    def generate_with_usage(self, messages: tuple[Message, ...], *, seed: int) -> GenerationResult:
+        positions = 0
+        def count(module, inputs, kwargs):
+            nonlocal positions
+            hidden = inputs[0] if inputs else kwargs["hidden_states"]
+            positions += int(hidden.shape[0]) * int(hidden.shape[1])
+        handle = self._decoder_layers()[0].register_forward_pre_hook(count, with_kwargs=True)
+        try:
+            text = self.generate(messages, seed=seed)
+        finally:
+            handle.remove()
+        return GenerationResult(text, positions or None, None if positions else "no measured decoder steps")
+
     def _decoder_layers(self) -> Any:
         blocks = getattr(getattr(self._model, "model", None), "layers", None)
         if blocks is None or not len(blocks):
@@ -242,6 +270,12 @@ class QwenGenerator:
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int:
         prompt_ids, completion_ids = _encode_completion(self._tokenizer, messages, completion, allow_empty=True)
         return len(prompt_ids) + len(completion_ids)
+
+    def estimate_generation_positions(self, messages: tuple[Message, ...]) -> int:
+        # Use generation's actual special-token policy, not the scoring encoder.
+        inputs = self._prepare_generation(messages)["input_ids"]
+        width = int(inputs.shape[-1]) if hasattr(inputs, "shape") else len(inputs[0])
+        return width + self._max_new_tokens
 
     def capture_completion_trace(
         self, messages: tuple[Message, ...], completion: str, *, layers: tuple[int, ...]
@@ -628,6 +662,7 @@ def get_model_provider(config: ModelConfig) -> ModelProvider:
 
 
 __all__ = [
+    "GenerationResult",
     "CompletionActivationTrace",
     "CompletionScore",
     "LayerActivation",

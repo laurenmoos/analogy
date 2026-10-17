@@ -62,6 +62,7 @@ class ScoredCandidateMeasurement(CandidateMeasurement):
 
     tactic_components: tuple[Components, ...] = ()
     patch_deltas: tuple[tuple[float, ...], ...] = ()
+    patch_delta_summaries: tuple[dict, ...] = ()
     standardized_components: Components = (None, None, None)
     effective_weights: Weights = (0.0, 0.0, 0.0)
     weighted_components: Components = (None, None, None)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 from enum import Enum
@@ -37,6 +37,18 @@ class ActivationEvalConfig:
     variance_floor: float
     persist_full_activations: bool
     output_namespace: str
+    sampling_temperature: float = 0.8
+    sampling_top_p: float = 0.95
+
+    def __post_init__(self):
+        if _finite(self.sampling_temperature, "sampling_temperature") <= 0:
+            raise ValueError("sampling_temperature must be positive")
+        if not 0 < _finite(self.sampling_top_p, "sampling_top_p") <= 1:
+            raise ValueError("sampling_top_p must be in (0, 1]")
+
+    def generation_config(self, app: AppConfig) -> AppConfig:
+        return replace(app, model=replace(app.model, do_sample=True,
+                       temperature=self.sampling_temperature, top_p=self.sampling_top_p))
 
     @property
     def seeds(self) -> tuple[int, ...]:
@@ -85,6 +97,8 @@ class AnalogyCandidateRecord:
     def __post_init__(self) -> None:
         for field in ("candidate_id", "source_domain", "analogy", "limitation"):
             _text(getattr(self, field), field)
+        if isinstance(self.role_mapping, (str, bytes)) or any(isinstance(pair, (str, bytes)) for pair in self.role_mapping):
+            raise ValueError("role_mapping must contain non-empty string pairs")
         normalized = tuple(tuple(pair) for pair in self.role_mapping)
         if any(len(pair) != 2 or not all(isinstance(item, str) and item.strip() for item in pair) for pair in normalized):
             raise ValueError("role_mapping must contain non-empty string pairs")
@@ -158,6 +172,12 @@ def load_activation_eval_config(path: Path) -> ActivationEvalConfig:
     except yaml.YAMLError as error:
         raise ConfigError(f"activation config is not valid YAML: {error}") from error
     keys = frozenset({"schema_version", "base_config", "problem_ids", "seed_start", "seed_count", "domain_cues", "analogy_candidates", "tactics_per_slate", "tactic_union_limit", "activation_layer_count", "score_weights", "variance_floor", "persist_full_activations", "output_namespace"})
+    decoding = _mapping(root.pop("decoding", {"temperature": 0.8, "top_p": 0.95}), "config.decoding")
+    _validate_keys(decoding, frozenset({"temperature", "top_p"}), "config.decoding")
+    temperature = _positive_number(decoding["temperature"], "config.decoding.temperature")
+    top_p = _positive_number(decoding["top_p"], "config.decoding.top_p")
+    if top_p > 1:
+        raise ConfigError("config.decoding.top_p must not exceed one")
     _validate_keys(root, keys, "config")
     if _string(root["schema_version"], "config.schema_version") != "activation-analogy-v1":
         raise ConfigError("config.schema_version must be activation-analogy-v1")
@@ -187,6 +207,7 @@ def load_activation_eval_config(path: Path) -> ActivationEvalConfig:
         score_weights=weights, variance_floor=_positive_number(root["variance_floor"], "config.variance_floor"),
         persist_full_activations=_boolean(root["persist_full_activations"], "config.persist_full_activations"),
         output_namespace=_string(root["output_namespace"], "config.output_namespace"),
+        sampling_temperature=temperature, sampling_top_p=top_p,
     )
 
 

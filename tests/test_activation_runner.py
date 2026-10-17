@@ -69,6 +69,14 @@ class Provider:
     def count_token_positions(self, messages, completion):
         return 10 + (2 if completion else 0)
 
+    def generate_with_usage(self, messages, *, seed):
+        from analogy.inference.model_provider import GenerationResult
+        text = self.generate(messages, seed=seed)
+        try:
+            return GenerationResult(text, self.count_token_positions(messages, text))
+        except Exception as error:
+            return GenerationResult(text, None, str(error))
+
     def generate(self, messages, *, seed):
         text = "\n".join(m.content for m in messages)
         self.calls.append(("generate", text, seed))

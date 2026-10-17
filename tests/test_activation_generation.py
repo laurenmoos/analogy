@@ -52,6 +52,11 @@ class ScriptedProvider:
         self.counted.append((messages, completion))
         return 101
 
+    def generate_with_usage(self, messages, *, seed):
+        from analogy.inference.model_provider import GenerationResult
+        text = self.generate(messages, seed=seed)
+        return GenerationResult(text, self.count_token_positions(messages, text))
+
 
 def source(domain="clockwork"):
     return json.dumps({
@@ -218,8 +223,8 @@ def test_selected_and_shuffled_serialize_complete_candidate_without_mutation():
     shuffled_json = shuffled.messages[0][1].content.split("Complete explicit candidate:\n")[1].split("\nReturn ")[0]
     left, right = json.loads(selected_json), json.loads(shuffled_json)
     assert right["alignment"]["mapping"] == [["wheel", "active_subgoal"], ["socket", "introduced_assumption"]]
-    right["alignment"]["mapping"] = left["alignment"]["mapping"]
-    assert left == right
+    assert right["alignment"]["proof_operation"] != left["alignment"]["proof_operation"]
+    assert right["transfer"]["reasoning_steps"] != left["transfer"]["reasoning_steps"]
     assert asdict(candidate) == before
     assert shuffle_alignment(candidate.alignment, problem_id="goal", seed=8) == shuffle_alignment(candidate.alignment, problem_id="goal", seed=8)
 

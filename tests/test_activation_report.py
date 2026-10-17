@@ -46,7 +46,7 @@ def test_phase_flush_checkpoint_resume_and_identity_validation(tmp_path):
     writer.close()
     resumed = report.ActivationArtifactWriter.resume(writer.path, report.resume_identity(run.collection))
     frozen = resumed.load_frozen()
-    assert [c.winner for c in frozen.cells] == [c.winner for c in run.selections.cells]
+    assert report._encode([c.winner for c in frozen.cells]) == report._encode([c.winner for c in run.selections.cells])
     with pytest.raises(ValueError, match="frozen checkpoint"):
         runner.freeze_selections(frozen.collection)
     trials = runner.run_lean_conditions(frozen, data[2], data[4], generator=data[5], max_topups=0,

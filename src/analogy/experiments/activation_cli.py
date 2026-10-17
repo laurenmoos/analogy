@@ -7,8 +7,20 @@ from pathlib import Path
 import time
 from uuid import uuid4
 
-from ..runtime import get_runtime
 from .activation_records import load_activation_eval_config
+
+
+def get_runtime(config):
+    """Build a sampled, experiment-owned runtime without changing base config."""
+    from ..runtime import Runtime
+    from ..inference.model_provider import get_model_provider
+    from ..inference.prompts import configure_prompt_catalog
+    from ..lean_gym.corpus import load_problems
+    from ..lean_gym.resources import LEAN_PROJECT_ROOT
+    from ..lean_gym.verifier import LeanSubprocessVerifier
+    app = config.generation_config(config.base_config)
+    return Runtime(app, configure_prompt_catalog(app.prompts.path), get_model_provider(app.model),
+                   LeanSubprocessVerifier(LEAN_PROJECT_ROOT), tuple(load_problems(app.benchmark.corpus)))
 
 
 def run_activation_eval(args: argparse.Namespace) -> int:
@@ -42,8 +54,9 @@ def _run_locked(args, config, writer, started):
     from ..solver.rescue import ProofRescueContext
 
     # Checkpoint binding and writer exclusion precede expensive model loading.
-    frozen = writer.load_frozen() if args.resume is not None else None
-    runtime = get_runtime(config.base_config_path)
+    frozen = writer.load_frozen() if args.resume is not None and (writer.path / "frozen.json").exists() else None
+    saved = writer.load_collection() if args.resume is not None and frozen is None else None
+    runtime = get_runtime(config)
     app = runtime.config
     by_id = {p.id: p for p in runtime.problems}
     if any(pid not in by_id for pid in config.problem_ids):
@@ -55,7 +68,8 @@ def _run_locked(args, config, writer, started):
         evaluation_cells = evaluation_cells[:args.max_cells]
     if args.resume is not None:
         layers = tuple(runtime.model.resolve_decoder_layers(config.activation_layer_count, through=app.model.hidden_layer))
-        current = replace(frozen.collection, config=config, app_config=app, model_revision=runtime.model.model_revision, layers=layers)
+        initial = frozen.collection if frozen is not None else writer.load_manifest()
+        current = replace(initial, config=config, app_config=app, model_revision=runtime.model.model_revision, layers=layers)
         saved_scope = writer.evaluation_cells()
         writer.validate_identity(artifacts.resume_identity(current, evaluation_cells=saved_scope))
         if (args.problem is not None or args.max_cells is not None) and evaluation_cells != saved_scope:
@@ -64,6 +78,12 @@ def _run_locked(args, config, writer, started):
         if writer.is_complete():
             print(f"ACTIVATION EVALUATION (already complete): {writer.path}")
             return 0
+        if frozen is None:
+            anchors = tuple(c.anchor for c in initial.cells)
+            collection = evaluation.collect_prelean(config, app, anchors, runtime.model, proof_structures=writer.load_structures(),
+                completed_cells=saved.cells, cell_sink=writer.append_collection, cell_provider=writer.collection_provider)
+            frozen = evaluation.freeze_selections(collection)
+            writer.write_frozen(frozen)
         prior = writer.load_trials()
     else:
         # Anchoring/structure extraction are conventional Lean preparation.
@@ -82,8 +102,9 @@ def _run_locked(args, config, writer, started):
         layers = tuple(runtime.model.resolve_decoder_layers(config.activation_layer_count, through=app.model.hidden_layer))
         initial = evaluation.PreLeanCollection(config, app, skeleton, layers, runtime.model.model_revision)
         writer.seal_manifest(initial, evaluation_cells=evaluation_cells)
+        writer.write_structures(structures)
         collection = evaluation.collect_prelean(config, app, anchors, runtime.model, proof_structures=structures,
-                                                cell_sink=writer.append_collection)
+                                                cell_sink=writer.append_collection, cell_provider=writer.collection_provider)
         frozen = evaluation.freeze_selections(collection)
         writer.write_frozen(frozen)
         prior = ()
@@ -108,6 +129,6 @@ def build_activation_parser() -> argparse.ArgumentParser:
     activation.add_argument("--max-cells", type=int, help="cap Lean evaluation cells after full pre-Lean calibration")
     destination = activation.add_mutually_exclusive_group()
     destination.add_argument("--output-dir", type=Path, help="exact new run directory (must not exist)")
-    destination.add_argument("--resume", type=Path, help="resume an existing fully frozen checkpoint")
+    destination.add_argument("--resume", type=Path, help="resume collection or frozen Lean evaluation")
     activation.set_defaults(handler=run_activation_eval)
     return parser

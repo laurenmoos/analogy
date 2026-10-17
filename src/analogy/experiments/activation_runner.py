@@ -1,10 +1,10 @@
 """Two-phase, matched-anchor evaluation of frozen activation selections.
 
 Collection has no verifier capability. Freezing has neither verifier nor model
-capability: even causal patches are captured first and replayed from immutable
-evidence. Only ``run_lean_conditions`` accepts a verifier. Compute parity applies
-to rescue proposal/selection work; outcome-dependent conventional continuation
-is separately metered and shares the fixed total tactic-verification cap.
+capability: causal patches are captured first and replayed from immutable
+evidence. Only ``run_lean_conditions`` accepts a verifier. Total-compute parity
+includes continuation and post-selection causal diagnostics; immediate rescue
+and eventual completion remain separate outcomes.
 """
 
 from __future__ import annotations
@@ -152,6 +152,7 @@ class MatchedConditionOutcome(ConditionOutcome):
     charges: tuple[ModelCharge, ...] = ()
     generations: tuple[GeneratedTacticSlate, ...] = ()
     elapsed_seconds: float | None = None
+    verified_tactic_causal_effects: tuple[tuple[str, float | None], ...] = ()
 
     @property
     def lean_calls(self) -> int:
@@ -210,55 +211,12 @@ def _generation_charge(result, operation: str, candidate_id: str | None = None) 
     return ModelCharge(operation, None if _unknown(result) else result.processed_token_positions, candidate_id)
 
 
-class _GenerationAccounting:
-    """Preserve Task 3's raw attempts when post-generation accounting fails.
-
-    Task 3 counts usage after constructing the prompt-run evidence. Returning a
-    temporary zero lets that evidence reach this boundary; ``finish`` annotates
-    every failed count as a runtime error before any charge or validity decision.
-    Consequently the enclosing charge is always unknown, never valid zero usage.
-    This adapter is used only for generation, never for admission estimates.
-    """
-
-    def __init__(self, provider):
-        self.provider = provider
-        self.failures = {}
-
-    def generate(self, messages, *, seed):
-        return self.provider.generate(messages, seed=seed)
-
-    def count_token_positions(self, messages, completion):
-        try:
-            return self.provider.count_token_positions(messages, completion)
-        except Exception as error:
-            self.failures[(messages, completion)] = f"token accounting: {type(error).__name__}: {error}"
-            return 0
-
-    def finish(self, result):
-        attempts, errors = [], []
-        # Task 3 permits exactly one attempt per rendered stage.
-        for messages, attempt in zip(result.messages, result.attempts, strict=True):
-            diagnostic = self.failures.get((messages, attempt.raw_text))
-            if diagnostic is not None:
-                errors.append(diagnostic)
-                attempt = replace(attempt, status=GenerationStatus.RUNTIME_ERROR,
-                                  error_kind="token_accounting", diagnostic="; ".join(
-                                      value for value in (attempt.diagnostic, diagnostic) if value))
-            attempts.append(attempt)
-        if not errors:
-            return result
-        updates = {"attempts": tuple(attempts)}
-        if isinstance(result, GeneratedTacticSlate):
-            updates["error"] = "; ".join(value for value in (result.error, *errors) if value)
-        elif isinstance(result, CandidateGenerationFailure):
-            updates["diagnostic"] = "; ".join((result.diagnostic, *errors))
-        return replace(result, **updates)
-
-
 def collect_prelean(
     config: ActivationEvalConfig, app_config: AppConfig, anchors: Sequence[AnchorRecord],
     generator: ModelProvider, *, proof_structures: Mapping[tuple[str, int], ProofStructure],
     cell_sink: Callable[[PreLeanCell], None] | None = None,
+    completed_cells: Sequence[PreLeanCell] = (),
+    cell_provider: Callable | None = None,
 ) -> PreLeanCollection:
     """Collect every cell before calibration, using only supplied anchor data.
 
@@ -279,7 +237,15 @@ def collect_prelean(
     configure_prompt_catalog(app_config.prompts.path)
     layers = tuple(generator.resolve_decoder_layers(config.activation_layer_count, through=app_config.model.hidden_layer))
     cells = []
+    base_provider = generator
+    saved = tuple(completed_cells)
+    if tuple(c.anchor for c in saved) != anchors[:len(saved)]:
+        raise ValueError("completed collection cells must match the ordered anchor prefix")
     for anchor in anchors:
+        if len(cells) < len(saved):
+            cells.append(saved[len(cells)])
+            continue
+        generator = cell_provider(base_provider, anchor) if cell_provider else base_provider
         started = time.monotonic()
         context = _context(anchor)
         if anchor.no_stuck_anchor:
@@ -288,18 +254,17 @@ def collect_prelean(
                 cell_sink(cells[-1])
             continue
         structure = structures[(anchor.problem_id, anchor.seed)]
-        accounting = _GenerationAccounting(generator)
-        service = ActivationAnalogyGenerator(accounting, config)
-        neutral = accounting.finish(generate_neutral_slate(accounting, context, seed=generation_seed(anchor, "neutral"),
-                                                           tactics_per_slate=config.tactics_per_slate))
-        candidates = tuple(accounting.finish(candidate) for candidate in service.generate_candidates(context, structure, derive_proof_need(
+        service = ActivationAnalogyGenerator(generator, config)
+        neutral = generate_neutral_slate(generator, context, seed=generation_seed(anchor, "neutral"),
+                                         tactics_per_slate=config.tactics_per_slate)
+        candidates = service.generate_candidates(context, structure, derive_proof_need(
             structure, context.state.expression, fixed_target=context.goal.expression),
-            seed=(1 << 40) + generation_seed(anchor, "candidates") * (4 * config.analogy_candidates)))
+            seed=(1 << 40) + generation_seed(anchor, "candidates") * (4 * config.analogy_candidates))
         charges = [_generation_charge(neutral, "neutral_generation")]
         charges.extend(_generation_charge(c, "candidate_generation", c.candidate_id if isinstance(c, CandidateGenerationFailure)
                                          else c.record.candidate_id) for c in candidates)
         union = build_tactic_union(neutral, candidates, limit=config.tactic_union_limit)
-        traces, evidence, diagnostics = [], [], list(accounting.failures.values())
+        traces, evidence, diagnostics = [], [], []
         status = "invalid_usage" if any(c.processed_token_positions is None for c in charges) else "ready"
         if status == "ready":
             for tactic in union:
@@ -432,6 +397,37 @@ class _ArmSlate:
     diagnostics: tuple[str, ...] = ()
     charges: tuple[ModelCharge, ...] = ()
     generations: tuple[GeneratedTacticSlate, ...] = ()
+    causal_effects: tuple[tuple[str, float | None], ...] = ()
+
+
+def _score_final_slate(frozen, slate, generator, layers, app):
+    """Post-freeze diagnostic only; never supplied to the selector."""
+    cell = frozen.prelean
+    evidence = next(e for e in cell.evidence if e.candidate.record.candidate_id == frozen.winner.candidate_id)
+    known = {t: patched.total_log_likelihood - baseline.score.total_log_likelihood
+             for t, patched, baseline in zip(cell.tactic_union, evidence.patched_scores, cell.neutral_traces)}
+    values, charges, errors = [], [], []
+    for tactic in slate.tactics:
+        if tactic in known:
+            values.append((tactic, known[tactic]))
+            continue
+        try:
+            neutral = generator.capture_completion_trace(cell.neutral.messages[0], tactic, layers=layers)
+            charges.append(ModelCharge("verified_tactic_neutral_capture", neutral.processed_token_positions, completion=tactic))
+            contextual = generator.capture_completion_trace(slate.messages, tactic, layers=layers)
+            charges.append(ModelCharge("verified_tactic_analogy_capture", contextual.processed_token_positions, completion=tactic))
+            delta = clip_patch_delta(tuple(b - a for a, b in zip(neutral.activations[-1].values, contextual.activations[-1].values)), max_delta_norm=app.rl.max_delta_norm)
+            patched = generator.score_completion_with_delta(cell.neutral.messages[0], tactic, delta=delta, layer=layers[-1])
+            charges.append(ModelCharge("verified_tactic_patch_score", generator.count_token_positions(cell.neutral.messages[0], tactic), completion=tactic))
+            if patched.text != tactic or not math.isfinite(patched.total_log_likelihood):
+                raise ValueError("invalid diagnostic completion score")
+            values.append((tactic, patched.total_log_likelihood - neutral.score.total_log_likelihood))
+        except Exception as error:
+            charges.append(ModelCharge("verified_tactic_diagnostic_failed", None, completion=tactic))
+            errors.append(f"verified tactic diagnostic: {type(error).__name__}: {error}")
+            values.append((tactic, None))
+    cost = None if slate.cost is None or any(c.processed_token_positions is None for c in charges) else slate.cost + sum(c.processed_token_positions for c in charges)
+    return replace(slate, cost=cost, causal_effects=tuple(values), charges=(*slate.charges, *charges), diagnostics=(*slate.diagnostics, *errors))
 
 
 def _arm_slate(generated: GeneratedTacticSlate, *, seed: int, charges=()) -> _ArmSlate:
@@ -448,7 +444,7 @@ def _topup(slate: _ArmSlate, arm: ActivationCondition, cell: PreLeanCell, genera
     """Admit one bounded generation at a time using its exact rendered prompt."""
     result = slate
     for index in range(maximum):
-        estimate = generator.count_token_positions(result.messages, "") + app.model.max_new_tokens
+        estimate = _generation_estimate(generator, result.messages, app.model.max_new_tokens)
         if estimate <= 0:
             raise ValueError("top-up estimate must be positive")
         admitted = result.cost is not None and result.cost + estimate <= ceiling
@@ -458,8 +454,7 @@ def _topup(slate: _ArmSlate, arm: ActivationCondition, cell: PreLeanCell, genera
         seed = generation_seed(cell.anchor, f"topup:{arm.value}", index)
         # Reuse attempt_index=0: the estimate and generated prompt are identical.
         generate = generate_neutral_slate if arm is ActivationCondition.NEUTRAL else generate_prompted_slate
-        accounting = _GenerationAccounting(generator)
-        generated = accounting.finish(generate(accounting, cell.context, seed=seed, tactics_per_slate=config.tactics_per_slate))
+        generated = generate(generator, cell.context, seed=seed, tactics_per_slate=config.tactics_per_slate)
         extra = _arm_slate(generated, seed=seed)
         if extra.messages != result.messages:
             raise ValueError("top-up prompt changed after admission")
@@ -502,18 +497,35 @@ class _BoundedRanker:
 
 
 class _GenerationMeter:
-    def __init__(self, provider):
+    def __init__(self, provider, *, remaining=None, max_new_tokens=0):
         self.provider = provider
         self.positions = 0
+        self.remaining = remaining
+        self.max_new_tokens = max_new_tokens
+        self.exhausted = False
 
     def generate(self, messages, *, seed):
+        if self.remaining is not None:
+            estimate = _generation_estimate(self.provider, messages, self.max_new_tokens)
+            if self.positions + estimate > self.remaining:
+                self.exhausted = True
+                raise RuntimeError("continuation compute budget exhausted")
         try:
-            output = self.provider.generate(messages, seed=seed)
-            self.positions += self.provider.count_token_positions(messages, output)
-            return output
+            output = self.provider.generate_with_usage(messages, seed=seed)
+            if output.processed_token_positions is None:
+                raise RuntimeError(output.diagnostic or "generation usage unavailable")
+            self.positions += output.processed_token_positions
+            if self.remaining is not None and self.positions > self.remaining:
+                raise RuntimeError("provider exceeded conservative generation allowance")
+            return output.text
         except Exception:
             self.positions = None
             raise
+
+
+def _generation_estimate(provider, messages, max_new_tokens):
+    estimate = getattr(provider, "estimate_generation_positions", None)
+    return estimate(messages) if estimate else provider.count_token_positions(messages, "") + max_new_tokens
 
 
 def _label(result) -> str:
@@ -583,7 +595,8 @@ def _evaluate_arm(frozen: FrozenCell, problem: Problem, verifier: Verifier, gene
     continuation, continuation_calls, continuation_positions, continuation_results = None, 0, 0, ()
     if successor is not None and len(results) < lean_cap and max_expansions > 1:
         budget = _ContinuationBudget(lean, lean_cap - len(results))
-        meter = _GenerationMeter(generator)
+        meter = _GenerationMeter(generator, remaining=ceiling - base["processed_token_positions"] if view == "equal_compute" and ceiling is not None else None,
+                                 max_new_tokens=app.model.max_new_tokens)
         ranker = TacticRanker(meter, top_k=app.search.top_k, seed=cell.anchor.seed, failed_tactics_for=lean.failed_tactics_for)
         try:
             output = run_episode(EpisodeContext(
@@ -600,21 +613,26 @@ def _evaluate_arm(frozen: FrozenCell, problem: Problem, verifier: Verifier, gene
                 for node in expansion.successors:
                     observe(node.state)
         except Exception as error:
-            continuation = "failed"
+            continuation = "budget_exhausted" if meter.exhausted else "failed"
             diagnostics.append(f"continuation: {type(error).__name__}: {error}")
         continuation_calls = len(budget.results)
         continuation_results = tuple(_label(result) for result in budget.results)
         continuation_positions = meter.positions
+        if meter.exhausted:
+            continuation = "budget_exhausted"
         for result in budget.results:
             if result.status is TacticStatus.ACCEPTED:
                 key = fingerprint.fingerprint(result.state)
                 if key not in hashes:
                     hashes.append(key)
+    if view == "equal_compute":
+        base["processed_token_positions"] = None if continuation_positions is None else base["processed_token_positions"] + continuation_positions
     return MatchedConditionOutcome(**base, verifier_results=tuple(results), successor_state_hashes=tuple(hashes),
                                    completed=completed, diagnostics=tuple(diagnostics), immediate_utility=utility,
                                    rescue_lean_calls=len(results), continuation_lean_calls=continuation_calls,
                                    continuation_status=continuation, continuation_processed_token_positions=continuation_positions,
                                    continuation_verifier_results=continuation_results, diversity=tuple(observations),
+                                   verified_tactic_causal_effects=tuple((t, dict(slate.causal_effects).get(t)) for t in slate.tactics[:len(results)]),
                                    elapsed_seconds=time.monotonic() - started)
 
 
@@ -658,8 +676,7 @@ def run_lean_conditions(
                     slate = _arm_slate(cell.neutral, seed=generation_seed(cell.anchor, "neutral"))
                 elif arm is ActivationCondition.PROMPTED:
                     try:
-                        accounting = _GenerationAccounting(generator)
-                        slate = _arm_slate(accounting.finish(generate_prompted_slate(accounting, cell.context, **kwargs)), seed=seed)
+                        slate = _arm_slate(generate_prompted_slate(generator, cell.context, **kwargs), seed=seed)
                     except Exception as error:
                         slate = _ArmSlate(cost=None, seeds=(seed,), diagnostics=(f"final generation: {type(error).__name__}: {error}",),
                                           charges=(ModelCharge("final_generation", None),))
@@ -668,17 +685,25 @@ def run_lean_conditions(
                 else:
                     generate = generate_selected_slate if arm is ActivationCondition.SELECTED else generate_shuffled_slate
                     if arm is ActivationCondition.SHUFFLED:
-                        try:
-                            shuffle_alignment(selected.alignment, problem_id=cell.context.goal.id, seed=seed)
-                        except ValueError as error:
-                            baseline[arm] = _ArmSlate(diagnostics=(str(error),))
-                            continue
+                        donors = [e.candidate for other in collection.cells if other.anchor.problem_id != cell.anchor.problem_id
+                                  for e in other.evidence if e.candidate.source.transformation.input_arity == selected.source.transformation.input_arity
+                                  and e.candidate.source.transformation.output_arity == selected.source.transformation.output_arity
+                                  and e.candidate.transfer.reasoning_steps != selected.transfer.reasoning_steps]
+                        if donors:
+                            kwargs["donor"] = sorted(donors, key=lambda c: c.record.candidate_id)[seed % len(donors)]
+                        else:
+                            try:
+                                shuffle_alignment(selected.alignment, problem_id=cell.context.goal.id, seed=seed)
+                            except ValueError as error:
+                                baseline[arm] = _ArmSlate(diagnostics=(str(error),))
+                                continue
                     try:
-                        accounting = _GenerationAccounting(generator)
-                        generated = accounting.finish(generate(accounting, cell.context, selected,
+                        generated = generate(generator, cell.context, selected,
                                              previous_state=cell.anchor.predecessor_state.expression if cell.anchor.predecessor_state else None,
-                                             last_tactic=cell.anchor.accepted_prefix[-1] if cell.anchor.accepted_prefix else None, **kwargs))
+                                             last_tactic=cell.anchor.accepted_prefix[-1] if cell.anchor.accepted_prefix else None, **kwargs)
                         slate = _arm_slate(generated, seed=seed, charges=cell.charges if arm is ActivationCondition.SELECTED else ())
+                        if arm is ActivationCondition.SELECTED and slate.cost is not None:
+                            slate = _score_final_slate(frozen, slate, generator, collection.layers, app)
                     except Exception as error:
                         slate = _ArmSlate(cost=None, seeds=(seed,), diagnostics=(f"final generation: {type(error).__name__}: {error}",),
                                           charges=(ModelCharge("final_generation", None),))
@@ -707,6 +732,8 @@ def run_lean_conditions(
                 slate = slates.get(arm, _ArmSlate())
                 if unavailable is None and arm is ActivationCondition.SHUFFLED and not slate.tactics and slate.diagnostics:
                     unavailable = "shuffled_unavailable"
+                if unavailable is None and view == "equal_compute" and ceiling is not None and slate.cost > ceiling:
+                    unavailable = "budget_exhausted"
                 # Equal-compute may submit extra generated tactics, but never
                 # exceeds the same Lean cap. Equal-tactic keeps the slate cap.
                 final_cap = config.tactics_per_slate if view == "equal_tactic" else cap

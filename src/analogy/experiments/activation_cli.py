@@ -13,9 +13,7 @@ from .activation_records import load_activation_eval_config
 
 def run_activation_eval(args: argparse.Namespace) -> int:
     """Prepare exact Lean structures, then freeze all selections before rescue."""
-    from .activation_anchor import build_anchor
-    from . import activation_report as artifacts, activation_runner as evaluation
-    from ..solver.rescue import ProofRescueContext
+    from . import activation_report as artifacts
 
     started = time.monotonic()
     config = load_activation_eval_config(args.config)
@@ -29,6 +27,22 @@ def run_activation_eval(args: argparse.Namespace) -> int:
         raise ValueError("max-cells must be positive")
     if args.output_dir is not None and args.output_dir.exists():
         raise FileExistsError(f"run directory already exists: {args.output_dir}")
+    if args.resume is not None:
+        writer = artifacts.ActivationArtifactWriter.open_locked(args.resume)
+    else:
+        output = args.output_dir or (Path(".artifacts/runs/activation_analogy") / uuid4().hex)
+        writer = artifacts.ActivationArtifactWriter.begin(output)
+    with writer:
+        return _run_locked(args, config, writer, started)
+
+
+def _run_locked(args, config, writer, started):
+    from .activation_anchor import build_anchor
+    from . import activation_report as artifacts, activation_runner as evaluation
+    from ..solver.rescue import ProofRescueContext
+
+    # Checkpoint binding and writer exclusion precede expensive model loading.
+    frozen = writer.load_frozen() if args.resume is not None else None
     runtime = get_runtime(config.base_config_path)
     app = runtime.config
     by_id = {p.id: p for p in runtime.problems}
@@ -40,23 +54,20 @@ def run_activation_eval(args: argparse.Namespace) -> int:
     if args.max_cells is not None:
         evaluation_cells = evaluation_cells[:args.max_cells]
     if args.resume is not None:
-        reader = artifacts.ActivationArtifactWriter(args.resume)
-        frozen = reader.load_frozen()
-        current = replace(frozen.collection, config=config, app_config=app, model_revision=runtime.model.model_revision)
-        writer = artifacts.ActivationArtifactWriter.resume(args.resume, artifacts.resume_identity(current))
+        layers = tuple(runtime.model.resolve_decoder_layers(config.activation_layer_count, through=app.model.hidden_layer))
+        current = replace(frozen.collection, config=config, app_config=app, model_revision=runtime.model.model_revision, layers=layers)
         saved_scope = writer.evaluation_cells()
+        writer.validate_identity(artifacts.resume_identity(current, evaluation_cells=saved_scope))
         if (args.problem is not None or args.max_cells is not None) and evaluation_cells != saved_scope:
             raise ValueError("resume evaluation cell scope mismatch")
         evaluation_cells = saved_scope
-        if (writer.path / "summary.json").exists():
+        if writer.is_complete():
             print(f"ACTIVATION EVALUATION (already complete): {writer.path}")
             return 0
         prior = writer.load_trials()
     else:
         # Anchoring/structure extraction are conventional Lean preparation.
         # No verifier capability enters collection or freezing below.
-        output = args.output_dir or (Path(".artifacts/runs/activation_analogy") / uuid4().hex)
-        writer = artifacts.ActivationArtifactWriter.begin(output)
         anchors = []
         for problem in problems:
             for seed in config.seeds:

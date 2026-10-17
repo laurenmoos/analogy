@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import asdict, fields, is_dataclass, replace
 from enum import Enum
 import gzip
+import fcntl
 import hashlib
 import json
 import math
@@ -27,7 +28,7 @@ from ..transfer import domain
 from . import activation_generation, activation_metrics, activation_records, activation_runner as runner
 from .activation_records import ActivationCondition
 
-SCHEMA_VERSION = "activation-analogy-artifacts-v1"
+SCHEMA_VERSION = "activation-analogy-artifacts-v2"
 _MODULES = (config_module, records_module, model_provider, diversity, rescue, domain,
             activation_generation, activation_metrics, activation_records, runner)
 _TYPES = {cls.__name__: cls for module in _MODULES for cls in vars(module).values()
@@ -95,7 +96,7 @@ def _decode(value):
     return cls(**{k: _coerce(hints.get(k), _decode(v)) for k, v in value.items() if k != "$type"})
 
 
-def resume_identity(collection):
+def resume_identity(collection, *, evaluation_cells=None):
     """Bind the exact ordered experiment, prompt bytes and immutable manifest."""
     config = collection.config
     return {
@@ -104,6 +105,11 @@ def resume_identity(collection):
         "prompt_hash": hashlib.sha256(collection.app_config.prompts.path.read_bytes()).hexdigest(),
         "anchor_manifest_hash": _hash([_encode(c.anchor) for c in collection.cells]),
         "config_hash": _hash(_encode(config)),
+        "app_config_hash": _hash(_encode(collection.app_config)),
+        "layers": list(collection.layers),
+        "model_revision_resolved": not collection.model_revision.startswith("unresolved:"),
+        "evaluation_cells": [list(key) for key in evaluation_cells] if evaluation_cells is not None else
+            [[c.anchor.problem_id, c.anchor.seed] for c in collection.cells],
     }
 
 
@@ -127,63 +133,169 @@ def _rows(path):
         raise ValueError(f"incomplete/corrupt journal {path.name}; preserved without overwrite") from error
 
 
+def _publish_or_validate(path, text):
+    if path.exists():
+        if path.read_bytes() != text.encode("utf-8"):
+            raise ValueError(f"immutable publication conflict: {path.name}")
+    else:
+        _atomic_new(path, text)
+
+
 class ActivationArtifactWriter:
+    """One POSIX flock owner per active run; lock files are never unlinked.
+
+    macOS/Linux release flock on descriptor close or process death. Keeping the
+    stable lock inode avoids stale-lock deletion races and makes crashes safe.
+    Read-only instances may inspect data, but every mutation requires ownership.
+    """
     def __init__(self, path):
         self.path = Path(path)
+        self._lock_file = None
+
+    @classmethod
+    def open_locked(cls, path):
+        writer = cls(path)
+        stream = (writer.path / ".writer.lock").open("r+b")
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            stream.close()
+            raise FileExistsError(f"run writer lock already held: {writer.path}") from error
+        except BaseException:
+            stream.close()
+            raise
+        writer._lock_file = stream
+        return writer
+
+    def close(self):
+        if getattr(self, "_lock_file", None) is not None:
+            stream, self._lock_file = self._lock_file, None
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            finally:
+                stream.close()
+
+    def __enter__(self):
+        self._require_lock()
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
+    def _require_lock(self):
+        if self._lock_file is None:
+            raise RuntimeError("artifact mutation requires the process-held writer lock")
+
+    def _mutable(self):
+        self._require_lock()
+        if (self.path / "finalization.json").exists() or (self.path / "complete.json").exists():
+            raise FileExistsError("completed/finalizing run is immutable")
 
     @classmethod
     def begin(cls, path):
-        """Reserve the run before expensive anchoring; incomplete runs stay visible."""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=False)
-        writer = cls(path)
-        for name in ("anchors.jsonl", "prelean.jsonl", "trials.jsonl", "collection.jsonl"):
-            (path / name).touch(exist_ok=False)
+        (path / ".writer.lock").touch(exist_ok=False)
+        writer = cls.open_locked(path)
+        try:
+            for name in ("anchors.jsonl", "prelean.jsonl", "trials.jsonl", "collection.jsonl"):
+                (path / name).touch(exist_ok=False)
+        except BaseException:
+            writer.close()
+            raise
         return writer
 
     @classmethod
     def create(cls, path, collection, *, evaluation_cells=None):
         writer = cls.begin(path)
-        for cell in collection.cells:
-            writer.append_anchor(cell.anchor)
-        writer.seal_manifest(collection, evaluation_cells=evaluation_cells)
+        try:
+            for cell in collection.cells:
+                writer.append_anchor(cell.anchor)
+            writer.seal_manifest(collection, evaluation_cells=evaluation_cells)
+        except BaseException:
+            writer.close()
+            raise
         return writer
 
     def append_anchor(self, anchor):
+        self._mutable()
         if (self.path / "resolved_config.json").exists():
             raise FileExistsError("anchor manifest is sealed")
         self._append("anchors.jsonl", _encode(anchor))
 
     def seal_manifest(self, collection, *, evaluation_cells=None):
+        self._mutable()
         if _rows(self.path / "anchors.jsonl") != [_encode(c.anchor) for c in collection.cells]:
             raise ValueError("anchor journal does not match manifest")
-        payload = {"identity": resume_identity(collection), "config": _encode(collection.config),
-                   "app_config": _encode(collection.app_config), "layers": list(collection.layers),
-                   "model_revision": collection.model_revision,
-                   "evaluation_cells": list(evaluation_cells) if evaluation_cells is not None else
-                       [(c.anchor.problem_id, c.anchor.seed) for c in collection.cells]}
+        identity = resume_identity(collection, evaluation_cells=evaluation_cells)
+        payload = {"identity": identity, "identity_hash": _hash(identity),
+                   "config": _encode(collection.config), "app_config": _encode(collection.app_config),
+                   "layers": list(collection.layers), "model_revision": collection.model_revision,
+                   "evaluation_cells": identity["evaluation_cells"]}
+        self._validate_metadata(payload)
         _atomic_new(self.path / "resolved_config.json", _json(payload) + "\n")
 
+    def _validate_metadata(self, metadata):
+        """Validate raw JSON bindings before constructing execution objects."""
+        try:
+            identity = metadata["identity"]
+            if identity["schema_version"] != SCHEMA_VERSION or _hash(identity) != metadata["identity_hash"]:
+                raise ValueError("checkpoint identity hash/schema mismatch")
+            config = metadata["config"]
+            checks = {
+                "config_hash": _hash(config), "app_config_hash": _hash(metadata["app_config"]),
+                "model_revision": metadata["model_revision"], "layers": metadata["layers"],
+                "model_revision_resolved": not metadata["model_revision"].startswith("unresolved:"),
+                "evaluation_cells": metadata["evaluation_cells"],
+                "problem_ids": config["problem_ids"], "seed_range": [config["seed_start"], config["seed_count"]],
+                "anchor_manifest_hash": _hash(_rows(self.path / "anchors.jsonl")),
+            }
+            for key, value in checks.items():
+                if identity.get(key) != value:
+                    raise ValueError(f"checkpoint identity mismatch: {key}")
+            manifest = [[pid, seed] for pid in config["problem_ids"]
+                        for seed in range(config["seed_start"], config["seed_start"] + config["seed_count"])]
+            anchors = _rows(self.path / "anchors.jsonl")
+            if [[a["problem_id"], a["seed"]] for a in anchors] != manifest:
+                raise ValueError("checkpoint identity anchor order mismatch")
+            scope = metadata["evaluation_cells"]
+            if not scope or scope != [key for key in manifest if key in scope]:
+                raise ValueError("checkpoint identity evaluation scope mismatch")
+        except (KeyError, TypeError) as error:
+            raise ValueError("malformed checkpoint identity metadata") from error
+        return metadata
+
+    def _metadata(self):
+        return self._validate_metadata(json.loads((self.path / "resolved_config.json").read_text()))
+
     def evaluation_cells(self):
-        metadata = json.loads((self.path / "resolved_config.json").read_text())
-        return tuple(tuple(key) for key in metadata["evaluation_cells"])
+        return tuple(tuple(key) for key in self._metadata()["evaluation_cells"])
+
+    def validate_identity(self, identity):
+        self._require_lock()
+        saved = self._metadata()["identity"]
+        for key in saved:
+            if saved[key] != identity.get(key):
+                raise ValueError(f"resume identity mismatch: {key}")
+        if set(identity) != set(saved):
+            raise ValueError("resume identity field mismatch")
 
     @classmethod
     def resume(cls, path, identity):
-        writer = cls(path)
-        saved = json.loads((writer.path / "resolved_config.json").read_text())["identity"]
-        for key in ("schema_version", "model_revision", "problem_ids", "seed_range", "prompt_hash", "anchor_manifest_hash", "config_hash"):
-            if saved.get(key) != identity.get(key):
-                raise ValueError(f"resume identity mismatch: {key}")
-        anchors = _rows(writer.path / "anchors.jsonl")
-        if _hash(anchors) != saved["anchor_manifest_hash"]:
-            raise ValueError("resume identity mismatch: anchor_manifest_hash")
-        writer.load_frozen()  # Never reconstruct a selection from incomplete summaries.
+        writer = cls.open_locked(path)
+        try:
+            writer.validate_identity(identity)
+            writer.load_frozen()
+        except BaseException:
+            writer.close()
+            raise
         return writer
 
     def _append(self, name, value):
-        if (self.path / "summary.json").exists():
-            raise FileExistsError("completed run is immutable")
+        self._mutable()
         with (self.path / name).open("a", encoding="utf-8") as stream:
             stream.write(_json(value) + "\n")
             stream.flush()
@@ -193,13 +305,18 @@ class ActivationArtifactWriter:
         self._append("collection.jsonl", _encode(cell))
 
     def write_frozen(self, selections):
+        self._mutable()
         if (self.path / "prelean.jsonl").stat().st_size or (self.path / "frozen.json").exists():
             raise FileExistsError("frozen selections already recorded")
+        metadata = self._metadata()
+        self.validate_identity(resume_identity(selections.collection, evaluation_cells=self.evaluation_cells()))
+        if [_encode(c.prelean.anchor) for c in selections.cells] != _rows(self.path / "anchors.jsonl"):
+            raise ValueError("frozen checkpoint anchor manifest mismatch")
         for cell in selections.cells:
             self._append("prelean.jsonl", _encode(cell))
-        metadata = json.loads((self.path / "resolved_config.json").read_text())
-        metadata["layers"] = list(selections.collection.layers)
-        metadata["checkpoint_hash"] = hashlib.sha256((self.path / "prelean.jsonl").read_bytes()).hexdigest()
+        metadata["prelean_sha256"] = hashlib.sha256((self.path / "prelean.jsonl").read_bytes()).hexdigest()
+        metadata["checkpoint_hash"] = _hash({"identity_hash": metadata["identity_hash"],
+                                            "prelean_sha256": metadata["prelean_sha256"]})
         _atomic_new(self.path / "frozen.json", _json(metadata) + "\n")
         if selections.collection.config.persist_full_activations:
             with (self.path / "activation_vectors.jsonl.gz").open("xb") as raw:
@@ -210,63 +327,120 @@ class ActivationArtifactWriter:
     def load_frozen(self):
         if not (self.path / "frozen.json").exists():
             raise ValueError("resume requires a fully frozen pre-Lean checkpoint")
+        resolved = self._metadata()
         metadata = json.loads((self.path / "frozen.json").read_text())
-        if metadata["checkpoint_hash"] != hashlib.sha256((self.path / "prelean.jsonl").read_bytes()).hexdigest():
+        copies = {k: v for k, v in metadata.items() if k not in ("prelean_sha256", "checkpoint_hash")}
+        if copies != resolved:
+            raise ValueError("resolved/frozen checkpoint identity divergence")
+        digest = hashlib.sha256((self.path / "prelean.jsonl").read_bytes()).hexdigest()
+        if metadata.get("prelean_sha256") != digest or metadata.get("checkpoint_hash") != _hash(
+            {"identity_hash": resolved["identity_hash"], "prelean_sha256": digest}
+        ):
             raise ValueError("frozen checkpoint hash mismatch")
-        cells = tuple(_decode(row) for row in _rows(self.path / "prelean.jsonl"))
-        config = _decode(metadata["config"])
-        expected = tuple((p, s) for p in config.problem_ids for s in config.seeds)
-        if tuple((c.prelean.anchor.problem_id, c.prelean.anchor.seed) for c in cells) != expected:
-            raise ValueError("frozen checkpoint does not cover the ordered manifest")
-        collection = runner.PreLeanCollection(config, _decode(metadata["app_config"]),
-            tuple(c.prelean for c in cells), tuple(metadata["layers"]), metadata["model_revision"])
+        raw_cells = _rows(self.path / "prelean.jsonl")
+        if [c["prelean"]["anchor"] for c in raw_cells] != _rows(self.path / "anchors.jsonl"):
+            raise ValueError("frozen checkpoint anchor manifest mismatch")
+        cells = tuple(_decode(row) for row in raw_cells)
+        collection = runner.PreLeanCollection(_decode(resolved["config"]), _decode(resolved["app_config"]),
+            tuple(c.prelean for c in cells), tuple(resolved["layers"]), resolved["model_revision"])
         return runner.FrozenSelections(collection, cells)
 
-    def append_trial(self, trial):
-        keys = {(r["problem_id"], r["seed"]) for r in _rows(self.path / "trials.jsonl")}
-        if (trial.problem_id, trial.seed) in keys:
-            raise FileExistsError("trial cell already journaled")
+    @staticmethod
+    def _trial_rows(trial):
         meta = _encode(replace(trial, outcomes=(), equal_compute_outcomes=()))
-        # One row per problem/seed/condition/view. Resume requires the entire
-        # eight-row cell, so partial rows cannot be mistaken for completion.
-        for outcome in (*trial.outcomes, *trial.equal_compute_outcomes):
-            self._append("trials.jsonl", {"problem_id": trial.problem_id, "seed": trial.seed,
-                                         "trial": meta, "outcome": _encode(outcome)})
+        return [{"problem_id": trial.problem_id, "seed": trial.seed, "trial": meta, "outcome": _encode(outcome)}
+                for outcome in (*trial.outcomes, *trial.equal_compute_outcomes)]
 
-    def load_trials(self):
-        groups = {}
-        for row in _rows(self.path / "trials.jsonl"):
-            groups.setdefault((row["problem_id"], row["seed"]), []).append(row)
+    def _validated_trials(self, rows, *, require_complete=False):
+        scope = self.evaluation_cells()
+        if len(rows) % 8:
+            raise ValueError("partial trial cell; journal preserved without overwrite")
+        if len(rows) > len(scope) * 8:
+            raise ValueError("duplicate/extra trial cells outside evaluation scope")
         trials = []
-        for rows in groups.values():
-            outcomes = tuple(_decode(row["outcome"]) for row in rows)
-            expected = {(arm, view) for arm in ActivationCondition for view in ("equal_tactic", "equal_compute")}
-            if len(rows) != 8 or {(o.condition, o.budget_view) for o in outcomes} != expected:
-                raise ValueError("partial trial cell; journal preserved without overwrite")
-            trials.append(replace(_decode(rows[0]["trial"]), outcomes=tuple(o for o in outcomes if o.budget_view == "equal_tactic"),
-                                  equal_compute_outcomes=tuple(o for o in outcomes if o.budget_view == "equal_compute")))
+        anchors = {(a["problem_id"], a["seed"]): a for a in _rows(self.path / "anchors.jsonl")}
+        expected = {(arm.value, view) for arm in ActivationCondition for view in ("equal_tactic", "equal_compute")}
+        for index in range(0, len(rows), 8):
+            group = rows[index:index + 8]
+            key = scope[index // 8]
+            meta = group[0]["trial"]
+            if any((r["problem_id"], r["seed"]) != key or r["trial"] != meta for r in group):
+                raise ValueError("trial metadata or ordered evaluation scope mismatch")
+            if (meta["problem_id"], meta["seed"]) != key or meta["anchor"] != anchors[key]:
+                raise ValueError("trial metadata does not match its anchor/scope")
+            outcomes = [r["outcome"] for r in group]
+            if {(o["condition"], o["budget_view"]) for o in outcomes} != expected:
+                raise ValueError("trial conditions/views are incomplete or duplicated")
+            if any(o["budget_view"] != ("equal_tactic" if i < 4 else "equal_compute") for i, o in enumerate(outcomes)):
+                raise ValueError("trial budget view ordering mismatch")
+            decoded = tuple(_decode(o) for o in outcomes)
+            trials.append(replace(_decode(meta), outcomes=decoded[:4], equal_compute_outcomes=decoded[4:]))
+        if require_complete and len(trials) != len(scope):
+            raise ValueError("every trial in the saved evaluation scope must be flushed before finalization")
         return tuple(trials)
 
+    def append_trial(self, trial):
+        self._mutable()
+        rows = _rows(self.path / "trials.jsonl")
+        if (trial.problem_id, trial.seed) in {(r["problem_id"], r["seed"]) for r in rows}:
+            raise FileExistsError("trial cell already journaled")
+        additions = self._trial_rows(trial)
+        self._validated_trials([*rows, *additions])
+        for row in additions:
+            self._append("trials.jsonl", row)
+
+    def load_trials(self, *, require_complete=False):
+        return self._validated_trials(_rows(self.path / "trials.jsonl"), require_complete=require_complete)
+
+    def is_complete(self):
+        if not (self.path / "complete.json").exists():
+            return False
+        metadata = self._metadata()
+        self.load_frozen()
+        self.load_trials(require_complete=True)
+        marker = json.loads((self.path / "complete.json").read_text())
+        expected = {"identity_hash": metadata["identity_hash"], **{
+            name: hashlib.sha256((self.path / name).read_bytes()).hexdigest()
+            for name in ("trials.jsonl", "finalization.json", "report.md", "summary.json")}}
+        if marker != expected:
+            raise ValueError("completed artifact hash conflict")
+        return True
+
     def finalize(self, run):
-        if (self.path / "summary.json").exists():
-            raise FileExistsError("completed run is immutable")
-        journal = self.load_trials()
-        if len(journal) != len(run.trials):
-            raise ValueError("finalization requires every trial to be flushed")
+        self._require_lock()
+        frozen = self.load_frozen()
+        journal = self.load_trials(require_complete=True)
         if _encode(journal) != _encode(run.trials):
             raise ValueError("finalization run does not match the trial journal")
-        _atomic_new(self.path / "report.md", render_activation_report(run))
-        _atomic_new(self.path / "summary.json", _json(summarize_activation_run(run)) + "\n")
+        if _encode(run.collection) != _encode(frozen.collection) or _encode(run.selections) != _encode(frozen):
+            raise ValueError("finalization run does not match the frozen checkpoint")
+        metadata = self._metadata()
+        plan_path = self.path / "finalization.json"
+        if plan_path.exists():
+            # Preserve the original timed invocation while retrying publication.
+            existing = json.loads(plan_path.read_text())
+            run = replace(run, elapsed_seconds=existing["elapsed_seconds"])
+        plan = {"identity_hash": metadata["identity_hash"],
+                "trials_sha256": hashlib.sha256((self.path / "trials.jsonl").read_bytes()).hexdigest(),
+                "elapsed_seconds": run.elapsed_seconds, "report": render_activation_report(run),
+                "summary": _json(summarize_activation_run(run)) + "\n"}
+        _publish_or_validate(plan_path, _json(plan) + "\n")
+        _publish_or_validate(self.path / "report.md", plan["report"])
+        _publish_or_validate(self.path / "summary.json", plan["summary"])
+        marker = {"identity_hash": metadata["identity_hash"], **{
+            name: hashlib.sha256((self.path / name).read_bytes()).hexdigest()
+            for name in ("trials.jsonl", "finalization.json", "report.md", "summary.json")}}
+        _publish_or_validate(self.path / "complete.json", _json(marker) + "\n")
 
 
 def write_activation_artifacts(run, output_dir: Path) -> Path:
     """Write a complete run to the exact *new* run directory supplied."""
-    writer = ActivationArtifactWriter.create(output_dir, run.collection)
-    writer.write_frozen(run.selections)
-    for trial in run.trials:
-        writer.append_trial(trial)
-    writer.finalize(run)
-    return writer.path
+    with ActivationArtifactWriter.create(output_dir, run.collection) as writer:
+        writer.write_frozen(run.selections)
+        for trial in run.trials:
+            writer.append_trial(trial)
+        writer.finalize(run)
+        return writer.path
 
 
 def descriptive_interval(values, *, seed, draws=2000):
@@ -366,7 +540,7 @@ def summarize_activation_run(run):
             "score_lean_utility_association": associations, "elapsed_seconds": run.elapsed_seconds,
             "activation_layers": list(run.collection.layers), "model_revision": run.collection.model_revision,
             "model_revision_resolved": not run.collection.model_revision.startswith("unresolved:"),
-            "prelean_elapsed_seconds": sum(c.elapsed_seconds or 0 for c in run.collection.cells),
+            "prelean_elapsed_seconds": None if any(c.elapsed_seconds is None for c in run.collection.cells) else sum(c.elapsed_seconds for c in run.collection.cells),
             "limitations": "Single-boundary single-layer patching is a local causal proxy, not a reconstruction of the analogy trajectory."}
 
 

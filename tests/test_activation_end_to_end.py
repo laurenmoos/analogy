@@ -112,3 +112,45 @@ def test_anchor_preparation_flushes_completed_cells_before_next_model_failure(tm
         cli.main(["activation-eval", "--output-dir", str(path)])
     anchors = (path / "anchors.jsonl").read_text().splitlines()
     assert len(anchors) == 1 and json.loads(anchors[0])["problem_id"] == "p"
+
+
+def test_competing_cli_resume_fails_before_runtime_loading(tmp_path, monkeypatch):
+    from test_activation_report import completed_run
+    run, _ = completed_run()
+    writer = report.ActivationArtifactWriter.create(tmp_path / "locked", run.collection)
+    writer.write_frozen(run.selections)
+    monkeypatch.setattr(activation_cli, "load_activation_eval_config", lambda _: run.collection.config)
+    def forbidden_runtime(_):
+        pytest.fail("runtime/model loaded while another writer holds the run")
+    monkeypatch.setattr(activation_cli, "get_runtime", forbidden_runtime)
+    assert cli.main(["activation-eval", "--resume", str(writer.path)]) == 2
+    writer.close()
+
+
+def test_cli_recovers_final_publication_and_validates_seed_override(tmp_path, monkeypatch):
+    cfg, app, problems, _, _, provider, _ = setup()
+    cfg = replace(cfg, base_config=app)
+    class StructuredLean(Lean):
+        def proof_structure_after(self, problem, prefix):
+            return STRUCTURE
+    lean = StructuredLean()
+    monkeypatch.setattr(activation_cli, "load_activation_eval_config", lambda _: cfg)
+    monkeypatch.setattr(activation_cli, "get_runtime", lambda _: SimpleNamespace(config=app, model=provider, verifier=lean, problems=problems))
+    publish = report._atomic_new
+    def fail_summary(path, content):
+        if path.name == "summary.json":
+            raise OSError("summary publication interrupted")
+        publish(path, content)
+    monkeypatch.setattr(report, "_atomic_new", fail_summary)
+    path = tmp_path / "finalization"
+    assert cli.main(["activation-eval", "--output-dir", str(path), "--seed", "7"]) == 2
+    assert (path / "report.md").exists() and not (path / "complete.json").exists()
+    original_report = (path / "report.md").read_bytes()
+    calls = len(provider.calls), len(lean.calls)
+    monkeypatch.setattr(report, "_atomic_new", publish)
+    assert cli.main(["activation-eval", "--resume", str(path), "--seed", "7"]) == 0
+    assert (len(provider.calls), len(lean.calls)) == calls
+    assert (path / "report.md").read_bytes() == original_report
+    before = {p.name: p.read_bytes() for p in path.iterdir()}
+    assert cli.main(["activation-eval", "--resume", str(path), "--seed", "8"]) == 2
+    assert before == {p.name: p.read_bytes() for p in path.iterdir()}

@@ -6,7 +6,8 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Callable, Protocol
+from inspect import Parameter, signature
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from ...model.parser import (
     candidate_rejection_reason,
@@ -33,6 +34,11 @@ from ...utils.records import (
     _require_text,
     _typed_tuple,
 )
+from ..proof.semantic import (
+    SemanticResult,
+    render_countermodel_table,
+    render_semantic_guidance,
+)
 from .state import (
     AnalogyScratchpad,
     AnalogyState,
@@ -41,6 +47,10 @@ from .state import (
     extract_analogy_block,
     remove_analogy_blocks,
 )
+
+if TYPE_CHECKING:
+    from ..episode import SearchSession
+    from ..proof.adapter import TacticSubmitter
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +196,28 @@ class AnalogyRescueOutcome:
             raise ValueError("fallback outcome must have at most one terminal result")
 
 
+@dataclass(frozen=True, slots=True)
+class AnalogyRescue:
+    """Lazy rescue plan generated for one semantically recoverable stuck state."""
+
+    runner: AnalogyRescueRunner
+    state: SymbolicState
+    goal: SymbolicState
+    tactic_pool: tuple[TacticCandidate, ...]
+    ordinary_attempts: tuple[TacticResult, ...]
+    cancellation: CancellationToken
+    semantic_guidance: str
+    dependency_table: str
+    force_domain_change: bool
+    classify: Callable[[SymbolicState, TacticResult], TacticEvaluation]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalogyRescueResult:
+    rescue: AnalogyRescue
+    outcome: AnalogyRescueOutcome
+
+
 class AnalogyRescueRunner(Protocol):
     def search(
         self,
@@ -200,6 +232,67 @@ class AnalogyRescueRunner(Protocol):
         *,
         force_domain_change: bool = False,
     ) -> AnalogyRescueOutcome: ...
+
+
+def generate_analogy_rescue(
+    search: SearchSession,
+    scratchpad: AnalogyScratchpad,
+) -> AnalogyRescue:
+    """Build the lazy rescue plan for the search's current stuck state."""
+
+    runner = search.context.analogy_fallback
+    recovery = search.recovery
+    rescue_node = search.rescue_node
+    ordinary = search.rescue_ordinary
+    if runner is None or recovery is None or rescue_node is None or ordinary is None:
+        raise RuntimeError("search has no pending analogy rescue")
+    owned_scratchpad = getattr(runner, "_analogy_scratchpad", scratchpad)
+    if owned_scratchpad is not None and owned_scratchpad is not scratchpad:
+        raise ValueError("analogy policy and rescue must share one scratchpad")
+    return AnalogyRescue(
+        runner=runner,
+        state=rescue_node.state,
+        goal=search.goal,
+        tactic_pool=ordinary.candidate_pool,
+        ordinary_attempts=ordinary.attempts,
+        cancellation=search.context.cancellation,
+        semantic_guidance=render_semantic_guidance(recovery),
+        dependency_table=render_countermodel_table(recovery.countermodel_table),
+        force_domain_change=recovery.result is SemanticResult.COUNTERMODEL,
+        classify=search.classify_rescue_result,
+    )
+
+
+def submit_analogy_rescue_to_lean(
+    proof: TacticSubmitter,
+    rescue: AnalogyRescue,
+) -> AnalogyRescueResult:
+    """Drive one bounded rescue plan, keeping every Lean call in submission."""
+
+    def evaluate(candidate: TacticCandidate) -> TacticEvaluation:
+        result = proof.run_tactic(rescue.state, candidate)
+        return rescue.classify(rescue.state, result)
+
+    search_method = rescue.runner.search
+    parameters = signature(search_method).parameters.values()
+    accepts_keywords = any(item.kind is Parameter.VAR_KEYWORD for item in parameters)
+    names = {item.name for item in parameters}
+    keyword_arguments = {}
+    if accepts_keywords or "dependency_table" in names:
+        keyword_arguments["dependency_table"] = rescue.dependency_table
+    if accepts_keywords or "force_domain_change" in names:
+        keyword_arguments["force_domain_change"] = rescue.force_domain_change
+    outcome = search_method(
+        rescue.state,
+        rescue.goal,
+        rescue.tactic_pool,
+        rescue.ordinary_attempts,
+        evaluate,
+        rescue.cancellation,
+        rescue.semantic_guidance,
+        **keyword_arguments,
+    )
+    return AnalogyRescueResult(rescue, outcome)
 
 
 class RescueOutputError(ValueError):
@@ -714,8 +807,10 @@ def _fallback_seed(base_seed: int, state: SymbolicState, attempt: int) -> int:
 
 
 __all__ = [
-    "AnalogyFallback", "AnalogyGenerationAttempt", "AnalogyRescueOutcome",
-    "AnalogyRescueRunner", "PolicyActionRecord", "PredictionLabel", "RescueAttempt",
-    "RescueOutputError", "RescueProposal", "RescueRollout", "RescueTermination",
-    "TacticEvaluation", "parse_analogy_tactic", "parse_analogy_update",
+    "AnalogyFallback", "AnalogyGenerationAttempt", "AnalogyRescue",
+    "AnalogyRescueOutcome", "AnalogyRescueResult", "AnalogyRescueRunner",
+    "PolicyActionRecord", "PredictionLabel", "RescueAttempt", "RescueOutputError",
+    "RescueProposal", "RescueRollout", "RescueTermination", "TacticEvaluation",
+    "generate_analogy_rescue", "parse_analogy_tactic", "parse_analogy_update",
+    "submit_analogy_rescue_to_lean",
 ]

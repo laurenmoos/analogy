@@ -26,6 +26,7 @@ from ..utils.records import (
     TacticStatus,
 )
 from .analogy.rescue import (
+    AnalogyRescueResult,
     AnalogyRescueOutcome,
     AnalogyRescueRunner,
     RescueRollout,
@@ -198,7 +199,11 @@ class SearchSession:
         return True
 
     def is_stuck(self) -> bool:
-        return self.rescue_node is not None and self.terminal_result is None
+        return (
+            self.rescue_node is not None
+            and self.pending_batch is None
+            and self.terminal_result is None
+        )
 
     @property
     def result(self) -> SearchResult:
@@ -246,6 +251,29 @@ class SearchSession:
             forced_moves=tuple(self.forced_moves),
         )
 
+    def classify_rescue_result(
+        self,
+        state: SymbolicState,
+        result: TacticResult,
+    ) -> TacticEvaluation:
+        if self.rescue_node is None:
+            raise RuntimeError("search has no pending rescue node")
+        node = (
+            self.rescue_node
+            if state == self.rescue_node.state
+            else SearchNode(state, self.rescue_node.score)
+        )
+        completed, successor, discarded = _classify(
+            self.context,
+            node,
+            self.goal,
+            result,
+            self.visited,
+            self.semantic_cache,
+            self.semantic_prunes,
+        )
+        return TacticEvaluation(result, completed, successor, discarded)
+
     def clear_active_node(self) -> None:
         self.node = None
         self.candidate_pool = None
@@ -278,9 +306,15 @@ def start_search(
     )
 
 
-def update_search(search: SearchSession, submitted: TacticBatchResult) -> None:
+def update_search(
+    search: SearchSession,
+    submitted: TacticBatchResult | AnalogyRescueResult,
+) -> None:
     if search.terminal_result is not None:
         raise RuntimeError("cannot update a terminated search")
+    if isinstance(submitted, AnalogyRescueResult):
+        _update_analogy_rescue(search, submitted)
+        return
     batch = submitted.batch
     if search.node is None or batch.node != search.node:
         raise ValueError("tactic results belong to a stale search node")
@@ -446,6 +480,36 @@ def _update_forced_move(
         if successor is not None:
             search.frontier.push(successor)
         search.clear_active_node()
+
+
+def _update_analogy_rescue(
+    search: SearchSession,
+    submitted: AnalogyRescueResult,
+) -> None:
+    if search.recovery is None or search.rescue_node is None:
+        raise RuntimeError("search has no pending analogy rescue")
+    outcome = submitted.outcome
+    outcome = replace(
+        outcome,
+        rollouts=tuple(
+            replace(rollout, semantic_event_id=search.recovery.event_id)
+            for rollout in outcome.rollouts
+        ),
+    )
+    search.rescue_rollouts.extend(outcome.rollouts)
+    _validate_rescue(search.rescue_node, outcome)
+    if outcome.cancelled:
+        search.finish(SearchStatus.CANCELLED)
+        return
+    if outcome.completed_proof is not None:
+        search.finish(SearchStatus.COMPLETE, outcome.completed_proof)
+        return
+    if search.forced_successor is not None:
+        search.frontier.push(search.forced_successor)
+    if outcome.successor is not None:
+        _index_node(search.nodes_by_id, outcome.successor)
+        search.frontier.push(outcome.successor)
+    search.clear_active_node()
 
 
 def run_episode(

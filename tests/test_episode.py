@@ -15,6 +15,12 @@ from analogy.solver.analogy.rescue import (
     RescueProposal,
     RescueRollout,
     RescueTermination,
+    generate_analogy_rescue,
+    submit_analogy_rescue_to_lean,
+)
+from analogy.solver.analogy.state import (
+    initialize_analogy_scratchpad,
+    update_analogy,
 )
 from analogy.solver.search import (
     AcceptNovelState,
@@ -43,12 +49,19 @@ RESCUE_CANDIDATE = TacticCandidate(
 )
 
 
-def _run_incremental(context, initial=START, goal=GOAL):
+def _run_incremental(context, initial=START, goal=GOAL, *, analogy=False):
+    scratchpad = initialize_analogy_scratchpad() if analogy else None
     search = start_search(context, initial, goal)
     while search.has_work():
         tactics = generate_tactics_with_model_policy(search)
         results = submit_tactics_to_lean(context.verifier, tactics)
         update_search(search, results)
+        if search.is_stuck():
+            assert scratchpad is not None
+            scratchpad = update_analogy(search, scratchpad)
+            rescue = generate_analogy_rescue(search, scratchpad)
+            result = submit_analogy_rescue_to_lean(context.verifier, rescue)
+            update_search(search, result)
     return search.result
 
 
@@ -111,8 +124,6 @@ def test_episode_returns_immediately_after_ordinary_completion():
 
 
 def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
-    from analogy.solver.episode import run_episode
-
     events = []
 
     class Verifier:
@@ -144,8 +155,9 @@ def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
                 rollouts=(rollout,),
             )
 
-    result = run_episode(
-        _context(Verifier(), analogy_enabled=True, rescue=Rescue()), START, GOAL
+    result = _run_incremental(
+        _context(Verifier(), analogy_enabled=True, rescue=Rescue()),
+        analogy=True,
     )
 
     assert result.status is SearchStatus.COMPLETE
@@ -170,20 +182,16 @@ def test_disabled_analogy_never_calls_fallback_when_conventional_tactic_is_stuck
 
 
 def test_enabled_analogy_does_not_call_fallback_when_conventional_tactic_succeeds():
-    from analogy.solver.episode import run_episode
-
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(candidate, TacticStatus.COMPLETE, proof="exact h")
 
-    result = run_episode(_context(Verifier(), analogy_enabled=True), START, GOAL)
+    result = _run_incremental(_context(Verifier(), analogy_enabled=True))
 
     assert result.status is SearchStatus.COMPLETE
 
 
 def test_analogy_successor_returns_to_the_shared_frontier():
-    from analogy.solver.episode import run_episode
-
     events = []
     successor = SymbolicState("rescued", "Q", "lean4")
 
@@ -219,12 +227,11 @@ def test_analogy_successor_returns_to_the_shared_frontier():
                 successor=evaluation.successor, rollouts=(rollout,)
             )
 
-    result = run_episode(
+    result = _run_incremental(
         _context(
             Verifier(), analogy_enabled=True, rescue=Rescue(), ranker=Ranker()
         ),
-        START,
-        GOAL,
+        analogy=True,
     )
 
     assert result.status is SearchStatus.COMPLETE
@@ -237,8 +244,6 @@ def test_analogy_successor_returns_to_the_shared_frontier():
 
 
 def test_episode_uses_embedding_novelty_to_explore_distinct_states_first():
-    from analogy.solver.episode import run_episode
-
     first = TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY)
     diverse = TacticCandidate("rfl", 1.0, CandidateOrigin.ORDINARY)
     events = []
@@ -276,7 +281,7 @@ def test_episode_uses_embedding_novelty_to_explore_distinct_states_first():
 
     semantic = SemanticChecker()
 
-    result = run_episode(
+    result = _run_incremental(
         _context(
             Verifier(),
             ranker=Ranker(),
@@ -284,8 +289,6 @@ def test_episode_uses_embedding_novelty_to_explore_distinct_states_first():
             ordinary_width=2,
             semantic_checker=semantic,
         ),
-        START,
-        GOAL,
     )
 
     assert result.proof == "diverse"
@@ -299,8 +302,6 @@ def test_episode_uses_embedding_novelty_to_explore_distinct_states_first():
 
 
 def test_frontier_uses_latest_step_score_before_novelty():
-    from analogy.solver.episode import run_episode
-
     low = TacticCandidate("assumption", 0.2, CandidateOrigin.ORDINARY)
     high = TacticCandidate("rfl", 0.8, CandidateOrigin.ORDINARY)
     events = []
@@ -340,15 +341,13 @@ def test_frontier_uses_latest_step_score_before_novelty():
                 "test",
             )
 
-    result = run_episode(
+    result = _run_incremental(
         _context(
             Verifier(),
             ranker=Ranker(),
             diversity=Diversity(),
             ordinary_width=2,
         ),
-        START,
-        GOAL,
     )
 
     assert result.proof == "high"
@@ -372,8 +371,6 @@ def test_episode_discards_same_proof_state_even_when_generated_id_differs():
 
 
 def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
-    from analogy.solver.episode import run_episode
-
     middle = SymbolicState("middle", "P Q : Prop\nh : P\n⊢ P", "lean4")
     false_leaf = SymbolicState("false", "P : Prop\n⊢ P", "lean4")
     seen = []
@@ -418,10 +415,9 @@ def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
                 ),
             )
 
-    result = run_episode(
+    result = _run_incremental(
         _context(Verifier(), analogy_enabled=True, rescue=Rescue(), ranker=Ranker()),
-        START,
-        GOAL,
+        analogy=True,
     )
 
     assert result.status is SearchStatus.COMPLETE
@@ -436,8 +432,6 @@ def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
 
 
 def test_false_path_walks_multiple_levels_and_orders_abandoned_tactics():
-    from analogy.solver.episode import run_episode
-
     false_middle = SymbolicState("false-middle", "P : Prop\n⊢ P", "lean4")
     false_leaf = SymbolicState("false-leaf", "P Q : Prop\n⊢ P", "lean4")
 
@@ -481,10 +475,9 @@ def test_false_path_walks_multiple_levels_and_orders_abandoned_tactics():
                 ),
             )
 
-    result = run_episode(
+    result = _run_incremental(
         _context(Verifier(), analogy_enabled=True, rescue=Rescue(), ranker=Ranker()),
-        START,
-        GOAL,
+        analogy=True,
     )
 
     event = result.semantic_recoveries[0]
@@ -493,16 +486,14 @@ def test_false_path_walks_multiple_levels_and_orders_abandoned_tactics():
 
 
 def test_false_root_terminates_as_semantic_failure_without_analogy():
-    from analogy.solver.episode import run_episode
-
     false_root = SymbolicState("root", "P : Prop\n⊢ P", "lean4")
 
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(candidate, TacticStatus.ERROR)
 
-    result = run_episode(
-        _context(Verifier(), analogy_enabled=True), false_root, GOAL
+    result = _run_incremental(
+        _context(Verifier(), analogy_enabled=True), initial=false_root
     )
 
     assert result.status is SearchStatus.SEMANTIC_FAILURE
@@ -511,15 +502,13 @@ def test_false_root_terminates_as_semantic_failure_without_analogy():
 
 
 def test_semantic_parse_error_terminates_with_explicit_event():
-    from analogy.solver.episode import run_episode
-
     malformed = SymbolicState("malformed", "not a Lean goal", "lean4")
 
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(candidate, TacticStatus.ERROR)
 
-    result = run_episode(_context(Verifier()), malformed, GOAL)
+    result = _run_incremental(_context(Verifier()), initial=malformed)
 
     assert result.status is SearchStatus.SEMANTIC_FAILURE
     assert result.semantic_recoveries[0].result is None
@@ -527,8 +516,6 @@ def test_semantic_parse_error_terminates_with_explicit_event():
 
 
 def test_semantic_assessments_are_cached_while_resolving_sibling_paths():
-    from analogy.solver.episode import run_episode
-
     left = SymbolicState("left", "left", "lean4")
     right = SymbolicState("right", "right", "lean4")
 
@@ -561,7 +548,7 @@ def test_semantic_assessments_are_cached_while_resolving_sibling_paths():
             )
 
     checker = Checker()
-    result = run_episode(
+    result = _run_incremental(
         _context(
             Verifier(),
             ranker=Ranker(),
@@ -569,8 +556,6 @@ def test_semantic_assessments_are_cached_while_resolving_sibling_paths():
             semantic_checker=checker,
             max_expansions=5,
         ),
-        START,
-        GOAL,
     )
 
     assert result.status is SearchStatus.EXHAUSTED
@@ -602,8 +587,6 @@ def test_countermodel_refuted_open_successor_is_pruned_before_frontier_expansion
 
 
 def test_unknown_open_successor_remains_on_frontier():
-    from analogy.solver.episode import run_episode
-
     quantified = SymbolicState("quantified", "P : α → Prop\n⊢ ∀ x, P x", "lean4")
     calls = []
 
@@ -614,7 +597,7 @@ def test_unknown_open_successor_remains_on_frontier():
                 return TacticResult(candidate, TacticStatus.ACCEPTED, state=quantified)
             return TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
 
-    result = run_episode(_context(Verifier()), START, GOAL)
+    result = _run_incremental(_context(Verifier()))
 
     assert result.status is SearchStatus.COMPLETE
     assert calls == ["start", "quantified"]
@@ -747,8 +730,6 @@ def test_incremental_search_records_an_empty_candidate_pool_as_exhausted():
 
 
 def test_all_refuted_disjunct_choices_skip_trailing_candidates():
-    from analogy.solver.episode import run_episode
-
     root = SymbolicState("root", "P Q : Prop\n⊢ P ∨ Q", "lean4")
     left_false = SymbolicState("left-false", "P Q : Prop\n⊢ P", "lean4")
     right_false = SymbolicState("right-false", "P Q : Prop\n⊢ Q", "lean4")
@@ -775,10 +756,9 @@ def test_all_refuted_disjunct_choices_skip_trailing_candidates():
                 return SemanticAssessment(state.id, SemanticResult.COUNTERMODEL, (("Q", False),), 0)
             return SemanticAssessment(state.id, SemanticResult.VALID)
 
-    result = run_episode(
+    result = _run_incremental(
         _context(Verifier(), ranker=Ranker(), ordinary_width=4, semantic_checker=Checker()),
-        root,
-        GOAL,
+        initial=root,
     )
 
     assert attempted == ["left", "right"]
@@ -793,8 +773,6 @@ def test_all_refuted_disjunct_choices_skip_trailing_candidates():
 
 
 def test_accepted_forced_move_does_not_suppress_stuck_only_analogy():
-    from analogy.solver.episode import run_episode
-
     root = SymbolicState("root", "P Q R : Prop\nhPQ : P ∨ Q\n⊢ R", "lean4")
     left_false = SymbolicState("left-false", "P Q R : Prop\n⊢ R", "lean4")
     right_false = SymbolicState("right-false", "P Q R : Prop\n⊢ R", "lean4")
@@ -829,11 +807,11 @@ def test_accepted_forced_move_does_not_suppress_stuck_only_analogy():
             rescue_calls.append(state.id)
             return AnalogyRescueOutcome()
 
-    result = run_episode(
+    result = _run_incremental(
         _context(Verifier(), analogy_enabled=True, rescue=Rescue(), ranker=Ranker(),
                  ordinary_width=2, semantic_checker=Checker()),
         root,
-        GOAL,
+        analogy=True,
     )
 
     assert rescue_calls == ["root"]
@@ -841,8 +819,6 @@ def test_accepted_forced_move_does_not_suppress_stuck_only_analogy():
 
 
 def test_failed_forced_move_is_shared_with_analogy_duplicate_ledger():
-    from analogy.solver.episode import run_episode
-
     root = SymbolicState("root", "P Q R : Prop\nhPQ : P ∨ Q\n⊢ R", "lean4")
     left_false = SymbolicState("left-false", "P Q R : Prop\nh : P\n⊢ R", "lean4")
     right_false = SymbolicState("right-false", "P Q R : Prop\nh : Q\n⊢ R", "lean4")
@@ -881,7 +857,7 @@ def test_failed_forced_move_is_shared_with_analogy_duplicate_ledger():
             ]
             return AnalogyRescueOutcome()
 
-    result = run_episode(
+    result = _run_incremental(
         _context(
             Verifier(),
             analogy_enabled=True,
@@ -891,7 +867,7 @@ def test_failed_forced_move_is_shared_with_analogy_duplicate_ledger():
             semantic_checker=Checker(),
         ),
         root,
-        GOAL,
+        analogy=True,
     )
 
     assert submitted.count("rcases hPQ with hP | hQ") == 1
@@ -899,8 +875,6 @@ def test_failed_forced_move_is_shared_with_analogy_duplicate_ledger():
 
 
 def test_unknown_stuck_state_skips_rescue_and_keeps_other_frontier_work():
-    from analogy.solver.episode import run_episode
-
     root = SymbolicState("root", "P : Prop\n⊢ P", "lean4")
     unknown = SymbolicState("unknown", "n : Nat\n⊢ n = n", "lean4")
     alternative = SymbolicState("alternative", "P : Prop\nh : P\n⊢ P", "lean4")
@@ -925,10 +899,9 @@ def test_unknown_stuck_state_skips_rescue_and_keeps_other_frontier_work():
                 return TacticResult(candidate, TacticStatus.ERROR)
             return TacticResult(candidate, TacticStatus.COMPLETE, proof="exact h")
 
-    result = run_episode(
+    result = _run_incremental(
         _context(Verifier(), ranker=Ranker(), ordinary_width=2, max_expansions=4),
-        root,
-        GOAL,
+        initial=root,
     )
 
     assert result.status is SearchStatus.COMPLETE
@@ -937,8 +910,6 @@ def test_unknown_stuck_state_skips_rescue_and_keeps_other_frontier_work():
 
 
 def test_checker_exception_becomes_semantic_failure():
-    from analogy.solver.episode import run_episode
-
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(candidate, TacticStatus.ERROR)
@@ -947,9 +918,7 @@ def test_checker_exception_becomes_semantic_failure():
         def assess(self, _state):
             raise SemanticCheckError("checker exploded")
 
-    result = run_episode(
-        _context(Verifier(), semantic_checker=Checker()), START, GOAL
-    )
+    result = _run_incremental(_context(Verifier(), semantic_checker=Checker()))
 
     assert result.status is SearchStatus.SEMANTIC_FAILURE
     assert result.semantic_recoveries[0].error == "checker exploded"

@@ -266,12 +266,31 @@ class AnalogyScratchpad:
         del self._abandoned[: -self._abandoned_limit]
 
 
+def initialize_analogy_scratchpad() -> AnalogyScratchpad:
+    """Create the per-problem analogy state used by one assisted run."""
+
+    return AnalogyScratchpad()
+
+
+def update_analogy(search, scratchpad: AnalogyScratchpad) -> AnalogyScratchpad:
+    """Prepare analogy state for the search's pending rescue context."""
+
+    recovery = search.recovery
+    if recovery is None:
+        raise RuntimeError("search has no pending analogy rescue")
+    if recovery.result.value == "countermodel":
+        scratchpad.abandon_current()
+    return scratchpad
+
+
 __all__ = [
     "AnalogyScratchpad",
     "AnalogyState",
     "AnalogyStateError",
     "AnalogyUpdateAction",
     "extract_analogy_block",
+    "initialize_analogy_scratchpad",
     "parse_analogy_block",
     "remove_analogy_blocks",
+    "update_analogy",
 ]

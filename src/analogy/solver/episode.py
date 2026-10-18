@@ -66,8 +66,7 @@ class EpisodeContext:
     tactic_canonicalizer: TacticCanonicalizer
     progress_policy: ProgressPolicy
     cancellation: CancellationToken
-    analogy_enabled: bool
-    analogy_fallback: AnalogyRescueRunner
+    analogy_fallback: AnalogyRescueRunner | None = None
     ordinary_width: int = 1
     max_expansions: int | None = None
     stuck_state_sink: StuckStateSink | None = None
@@ -90,8 +89,6 @@ class EpisodeContext:
             )
         ):
             raise ValueError("max_expansions must be a positive integer or None")
-        if not isinstance(self.analogy_enabled, bool):
-            raise ValueError("analogy_enabled must be a boolean")
         if self.semantic_checker is None:
             raise ValueError("semantic_checker is required")
 
@@ -488,7 +485,7 @@ def _rescue_step(
     semantic_prunes: list[SemanticPrune],
     force_domain_change: bool = False,
 ):
-    if not context.analogy_enabled:
+    if context.analogy_fallback is None:
         return None
     evaluator = lambda candidate: _evaluate(
         context, node, goal, visited, candidate, semantic_cache, semantic_prunes

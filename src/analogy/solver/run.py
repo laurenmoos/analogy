@@ -52,6 +52,15 @@ class SolveRunRecord:
     output_directory: Path
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeResult:
+    """In-memory evidence produced while solving a collection of problems."""
+
+    summary: SolveSummary
+    traces: list[str]
+    details: dict[str, dict[str, Any]]
+
+
 def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
@@ -379,6 +388,215 @@ def _public_payload(value: Any) -> Any:
     return value
 
 
+def _initialize_proof(problem: Problem, verifier: Verifier) -> LeanGymAdapter:
+    return LeanGymAdapter(problem, verifier)
+
+
+def _create_model_policy(
+    config: AppConfig,
+    generator: TextGenerator,
+    lean: LeanGymAdapter,
+    model_events: list[dict[str, Any]],
+    *,
+    analogy_scratchpad: AnalogyScratchpad | None = None,
+) -> TacticRanker:
+    return TacticRanker(
+        generator,
+        top_k=config.search.top_k,
+        seed=config.run.seed,
+        failed_tactics_for=lean.failed_tactics_for,
+        trace_sink=model_events.append,
+        analogy_scratchpad=analogy_scratchpad,
+    )
+
+
+def _create_analogy_fallback(
+    config: AppConfig,
+    generator: TextGenerator,
+    model_events: list[dict[str, Any]],
+    analogy_scratchpad: AnalogyScratchpad,
+) -> AnalogyFallback:
+    return AnalogyFallback(
+        generator,
+        max_model_calls=config.analogy.max_model_calls,
+        seed=config.run.seed,
+        trace_sink=model_events.append,
+        analogy_scratchpad=analogy_scratchpad,
+    )
+
+
+def _configure_search(
+    config: AppConfig,
+    generator: TextGenerator,
+    lean: LeanGymAdapter,
+    model_policy: TacticRanker,
+    *,
+    analogy_fallback: AnalogyFallback | None = None,
+) -> EpisodeContext:
+    return EpisodeContext(
+        tactic_ranker=model_policy,
+        verifier=lean,
+        stuckness_policy=ObservableStucknessPolicy(),
+        state_fingerprinter=CanonicalStateFingerprinter(),
+        tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
+        progress_policy=AcceptNovelState(),
+        cancellation=NeverCancelled(),
+        analogy_fallback=analogy_fallback,
+        ordinary_width=config.search.top_k,
+        max_expansions=config.search.max_steps,
+        state_diversity=FrozenEmbeddingDiversity(
+            generator, layer=config.model.hidden_layer, neighbors=3
+        ),
+        semantic_checker=ExhaustiveSemanticChecker(),
+    )
+
+
+def _generate_and_verify_tactics(
+    problem: Problem,
+    lean: LeanGymAdapter,
+    search: EpisodeContext,
+) -> Any:
+    return run_episode(
+        search,
+        lean.initial_state(),
+        SymbolicState(f"{problem.id}:goal", problem.target, "lean4"),
+    )
+
+
+def _build_problem_record(
+    problem: Problem,
+    outcome: ProblemResult,
+    search_result: Any | None,
+    model_events: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    return _public_payload(
+        {
+            "problem": asdict(problem),
+            "outcome": asdict(outcome),
+            "search": None if search_result is None else asdict(search_result),
+            "model_events": model_events,
+        }
+    )
+
+
+def _write_problem_record(
+    run_directory: Path, problem: Problem, record: dict[str, Any]
+) -> None:
+    _write_json(run_directory / f"{problem.id}.json", record)
+
+
+def _update_checkpoint(
+    checkpoint: Checkpoint | None, problem: Problem, outcome: ProblemResult
+) -> None:
+    if checkpoint is not None:
+        record_status(checkpoint, problem.id, outcome.status.value)
+
+
+def _finish_runtime(
+    label: str,
+    started: float,
+    results: list[ProblemResult],
+    traces: list[str],
+    details: dict[str, dict[str, Any]],
+) -> RuntimeResult:
+    summary = SolveSummary(label, tuple(results), time.monotonic() - started)
+    return RuntimeResult(summary, traces, details)
+
+
+def run_vanilla(
+    config: AppConfig,
+    problems: Sequence[Problem],
+    generator: TextGenerator,
+    verifier: Verifier,
+    *,
+    run_directory: Path,
+    checkpoint: Checkpoint | None = None,
+) -> RuntimeResult:
+    started = time.monotonic()
+    details: dict[str, dict[str, Any]] = {}
+    traces: list[str] = []
+    results: list[ProblemResult] = []
+
+    for problem in problems:
+        model_events: list[dict[str, Any]] = []
+        search_result = None
+        try:
+            lean = _initialize_proof(problem, verifier)
+            model_policy = _create_model_policy(config, generator, lean, model_events)
+            search = _configure_search(config, generator, lean, model_policy)
+            search_result = _generate_and_verify_tactics(problem, lean, search)
+            outcome = _problem_result(problem.id, search_result)
+        except TacticRankingError as error:
+            outcome = _failed_problem_result(problem.id, SolveStatus.MODEL_FAILURE, str(error))
+        except Exception as error:
+            outcome = _failed_problem_result(problem.id, SolveStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
+
+        problem_record = _build_problem_record(problem, outcome, search_result, model_events)
+        _write_problem_record(run_directory, problem, problem_record)
+        _update_checkpoint(checkpoint, problem, outcome)
+        route = _problem_route(outcome, search_result)
+        details[problem.id] = problem_record
+        traces.append(render_problem_trace(problem_record, model_events, route=route))
+        results.append(outcome)
+
+    return _finish_runtime("analogy-off", started, results, traces, details)
+
+
+def run_analogy_assisted(
+    config: AppConfig,
+    problems: Sequence[Problem],
+    generator: TextGenerator,
+    verifier: Verifier,
+    *,
+    run_directory: Path,
+    checkpoint: Checkpoint | None = None,
+) -> RuntimeResult:
+    started = time.monotonic()
+    details: dict[str, dict[str, Any]] = {}
+    traces: list[str] = []
+    results: list[ProblemResult] = []
+
+    for problem in problems:
+        model_events: list[dict[str, Any]] = []
+        search_result = None
+        try:
+            lean = _initialize_proof(problem, verifier)
+            analogy_scratchpad = AnalogyScratchpad()
+            model_policy = _create_model_policy(
+                config,
+                generator,
+                lean,
+                model_events,
+                analogy_scratchpad=analogy_scratchpad,
+            )
+            analogy_fallback = _create_analogy_fallback(
+                config, generator, model_events, analogy_scratchpad
+            )
+            search = _configure_search(
+                config,
+                generator,
+                lean,
+                model_policy,
+                analogy_fallback=analogy_fallback,
+            )
+            search_result = _generate_and_verify_tactics(problem, lean, search)
+            outcome = _problem_result(problem.id, search_result)
+        except TacticRankingError as error:
+            outcome = _failed_problem_result(problem.id, SolveStatus.MODEL_FAILURE, str(error))
+        except Exception as error:
+            outcome = _failed_problem_result(problem.id, SolveStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
+
+        problem_record = _build_problem_record(problem, outcome, search_result, model_events)
+        _write_problem_record(run_directory, problem, problem_record)
+        _update_checkpoint(checkpoint, problem, outcome)
+        route = _problem_route(outcome, search_result)
+        details[problem.id] = problem_record
+        traces.append(render_problem_trace(problem_record, model_events, route=route))
+        results.append(outcome)
+
+    return _finish_runtime("analogy-on", started, results, traces, details)
+
+
 def _run_runtime(
     config: AppConfig,
     problems: Sequence[Problem],
@@ -388,72 +606,16 @@ def _run_runtime(
     run_directory: Path,
     checkpoint: Checkpoint | None = None,
 ) -> tuple[SolveSummary, list[str], dict[str, dict[str, Any]]]:
-    started = time.monotonic()
-    details: dict[str, dict[str, Any]] = {}
-    traces: list[str] = []
-    results: list[ProblemResult] = []
-    for problem in problems:
-        model_events: list[dict[str, Any]] = []
-        search_result = None
-        try:
-            lean = LeanGymAdapter(problem, verifier)
-            analogy_scratchpad = (
-                AnalogyScratchpad() if config.analogy.enabled else None
-            )
-            search_result = run_episode(
-                EpisodeContext(
-                    tactic_ranker=TacticRanker(
-                        generator,
-                        top_k=config.search.top_k,
-                        seed=config.run.seed,
-                        failed_tactics_for=lean.failed_tactics_for,
-                        trace_sink=model_events.append,
-                        analogy_scratchpad=analogy_scratchpad,
-                    ),
-                    verifier=lean,
-                    stuckness_policy=ObservableStucknessPolicy(),
-                    state_fingerprinter=CanonicalStateFingerprinter(),
-                    tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
-                    progress_policy=AcceptNovelState(),
-                    cancellation=NeverCancelled(),
-                    analogy_enabled=config.analogy.enabled,
-                    analogy_fallback=AnalogyFallback(
-                        generator,
-                        max_model_calls=config.analogy.max_model_calls,
-                        seed=config.run.seed,
-                        trace_sink=model_events.append,
-                        analogy_scratchpad=analogy_scratchpad,
-                    ),
-                    ordinary_width=config.search.top_k,
-                    max_expansions=config.search.max_steps,
-                    state_diversity=FrozenEmbeddingDiversity(
-                        generator, layer=config.model.hidden_layer, neighbors=3
-                    ),
-                    semantic_checker=ExhaustiveSemanticChecker(),
-                ),
-                lean.initial_state(),
-                SymbolicState(f"{problem.id}:goal", problem.target, "lean4"),
-            )
-            outcome = _problem_result(problem.id, search_result)
-        except TacticRankingError as error:
-            outcome = _failed_problem_result(problem.id, SolveStatus.MODEL_FAILURE, str(error))
-        except Exception as error:
-            outcome = _failed_problem_result(problem.id, SolveStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
-        detail = _public_payload({
-            "problem": asdict(problem),
-            "outcome": asdict(outcome),
-            "search": None if search_result is None else asdict(search_result),
-            "model_events": model_events,
-        })
-        details[problem.id] = detail
-        _write_json(run_directory / f"{problem.id}.json", detail)
-        if checkpoint is not None:
-            record_status(checkpoint, problem.id, outcome.status.value)
-        route = _problem_route(outcome, search_result)
-        traces.append(render_problem_trace(detail, model_events, route=route))
-        results.append(outcome)
-    label = "analogy-on" if config.analogy.enabled else "analogy-off"
-    return SolveSummary(label, tuple(results), time.monotonic() - started), traces, details
+    recipe = run_analogy_assisted if config.analogy.enabled else run_vanilla
+    result = recipe(
+        config,
+        problems,
+        generator,
+        verifier,
+        run_directory=run_directory,
+        checkpoint=checkpoint,
+    )
+    return result.summary, result.traces, result.details
 
 
 def solve_problems(

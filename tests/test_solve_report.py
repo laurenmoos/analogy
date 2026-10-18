@@ -10,8 +10,9 @@ from analogy.solver import run as run_module
 from analogy.solver.run import (
     _problem_result,
     _problem_route,
-    _run_runtime,
     render_problem_trace,
+    run_analogy_assisted,
+    run_vanilla,
 )
 from analogy.solver.search import SearchResult
 from analogy.solver.proof.semantic import (
@@ -23,7 +24,46 @@ from analogy.solver.proof.semantic import (
 ROOT = Path(__file__).parents[1]
 
 
-def test_runtime_shares_one_scratchpad_within_each_problem_and_isolates_problems(
+def test_vanilla_run_has_no_analogy_state_or_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    contexts = []
+
+    class FakeLean:
+        def __init__(self, problem, verifier):
+            self.problem = problem
+
+        def failed_tactics_for(self, _state_id):
+            return ()
+
+        def initial_state(self):
+            return SymbolicState(f"{self.problem.id}:initial", "P : Prop\n⊢ P", "lean4")
+
+    def fake_run_episode(context, initial, goal):
+        contexts.append(context)
+        return SearchResult(SearchStatus.EXHAUSTED, None)
+
+    monkeypatch.setattr(run_module, "LeanGymAdapter", FakeLean)
+    monkeypatch.setattr(run_module, "run_episode", fake_run_episode)
+    config = load_config(ROOT / "config.yaml")
+    config = replace(config, analogy=replace(config.analogy, enabled=False))
+    problem = Problem("plain", "demo", "", "P", "test", "test", "atom", 1)
+
+    result = run_vanilla(
+        config,
+        (problem,),
+        object(),
+        object(),
+        run_directory=tmp_path,
+    )
+
+    assert result.summary.run_id == "analogy-off"
+    assert len(contexts) == 1
+    assert contexts[0].tactic_ranker._analogy_scratchpad is None
+    assert contexts[0].analogy_fallback is None
+
+
+def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
     tmp_path, monkeypatch
 ) -> None:
     contexts = []
@@ -51,7 +91,7 @@ def test_runtime_shares_one_scratchpad_within_each_problem_and_isolates_problems
         for index in range(2)
     )
 
-    _run_runtime(
+    result = run_analogy_assisted(
         config,
         problems,
         object(),
@@ -59,6 +99,7 @@ def test_runtime_shares_one_scratchpad_within_each_problem_and_isolates_problems
         run_directory=tmp_path,
     )
 
+    assert result.summary.run_id == "analogy-on"
     assert len(contexts) == 2
     first_ranker = contexts[0].tactic_ranker._analogy_scratchpad
     first_fallback = contexts[0].analogy_fallback._analogy_scratchpad

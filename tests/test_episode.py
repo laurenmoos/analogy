@@ -71,8 +71,7 @@ def _context(
         cancellation=NeverCancelled(),
         ordinary_width=ordinary_width,
         max_expansions=max_expansions,
-        analogy_enabled=analogy_enabled,
-        analogy_fallback=rescue or _FailIfCalledFallback(),
+        analogy_fallback=(rescue or _FailIfCalledFallback()) if analogy_enabled else None,
         state_diversity=diversity,
         semantic_checker=semantic_checker or ExhaustiveSemanticChecker(),
     )

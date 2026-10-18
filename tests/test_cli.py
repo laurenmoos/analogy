@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,22 +96,38 @@ def test_report_names_semantic_failure_distinctly():
     )
 
 
-def test_solve_runs_shared_runtime_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("analogy_enabled", "expected_label"),
+    ((False, "vanilla"), (True, "analogy-assisted")),
+)
+def test_solve_selects_explicit_run_recipe(
+    tmp_path, monkeypatch, analogy_enabled, expected_label
+):
     configured = load_config(ROOT / "config.yaml")
-    configured = replace(configured, run=replace(configured.run, output_dir=tmp_path))
-    calls = []
+    configured = replace(
+        configured,
+        analogy=replace(configured.analogy, enabled=analogy_enabled),
+        run=replace(configured.run, output_dir=tmp_path),
+    )
 
-    def fake_runtime(
-        config, problems, generator, verifier, *, run_directory, checkpoint=None
-    ):
-        calls.append((config, problems, generator, verifier, run_directory, checkpoint))
-        return SolveSummary("analogy-on", (), 0.0), [], {}
+    def recipe(label):
+        def run(*args, **kwargs):
+            return SimpleNamespace(
+                summary=SolveSummary(label, (), 0.0),
+                traces=[],
+                details={},
+            )
 
-    monkeypatch.setattr(run_module, "_run_runtime", fake_runtime)
+        return run
+
+    monkeypatch.setattr(run_module, "run_vanilla", recipe("vanilla"))
+    monkeypatch.setattr(
+        run_module,
+        "run_analogy_assisted",
+        recipe("analogy-assisted"),
+    )
     run = run_module.solve_problems(configured, (), object(), object())
 
-    assert len(calls) == 1
-    assert calls[0][0] is configured
-    assert calls[0][5] is None
-    assert run.analogy_enabled is True
+    assert run.summary.run_id == expected_label
+    assert run.analogy_enabled is analogy_enabled
     assert run.summary.results == ()

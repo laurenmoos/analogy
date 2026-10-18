@@ -39,10 +39,50 @@ prompts:
       Then return at most {{top_k}} candidates after the block.
 
   analogy_initialize:
-    version: analogy-initialize-v3
+    version: analogy-initialize-v4
     system: |-
-      Create one concrete working mental model for planning this Lean 4 proof. Return only one block containing
-      strict JSON in exactly this shape:
+      Explain the supplied Lean proof state through one everyday mental model with an exact structural mapping.
+      Use only a source domain from the supplied domain card and only proof tactics from the supplied tactic card.
+      Map every visible atomic proposition to one distinct concrete thing and keep that mapping consistent.
+      Map every tactic in the proposed plan to one distinct everyday action: one action per tactic and one tactic per action.
+      Before planning, look for a shortcut such as an automatically true goal, a reusable hypothesis, or False, and
+      make the source-domain story reflect it.
+      Ordered domain transitions and proof transitions must have the same causal transition structure.
+      The domain fields must not mention Lean, proofs, tactics, logic, mathematics,
+      propositions, conjunction, disjunction, or implication. Proof fields may use exact Lean states and tactics.
+      Even descriptive words such as "logical" are forbidden in every domain_* value.
+      Use the complete supplied proof state as planning input, but keep the returned model to pivotal transitions.
+      A proof_before or proof_after must be an exact complete Lean state when supplied; otherwise use JSON null rather than inventing or shortening it.
+      A declaration such as p1 : Prop is not evidence;
+      never use a proposition name as the operand of exact, apply, or cases. Tactic operands must be visible hypotheses
+      from the supplied state or names introduced by an earlier proposed tactic.
+
+      Worked example for a different theorem (`P Q : Prop`, `hP : P`, goal `P ∨ Q`):
+      {
+        "domain": "travel",
+        "correspondences": [
+          {
+            "domain_before": "a traveler holding a red ticket needs either a red or a blue ticket",
+            "domain_transition": "the traveler chooses the red-ticket counter",
+            "domain_after": "the red-ticket counter is selected",
+            "proof_before": "P Q : Prop\nhP : P\n⊢ P ∨ Q",
+            "proof_transition": "left",
+            "proof_after": "P Q : Prop\nhP : P\n⊢ P"
+          },
+          {
+            "domain_before": "the red-ticket counter is selected",
+            "domain_transition": "the traveler presents the red ticket already in hand",
+            "domain_after": "the ticket requirement is satisfied",
+            "proof_before": "P Q : Prop\nhP : P\n⊢ P",
+            "proof_transition": "exact hP",
+            "proof_after": "SOLVED"
+          }
+        ],
+        "abandoned_domains": []
+      }
+      Use the example only for structural discipline; do not reuse its setting unless the domain card and exclusions permit it.
+
+      Return only one block containing strict JSON in exactly this shape:
       <mental_model>
       {
         "domain": "one-line domain",
@@ -59,18 +99,33 @@ prompts:
         "abandoned_domains": []
       }
       </mental_model>
-      Keep correspondences ordered. Use JSON null for unknown proof fields. Partial future correspondences are allowed.
+      Keep correspondences ordered. Use JSON null only for genuinely unknown future proof fields. Partial future
+      correspondences are allowed, but every proposed proof_transition must come from the tactic card.
     user: |-
       Overall target:
       {{overall_target}}
 
-      Current goals:
+      Current focused Lean proof state:
       {{current_goals}}
+
+      Allowed source domains:
+      {{domain_card}}
+
+      Allowed tactics for this proof state:
+      {{tactic_card}}
 
       Do not use any of these already selected domains:
       {{excluded_domains}}
 
       Return exactly one block in the required format and no text before or after it.
+
+  analogy_domain_card:
+    version: analogy-domain-card-v1
+    text: >-
+      Everyday-domain card: choose exactly one setting from cooking or restaurant preparation; travel or navigation;
+      building, maintenance, or construction; a board, card, or team game; gardening; package delivery or logistics;
+      household organization; or mechanical repair involving ordinary physical objects. Use concrete objects, states,
+      and causal actions from that setting only. Do not use a mathematical, logical, programming, or proof setting.
 
   analogy_rescue:
     version: analogy-rescue-v9
@@ -148,8 +203,8 @@ prompts:
   lean_tactic_card:
     version: lean-tactic-card-v2
     text: >-
-      Lean card: complete line; no tauto/itauto. {{recipes}}Core moves: intro, exact <hyp>, apply <hyp>, constructor,
-      cases/rcases, False.elim. Also use assumption or rw [<hyp>] when justified by the state.
+      Lean card: no tauto/itauto. {{recipes}}Core moves: intro, exact <hyp>, apply <hyp>, constructor,
+      cases/rcases, False.elim. Use assumption or rw [<hyp>] when justified. P : Prop is not evidence.
 
   lean_tactic_card_recipes:
     version: lean-tactic-card-recipes-v1

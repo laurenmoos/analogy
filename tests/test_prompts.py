@@ -296,6 +296,7 @@ def test_tactic_card_requires_operand_tactics_to_be_complete():
     assert "exact <hyp>" in card
     assert "apply <hyp>" in card
     assert "rw [<hyp>]" in card
+    assert "P : Prop is not evidence" in card
     assert len(card) <= 240
 
 
@@ -372,12 +373,42 @@ def test_analogy_initialization_requests_one_standalone_analogy_block():
             overall_target="⊢ P",
             current_goals="h : P\n⊢ P",
             excluded_domains="- lock",
+            domain_card="Everyday-domain card: cooking, travel.",
+            tactic_card="Lean card: exact h.",
         )
     )
 
     assert "Return exactly one block" in prompt
     assert "no text before or after" in prompt
     assert "- lock" in prompt
+
+
+def test_analogy_initialization_builds_an_external_model_from_the_full_proof_state():
+    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
+    prompt = "\n".join(
+        message.content
+        for message in catalog.messages(
+            "analogy_initialize",
+            overall_target="P → Q",
+            current_goals="P Q : Prop\nh : P\n⊢ Q",
+            excluded_domains="- shipping",
+            domain_card="Everyday-domain card: cooking, travel.",
+            tactic_card="Lean card: intro h; exact h.",
+        )
+    )
+
+    assert "Current focused Lean proof state:\nP Q : Prop\nh : P\n⊢ Q" in prompt
+    assert "Everyday-domain card: cooking, travel." in prompt
+    assert "Lean card: intro h; exact h." in prompt
+    assert "Map every visible atomic proposition to one distinct concrete thing" in prompt
+    assert "Map every tactic in the proposed plan to one distinct everyday action" in prompt
+    assert "domain fields must not mention Lean" in prompt
+    assert "same causal transition structure" in prompt
+    assert "Use the complete supplied proof state as planning input" in prompt
+    assert "A declaration such as p1 : Prop is not evidence" in prompt
+    assert "use JSON null rather than inventing or shortening it" in prompt
+    assert "Worked example for a different theorem" in prompt
+    assert '"proof_transition": "left"' in prompt
 
 
 def test_analogy_initialization_supplies_a_parser_compatible_template():
@@ -389,6 +420,8 @@ def test_analogy_initialization_supplies_a_parser_compatible_template():
             overall_target="⊢ P",
             current_goals="h : P\n⊢ P",
             excluded_domains="- lock",
+            domain_card="Everyday-domain card: cooking.",
+            tactic_card="Lean card: exact h.",
         )
     )
     blocks = re.findall(
@@ -411,6 +444,8 @@ def test_live_analogy_prompts_request_mental_model_correspondences():
             overall_target="⊢ P",
             current_goals="⊢ P",
             excluded_domains="- (none)",
+            domain_card="Everyday-domain card: cooking.",
+            tactic_card="Lean card: exact h.",
         )
     )
     update = "\n".join(

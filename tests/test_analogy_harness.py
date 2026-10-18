@@ -102,6 +102,9 @@ def test_initialization_builds_isolated_tracks_with_distinct_prompts_and_seeds()
     assert "- (none)" in calls[0][0][1].content
     assert "- lock" in calls[1][0][1].content
     assert "- lock\n- journey" in calls[2][0][1].content
+    assert "Current focused Lean proof state:\nh : P\n⊢ P" in calls[0][0][1].content
+    assert "Everyday-domain card:" in calls[0][0][1].content
+    assert "Lean card:" in calls[0][0][1].content
     assert len({id(track.scratchpad) for track in harness.tracks}) == 3
     assert len({id(track.model_policy) for track in harness.tracks}) == 3
     assert len({id(track.fallback) for track in harness.tracks}) == 3

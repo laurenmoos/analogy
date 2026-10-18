@@ -11,6 +11,7 @@ from ...config import AppConfig
 from ...model.model_provider import TextGenerator
 from ...model.prompts import (
     focused_lean_goal,
+    lean_tactic_card,
     prompt_catalog,
     render_lean_goal_for_model,
 )
@@ -112,6 +113,8 @@ def initialize_analogy_harness(
             current_goals=render_lean_goal_for_model(
                 focused_lean_goal(initial_state.expression)
             ),
+            domain_card=prompt_catalog().text("analogy_domain_card"),
+            tactic_card=lean_tactic_card(initial_state.expression),
             excluded_domains=(
                 "\n".join(f"- {domain}" for domain in accepted_domains)
                 or "- (none)"

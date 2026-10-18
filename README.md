@@ -58,5 +58,5 @@ The active corpus is a deterministic subset of the online
 [PropL dataset](https://huggingface.co/datasets/KomeijiForce/PropL), pinned to revision
 `62a13de410999c20f60ec2f3be93457dcaac0d62`. Each problem is intuitionistic propositional logic
 from `test_ood`, contains conjunction, disjunction, and implication, has a verifier-accepted source
-proof of at least 15 tactics, and is not solved by one `simp`. Selection and provenance details live
+proof of at least 13 tactics, and is not solved by one `simp`. Selection and provenance details live
 in `src/analogy/lean_gym/corpus/benchmark_metadata.json`; they are not included in model prompts.

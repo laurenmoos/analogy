@@ -19,7 +19,7 @@
       "∨",
       "→"
     ],
-    "minimum_reference_steps": 15,
+    "minimum_reference_steps": 13,
     "flat_trace_only": true,
     "exclude_one_step_simp": true,
     "ordering": [
@@ -76,10 +76,28 @@
       "one_step_simp_status": "open"
     },
     {
+      "problem_id": "propl_ood_208645874253727215108588452622",
+      "source_data_id": "208645874253727215108588452622",
+      "selection_rank": 6,
+      "reference_steps": 14,
+      "failed_attempts": 4,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
       "problem_id": "propl_ood_252955983084163427303699743884",
       "source_data_id": "252955983084163427303699743884",
-      "selection_rank": 6,
+      "selection_rank": 7,
       "reference_steps": 23,
+      "failed_attempts": 3,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
+      "problem_id": "propl_ood_54781560256269106948607279652",
+      "source_data_id": "54781560256269106948607279652",
+      "selection_rank": 8,
+      "reference_steps": 13,
       "failed_attempts": 3,
       "lean_status": "complete",
       "one_step_simp_status": "open"
@@ -87,7 +105,7 @@
     {
       "problem_id": "propl_ood_265557872740597889312779794693",
       "source_data_id": "265557872740597889312779794693",
-      "selection_rank": 7,
+      "selection_rank": 9,
       "reference_steps": 21,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -96,7 +114,7 @@
     {
       "problem_id": "propl_ood_205602444047427159151729097987",
       "source_data_id": "205602444047427159151729097987",
-      "selection_rank": 8,
+      "selection_rank": 10,
       "reference_steps": 21,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -105,7 +123,7 @@
     {
       "problem_id": "propl_ood_55195369758345374712361994170",
       "source_data_id": "55195369758345374712361994170",
-      "selection_rank": 9,
+      "selection_rank": 11,
       "reference_steps": 18,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -114,7 +132,7 @@
     {
       "problem_id": "propl_ood_218131501885521757299809195918",
       "source_data_id": "218131501885521757299809195918",
-      "selection_rank": 10,
+      "selection_rank": 12,
       "reference_steps": 17,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -123,7 +141,7 @@
     {
       "problem_id": "propl_ood_324895619711528419414480118729",
       "source_data_id": "324895619711528419414480118729",
-      "selection_rank": 11,
+      "selection_rank": 13,
       "reference_steps": 16,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -132,7 +150,7 @@
     {
       "problem_id": "propl_ood_192372476993061931283117647933",
       "source_data_id": "192372476993061931283117647933",
-      "selection_rank": 12,
+      "selection_rank": 14,
       "reference_steps": 15,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -141,7 +159,7 @@
     {
       "problem_id": "propl_ood_227279818380026546832524313203",
       "source_data_id": "227279818380026546832524313203",
-      "selection_rank": 13,
+      "selection_rank": 15,
       "reference_steps": 15,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -150,25 +168,16 @@
     {
       "problem_id": "propl_ood_315295300028829528556344223522",
       "source_data_id": "315295300028829528556344223522",
-      "selection_rank": 14,
+      "selection_rank": 16,
       "reference_steps": 15,
       "failed_attempts": 2,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
     {
-      "problem_id": "propl_ood_149793964518389069287071648555",
-      "source_data_id": "149793964518389069287071648555",
-      "selection_rank": 15,
-      "reference_steps": 32,
-      "failed_attempts": 1,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
       "problem_id": "propl_ood_155559477803074115543777587908",
       "source_data_id": "155559477803074115543777587908",
-      "selection_rank": 16,
+      "selection_rank": 17,
       "reference_steps": 23,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -177,7 +186,7 @@
     {
       "problem_id": "propl_ood_358233606958956408248147497163",
       "source_data_id": "358233606958956408248147497163",
-      "selection_rank": 17,
+      "selection_rank": 18,
       "reference_steps": 20,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -186,7 +195,7 @@
     {
       "problem_id": "propl_ood_254637624771904022244407550769",
       "source_data_id": "254637624771904022244407550769",
-      "selection_rank": 18,
+      "selection_rank": 19,
       "reference_steps": 19,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -195,7 +204,7 @@
     {
       "problem_id": "propl_ood_343192239287091465349940722490",
       "source_data_id": "343192239287091465349940722490",
-      "selection_rank": 19,
+      "selection_rank": 20,
       "reference_steps": 19,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -204,8 +213,17 @@
     {
       "problem_id": "propl_ood_199017835646202633754304488318",
       "source_data_id": "199017835646202633754304488318",
-      "selection_rank": 20,
+      "selection_rank": 21,
       "reference_steps": 17,
+      "failed_attempts": 1,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
+      "problem_id": "propl_ood_187316087705262697949769719019",
+      "source_data_id": "187316087705262697949769719019",
+      "selection_rank": 22,
+      "reference_steps": 13,
       "failed_attempts": 1,
       "lean_status": "complete",
       "one_step_simp_status": "open"
@@ -213,70 +231,16 @@
     {
       "problem_id": "propl_ood_163719196954327058628287864775",
       "source_data_id": "163719196954327058628287864775",
-      "selection_rank": 21,
+      "selection_rank": 23,
       "reference_steps": 32,
       "failed_attempts": 0,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
     {
-      "problem_id": "propl_ood_233085319447362096814516344851",
-      "source_data_id": "233085319447362096814516344851",
-      "selection_rank": 22,
-      "reference_steps": 27,
-      "failed_attempts": 0,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
-      "problem_id": "propl_ood_66651593447065051647675886728",
-      "source_data_id": "66651593447065051647675886728",
-      "selection_rank": 23,
-      "reference_steps": 22,
-      "failed_attempts": 0,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
-      "problem_id": "propl_ood_180344921350036326571061933581",
-      "source_data_id": "180344921350036326571061933581",
-      "selection_rank": 24,
-      "reference_steps": 22,
-      "failed_attempts": 0,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
-      "problem_id": "propl_ood_333542944207965230764972479737",
-      "source_data_id": "333542944207965230764972479737",
-      "selection_rank": 25,
-      "reference_steps": 20,
-      "failed_attempts": 0,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
-      "problem_id": "propl_ood_229972526787606814135415396844",
-      "source_data_id": "229972526787606814135415396844",
-      "selection_rank": 26,
-      "reference_steps": 20,
-      "failed_attempts": 0,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
-      "problem_id": "propl_ood_53451020350017255163164050676",
-      "source_data_id": "53451020350017255163164050676",
-      "selection_rank": 27,
-      "reference_steps": 20,
-      "failed_attempts": 0,
-      "lean_status": "complete",
-      "one_step_simp_status": "rejected"
-    },
-    {
       "problem_id": "propl_ood_328559760417726643256316306381",
       "source_data_id": "328559760417726643256316306381",
-      "selection_rank": 28,
+      "selection_rank": 24,
       "reference_steps": 20,
       "failed_attempts": 0,
       "lean_status": "complete",
@@ -285,7 +249,7 @@
     {
       "problem_id": "propl_ood_130516192761027817136232900483",
       "source_data_id": "130516192761027817136232900483",
-      "selection_rank": 29,
+      "selection_rank": 25,
       "reference_steps": 17,
       "failed_attempts": 0,
       "lean_status": "complete",
@@ -294,8 +258,44 @@
     {
       "problem_id": "propl_ood_168469097189615988227299206974",
       "source_data_id": "168469097189615988227299206974",
-      "selection_rank": 30,
+      "selection_rank": 26,
       "reference_steps": 16,
+      "failed_attempts": 0,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
+      "problem_id": "propl_ood_200066688816687521472068135642",
+      "source_data_id": "200066688816687521472068135642",
+      "selection_rank": 27,
+      "reference_steps": 15,
+      "failed_attempts": 0,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
+      "problem_id": "propl_ood_180304138519663406842296676023",
+      "source_data_id": "180304138519663406842296676023",
+      "selection_rank": 28,
+      "reference_steps": 15,
+      "failed_attempts": 0,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
+      "problem_id": "propl_ood_135893289447309720305064179727",
+      "source_data_id": "135893289447309720305064179727",
+      "selection_rank": 29,
+      "reference_steps": 15,
+      "failed_attempts": 0,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
+      "problem_id": "propl_ood_41199313472035751804611449521",
+      "source_data_id": "41199313472035751804611449521",
+      "selection_rank": 30,
+      "reference_steps": 14,
       "failed_attempts": 0,
       "lean_status": "complete",
       "one_step_simp_status": "open"

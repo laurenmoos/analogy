@@ -30,7 +30,7 @@ def test_active_corpus_is_thirty_sourced_propl_ood_problems() -> None:
     assert all(problem.binders == "(p1 p2 p3 p4 p5 : Prop)" for problem in problems)
     assert all(problem.connective == "mixed" for problem in problems)
     assert all(all(symbol in problem.target for symbol in ("∧", "∨", "→")) for problem in problems)
-    assert all(len(proofs[problem.id].tactics) >= 15 for problem in problems)
+    assert all(len(proofs[problem.id].tactics) >= 13 for problem in problems)
     assert not any(problem.id.startswith(("and_intro_", "or_intro_", "imp_intro_")) for problem in problems)
     validate_reference_coverage(problems, proofs)
 
@@ -63,3 +63,17 @@ def test_every_propl_reference_proof_completes_in_local_lean() -> None:
             failures.append(f"{problem.id}: {result.status.value}: {messages}")
 
     assert failures == []
+
+
+def test_no_propl_problem_completes_with_one_simp() -> None:
+    problems, _, _ = _assets()
+    verifier = LeanSubprocessVerifier(ROOT, timeout_seconds=20)
+
+    trivial = [
+        problem.id
+        for problem in problems
+        if verifier.try_tactic(problem, (), "simp").status
+        is VerificationStatus.COMPLETE
+    ]
+
+    assert trivial == []

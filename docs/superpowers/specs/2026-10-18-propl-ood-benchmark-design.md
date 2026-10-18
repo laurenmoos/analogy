@@ -27,7 +27,13 @@ problems. Selection order is:
 4. exclude any target completed by a single `simp` tactic;
 5. prefer records with failed attempts in the paired backtracking trace, then
    longer normal proofs and longer targets; fill the remainder by proof length;
-6. set a minimum accepted reference length of 15 tactics and retain 30 records.
+6. set a minimum accepted reference length of 13 tactics and retain 30 records.
+
+The floor was reduced from 15 to 13 after correcting multiline verifier probes:
+seven formerly selected multiline targets were then correctly recognized as
+one-step `simp` proofs, leaving 26 eligible records at the old floor. The pinned
+source provides exactly four verifier-compatible replacements at lengths 14 and
+13 without relaxing any connective, provenance, or nontriviality constraint.
 
 Store structural selection metadata outside the runtime corpus so the model
 does not see difficulty labels, trace lengths, or backtracking counts.

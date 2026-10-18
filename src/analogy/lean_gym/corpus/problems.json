@@ -56,8 +56,18 @@
       "difficulty": 22
     },
     {
-      "id": "propl_ood_252955983084163427303699743884",
+      "id": "propl_ood_208645874253727215108588452622",
       "title": "PropL OOD 06",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "True ∧ p2 ∧ (p4 ∨ p1 → p5) → ((p5 ∨ p2) ∨ p1 ∧ ((p5 → True ∨ (True ∨ p1 → p3 → p5 ∨ False)) ∨ True)) ∧ p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/208645874253727215108588452622",
+      "connective": "mixed",
+      "difficulty": 18
+    },
+    {
+      "id": "propl_ood_252955983084163427303699743884",
+      "title": "PropL OOD 07",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "True ∧ p2 → (False ∨ ((p4 ∧ (p5 → p1)) ∧ p2 → False ∧ p5 → p4)) ∧ p2 ∧ p2 ∧ (((p4 → p3) → False) ∨ (True → p2))",
       "source_path": "normal/test_ood.csv",
@@ -66,8 +76,18 @@
       "difficulty": 26
     },
     {
+      "id": "propl_ood_54781560256269106948607279652",
+      "title": "PropL OOD 08",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p2 ∧ ((p1 ∨ (p4 → True) → p1) → p1) → p5 ∨ True ∧ ((False → p2) → p5 ∨ ((True → p1) → p5 → p4 ∨ p5))) ∨ p4",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/54781560256269106948607279652",
+      "connective": "mixed",
+      "difficulty": 16
+    },
+    {
       "id": "propl_ood_265557872740597889312779794693",
-      "title": "PropL OOD 07",
+      "title": "PropL OOD 09",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "True ∧ (False ∨ p2 ∨ (p4 → p2 ∧ p4 → (p5 → p2 → p3 → p4 ∧ p2 ∧ ((False → p1) → (True → p5) ∧ True)) ∨ p5))",
       "source_path": "normal/test_ood.csv",
@@ -77,7 +97,7 @@
     },
     {
       "id": "propl_ood_205602444047427159151729097987",
-      "title": "PropL OOD 08",
+      "title": "PropL OOD 10",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(p5 → p2) ∧ (p3 ∧ p5) ∧ False ∨ (True ∧ True ∧ p1 ∨ (((p5 ∧ p2) ∧ p2) ∧ p4 → p2 → (p2 ∨ p5) ∧ p2)) ∨ p2",
       "source_path": "normal/test_ood.csv",
@@ -87,7 +107,7 @@
     },
     {
       "id": "propl_ood_55195369758345374712361994170",
-      "title": "PropL OOD 09",
+      "title": "PropL OOD 11",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "((p4 ∨ (True → p5) ∨ p1 → p2) ∨ ((p2 → p3 → p5) ∧ p1 ∧ p5 → p1 → p1 → p1 ∧ (p4 ∨ p5 ∨ p4))) ∨ p5",
       "source_path": "normal/test_ood.csv",
@@ -97,7 +117,7 @@
     },
     {
       "id": "propl_ood_218131501885521757299809195918",
-      "title": "PropL OOD 10",
+      "title": "PropL OOD 12",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(p3 → p2) ∧ p3 ∧ p4 → ((True ∧ p5 → (True ∨ p4) ∧ p5) → p1 ∨ (False → False ∨ p4)) ∧ (p5 ∨ p4 ∨ False ∨ p1)",
       "source_path": "normal/test_ood.csv",
@@ -107,7 +127,7 @@
     },
     {
       "id": "propl_ood_324895619711528419414480118729",
-      "title": "PropL OOD 11",
+      "title": "PropL OOD 13",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "p5 ∨ p1 ∧ False ∨ (p3 → (((((p3 → p2) ∧ p1) ∧ True) ∧ p5) ∧ (p1 ∧ p3 ∧ p3 → p5) → p5) ∧ True ∨ (p1 → p5))",
       "source_path": "normal/test_ood.csv",
@@ -117,7 +137,7 @@
     },
     {
       "id": "propl_ood_192372476993061931283117647933",
-      "title": "PropL OOD 12",
+      "title": "PropL OOD 14",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(p5 → p1 ∧ (p3 → True) ∨ True → False) ∧ True → (p3 → ((False → False) ∧ p1 ∨ (p5 → p4 ∨ p5 ∨ False)) ∧ p3) ∧ True",
       "source_path": "normal/test_ood.csv",
@@ -127,7 +147,7 @@
     },
     {
       "id": "propl_ood_227279818380026546832524313203",
-      "title": "PropL OOD 13",
+      "title": "PropL OOD 15",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "((p1 → p3) → p3) ∨ ((p1 ∧ (p4 → p3)) ∧ p3 → (p2 ∧ ((p3 ∨ p1) ∧ (p5 → p5) → False)) ∧ p1 → p4 ∧ p1 → p2)",
       "source_path": "normal/test_ood.csv",
@@ -137,7 +157,7 @@
     },
     {
       "id": "propl_ood_315295300028829528556344223522",
-      "title": "PropL OOD 14",
+      "title": "PropL OOD 16",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "p3 ∨ ((p5 → p5) ∧ p5 ∧ p4 → p3 ∨ ((p2 → True) ∨ p4) ∧ (p1 ∧ (p5 ∨ ((p2 ∧ p1 → False) → p3) → p5) → p4))",
       "source_path": "normal/test_ood.csv",
@@ -146,18 +166,8 @@
       "difficulty": 17
     },
     {
-      "id": "propl_ood_149793964518389069287071648555",
-      "title": "PropL OOD 15",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "(False ∨ ((False ∧ p4) ∧ p1 → ((((p5 → p1) → True ∧ p2) ∧ False ∧ (p2 → True)) ∧ p3) ∧ p1)) ∨\n    (True ∨ True → True → p2)",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/149793964518389069287071648555",
-      "connective": "mixed",
-      "difficulty": 33
-    },
-    {
       "id": "propl_ood_155559477803074115543777587908",
-      "title": "PropL OOD 16",
+      "title": "PropL OOD 17",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(p1 ∧ p4 ∧ p3 → ((p3 → p5) ∨ (p3 ∨ p3) ∧ (((p4 ∨ p3) ∨ p1) ∨ p2)) ∧ p1) ∧ (False → p5 → (True → p2) ∨ p2)",
       "source_path": "normal/test_ood.csv",
@@ -167,7 +177,7 @@
     },
     {
       "id": "propl_ood_358233606958956408248147497163",
-      "title": "PropL OOD 17",
+      "title": "PropL OOD 18",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "p5 → p4 ∨ (((p4 ∧ True) ∧ (p1 → False)) ∧ (p4 ∨ p4 → p2) → (True → True ∧ p4) ∨ p2) ∧ ((p1 → True) ∨ True) ∧ True",
       "source_path": "normal/test_ood.csv",
@@ -177,7 +187,7 @@
     },
     {
       "id": "propl_ood_254637624771904022244407550769",
-      "title": "PropL OOD 18",
+      "title": "PropL OOD 19",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "p3 ∧ p2 → (p4 ∨ (True → (True → (p4 → ((False → True → p5) ∧ False) ∧ False ∧ False → p4) ∧ (True ∨ p4)) ∧ p3)) ∨ p1",
       "source_path": "normal/test_ood.csv",
@@ -187,7 +197,7 @@
     },
     {
       "id": "propl_ood_343192239287091465349940722490",
-      "title": "PropL OOD 19",
+      "title": "PropL OOD 20",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "p2 → (p1 ∧ p4) ∧ p3 → (False ∧ p3 ∨ (p5 ∧ p3 → p4 ∨ (p4 → p1)) ∧ ((p5 → False) → (p5 → True) ∨ p4)) ∧ True",
       "source_path": "normal/test_ood.csv",
@@ -197,7 +207,7 @@
     },
     {
       "id": "propl_ood_199017835646202633754304488318",
-      "title": "PropL OOD 20",
+      "title": "PropL OOD 21",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(((False → p5) → False ∨ True) ∧ p3) ∧ p4 → (p3 ∨ p1) ∧ ((((p1 ∨ p4) ∨ (p1 ∧ p3 → p1 → True)) ∨ p5) ∨ p1 ∨ True)",
       "source_path": "normal/test_ood.csv",
@@ -206,8 +216,18 @@
       "difficulty": 18
     },
     {
+      "id": "propl_ood_187316087705262697949769719019",
+      "title": "PropL OOD 22",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p1 ∧ p4 ∧ (p1 → p3 ∨ p4 ∨ p2 ∨ p2) ∧ p1 → p4 → (p5 ∨ p1 ∧ True) ∨ p1 ∧ (p4 → (p3 ∨ p4) ∨ False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/187316087705262697949769719019",
+      "connective": "mixed",
+      "difficulty": 14
+    },
+    {
       "id": "propl_ood_163719196954327058628287864775",
-      "title": "PropL OOD 21",
+      "title": "PropL OOD 23",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(False ∨ p2 → p1 ∧ p3 ∧ False → ((p3 → p5) ∧ (True ∧ p2) ∧ p2) ∧ p5) ∧ (p4 → p4 ∨ (False → False → p4) ∧ p5)",
       "source_path": "normal/test_ood.csv",
@@ -216,68 +236,8 @@
       "difficulty": 32
     },
     {
-      "id": "propl_ood_233085319447362096814516344851",
-      "title": "PropL OOD 22",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "p4 ∧ (False → True) →\n    (False ∧ True) ∧ False → p1 ∧ (p2 ∧ True) ∧ (p1 ∨ (False → p1) ∧ (False → p2) ∨ p3) ∧ (True ∨ True)",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/233085319447362096814516344851",
-      "connective": "mixed",
-      "difficulty": 27
-    },
-    {
-      "id": "propl_ood_66651593447065051647675886728",
-      "title": "PropL OOD 23",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "(True → (False ∧ (p4 ∨ False)) ∧ ((p5 ∨ (True → False)) ∨ p4) → p5 → p1 → p4 ∧ (True ∨ p4) ∧ ((True ∨ p2) ∨ p5)) ∨\n    False",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/66651593447065051647675886728",
-      "connective": "mixed",
-      "difficulty": 22
-    },
-    {
-      "id": "propl_ood_180344921350036326571061933581",
-      "title": "PropL OOD 24",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "(p1 → ((p3 → False ∨ p1 ∧ p1) ∧ p3) ∧ False) ∧ False ∧ p4 →\n    ((False ∧ False) ∧ p3) ∧ (False → (True → p2 ∧ p4) → False)",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/180344921350036326571061933581",
-      "connective": "mixed",
-      "difficulty": 22
-    },
-    {
-      "id": "propl_ood_333542944207965230764972479737",
-      "title": "PropL OOD 25",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "False →\n    (p2 ∧ False ∧ p1) ∧ ((True → p1) → False) → (p5 ∨ False → True) → p4 ∧ ((True → p1 ∨ True) → (False → p2) → False)",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/333542944207965230764972479737",
-      "connective": "mixed",
-      "difficulty": 20
-    },
-    {
-      "id": "propl_ood_229972526787606814135415396844",
-      "title": "PropL OOD 26",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "(False ∧ True) ∧ p2 →\n    ((True → p2) → False) → (p2 → (p5 → False ∧ p3 → p1) ∨ p1) → (((False ∨ p1) ∨ p4) ∧ False) ∧ False",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/229972526787606814135415396844",
-      "connective": "mixed",
-      "difficulty": 20
-    },
-    {
-      "id": "propl_ood_53451020350017255163164050676",
-      "title": "PropL OOD 27",
-      "binders": "(p1 p2 p3 p4 p5 : Prop)",
-      "target": "((False ∧ True) ∧ ((((True → p3) ∨ p4) ∨ (p5 → True)) ∨ p3) → (p3 ∨ p4) ∧ (((False → p1) → p2 → p2) → p2 ∧ False)) ∨\n    p3",
-      "source_path": "normal/test_ood.csv",
-      "source_level": "test_ood/53451020350017255163164050676",
-      "connective": "mixed",
-      "difficulty": 20
-    },
-    {
       "id": "propl_ood_328559760417726643256316306381",
-      "title": "PropL OOD 28",
+      "title": "PropL OOD 24",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "True → (p4 ∧ p2) ∧ ((True ∧ p4 → (p3 → p1) ∧ p1 ∨ p1) → p3 ∨ p5) → ((p2 ∨ (True ∧ p4) ∧ False) ∧ p4) ∧ p2",
       "source_path": "normal/test_ood.csv",
@@ -287,7 +247,7 @@
     },
     {
       "id": "propl_ood_130516192761027817136232900483",
-      "title": "PropL OOD 29",
+      "title": "PropL OOD 25",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "(((p5 ∧ p4 ∧ p2) ∧ (p3 ∨ p1 → p5)) ∧ (False → p4 → p4 → p2 ∧ p4) → (p4 ∨ p4) ∨ p5) ∧ (False → p1 ∧ p2)",
       "source_path": "normal/test_ood.csv",
@@ -297,13 +257,53 @@
     },
     {
       "id": "propl_ood_168469097189615988227299206974",
-      "title": "PropL OOD 30",
+      "title": "PropL OOD 26",
       "binders": "(p1 p2 p3 p4 p5 : Prop)",
       "target": "True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
       "source_path": "normal/test_ood.csv",
       "source_level": "test_ood/168469097189615988227299206974",
       "connective": "mixed",
       "difficulty": 16
+    },
+    {
+      "id": "propl_ood_200066688816687521472068135642",
+      "title": "PropL OOD 27",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p2 ∧ True) ∧ p1) ∧ (p3 ∧ p5) ∧ p4 → p2 ∧ p2 ∨ ((((p4 → p5) ∨ p4) ∨ p3) ∧ False ∧ (p2 → p1) ∨ p4) ∨ False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/200066688816687521472068135642",
+      "connective": "mixed",
+      "difficulty": 15
+    },
+    {
+      "id": "propl_ood_180304138519663406842296676023",
+      "title": "PropL OOD 28",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p5 ∨ p4) ∨ (p4 ∧ (True ∨ p1) → True) → p5) ∧ p4 ∧ p1 → p3 ∧ p3 → p4 → (p1 ∧ p1 → p4 ∨ False) ∨ False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/180304138519663406842296676023",
+      "connective": "mixed",
+      "difficulty": 15
+    },
+    {
+      "id": "propl_ood_135893289447309720305064179727",
+      "title": "PropL OOD 29",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((((True ∧ p1) ∧ True ∧ p4) ∧ (p5 → p2 ∨ p4)) ∧ p3 → (p1 ∧ p5 → p3) → p3 ∨ p1 ∨ p3) ∨ (p3 ∧ p3 → p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/135893289447309720305064179727",
+      "connective": "mixed",
+      "difficulty": 15
+    },
+    {
+      "id": "propl_ood_41199313472035751804611449521",
+      "title": "PropL OOD 30",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p1 ∧ (p5 ∧ (((p2 → p3) → True ∨ p1 ∧ p5 ∧ (p3 → p2)) → True) ∧ p3) ∧ True → p2 → p1 → p2) ∨ p3) ∨ p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/41199313472035751804611449521",
+      "connective": "mixed",
+      "difficulty": 14
     }
   ]
 }

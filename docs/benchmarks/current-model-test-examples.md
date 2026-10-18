@@ -17,7 +17,7 @@ branch selection, and recovery rather than mathematical background knowledge.
 ## Selection
 
 The checked-in subset is rebuilt by `scripts/import_propl_ood.py`. Candidates
-must contain `∧`, `∨`, and `→`, have at least 15 tactics in the source proof,
+must contain `∧`, `∨`, and `→`, have at least 13 tactics in the source proof,
 fit the harness's flat one-line tactic protocol, complete in the local Lean
 verifier, and remain incomplete after one `simp`. Ranking prefers more failed
 attempts in PropL's paired backtracking trace, then longer proofs, then longer

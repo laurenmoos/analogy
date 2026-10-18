@@ -217,9 +217,9 @@ class LeanSubprocessVerifier:
     def _render_probe(problem: Problem, tactics: tuple[str, ...]) -> RenderedSource:
         lines = [problem.theorem_header()]
         lines.extend(f"  {tactic}" for tactic in tactics)
-        trace_line = len(lines) + 1
+        trace_line = "\n".join(lines).count("\n") + 2
         lines.append("  trace_state")
-        sorry_line = len(lines) + 1
+        sorry_line = trace_line + 1
         lines.append("  all_goals sorry")
         return RenderedSource("\n".join(lines) + "\n", trace_line, sorry_line)
 

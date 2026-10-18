@@ -91,7 +91,7 @@ def pair_records(normal_path: Path, backtrack_path: Path) -> dict[str, Candidate
 def is_static_candidate(candidate: Candidate) -> bool:
     return (
         candidate.flat_trace
-        and len(candidate.tactics) >= 15
+        and len(candidate.tactics) >= 13
         and all(connective in candidate.target for connective in ("∧", "∨", "→"))
     )
 
@@ -257,7 +257,7 @@ def build_documents(
         },
         "selection": {
             "required_connectives": ["∧", "∨", "→"],
-            "minimum_reference_steps": 15,
+            "minimum_reference_steps": 13,
             "flat_trace_only": True,
             "exclude_one_step_simp": True,
             "ordering": [

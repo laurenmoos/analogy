@@ -124,6 +124,25 @@
       ]
     },
     {
+      "problem_id": "propl_ood_208645874253727215108588452622",
+      "tactics": [
+        "intro h1",
+        "apply And.intro",
+        "let h2 := h1.left",
+        "let h3 := h1.right",
+        "let h4 := h3.left",
+        "let h5 := h3.right",
+        "apply Or.inl",
+        "apply Or.inr",
+        "exact h4",
+        "let h6 := h1.left",
+        "let h7 := h1.right",
+        "let h8 := h7.left",
+        "let h9 := h7.right",
+        "exact h8"
+      ]
+    },
+    {
       "problem_id": "propl_ood_252955983084163427303699743884",
       "tactics": [
         "intro h1",
@@ -149,6 +168,24 @@
         "apply Or.inr",
         "intro h14",
         "exact h13"
+      ]
+    },
+    {
+      "problem_id": "propl_ood_54781560256269106948607279652",
+      "tactics": [
+        "apply Or.inl",
+        "intro h1",
+        "let h2 := h1.left",
+        "let h3 := h1.right",
+        "apply Or.inr",
+        "apply And.intro",
+        "apply True.intro",
+        "intro h4",
+        "apply Or.inr",
+        "intro h5",
+        "intro h6",
+        "apply Or.inr",
+        "exact h6"
       ]
     },
     {
@@ -330,43 +367,6 @@
       ]
     },
     {
-      "problem_id": "propl_ood_149793964518389069287071648555",
-      "tactics": [
-        "apply Or.inl",
-        "apply Or.inr",
-        "intro h1",
-        "apply And.intro",
-        "apply And.intro",
-        "apply And.intro",
-        "intro h2",
-        "apply And.intro",
-        "apply True.intro",
-        "let h3 := h1.left",
-        "let h4 := h1.right",
-        "let h5 := h3.left",
-        "let h6 := h3.right",
-        "apply False.elim h5",
-        "apply And.intro",
-        "let h7 := h1.left",
-        "let h8 := h1.right",
-        "let h9 := h7.left",
-        "let h10 := h7.right",
-        "apply False.elim h9",
-        "intro h11",
-        "apply True.intro",
-        "let h12 := h1.left",
-        "let h13 := h1.right",
-        "let h14 := h12.left",
-        "let h15 := h12.right",
-        "apply False.elim h14",
-        "let h16 := h1.left",
-        "let h17 := h1.right",
-        "let h18 := h16.left",
-        "let h19 := h16.right",
-        "apply False.elim h18"
-      ]
-    },
-    {
       "problem_id": "propl_ood_155559477803074115543777587908",
       "tactics": [
         "apply And.intro",
@@ -490,6 +490,24 @@
       ]
     },
     {
+      "problem_id": "propl_ood_187316087705262697949769719019",
+      "tactics": [
+        "intro h1",
+        "intro h2",
+        "let h3 := h1.left",
+        "let h4 := h1.right",
+        "let h5 := h4.left",
+        "let h6 := h4.right",
+        "let h7 := h6.left",
+        "let h8 := h6.right",
+        "apply Or.inl",
+        "apply Or.inr",
+        "apply And.intro",
+        "exact h8",
+        "apply True.intro"
+      ]
+    },
+    {
       "problem_id": "propl_ood_163719196954327058628287864775",
       "tactics": [
         "apply And.intro",
@@ -524,167 +542,6 @@
         "intro h20",
         "apply Or.inl",
         "exact h20"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_233085319447362096814516344851",
-      "tactics": [
-        "intro h1",
-        "intro h2",
-        "apply And.intro",
-        "let h3 := h2.left",
-        "let h4 := h2.right",
-        "let h5 := h3.left",
-        "let h6 := h3.right",
-        "apply False.elim h5",
-        "apply And.intro",
-        "apply And.intro",
-        "let h7 := h2.left",
-        "let h8 := h2.right",
-        "let h9 := h7.left",
-        "let h10 := h7.right",
-        "apply False.elim h9",
-        "apply True.intro",
-        "apply And.intro",
-        "let h11 := h2.left",
-        "let h12 := h2.right",
-        "let h13 := h11.left",
-        "let h14 := h11.right",
-        "apply False.elim h13",
-        "let h15 := h2.left",
-        "let h16 := h2.right",
-        "let h17 := h15.left",
-        "let h18 := h15.right",
-        "apply False.elim h17"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_66651593447065051647675886728",
-      "tactics": [
-        "apply Or.inl",
-        "intro h1",
-        "intro h2",
-        "intro h3",
-        "intro h4",
-        "apply And.intro",
-        "let h5 := h2.left",
-        "let h6 := h2.right",
-        "let h7 := h5.left",
-        "let h8 := h5.right",
-        "apply False.elim h7",
-        "apply And.intro",
-        "let h9 := h2.left",
-        "let h10 := h2.right",
-        "let h11 := h9.left",
-        "let h12 := h9.right",
-        "apply False.elim h11",
-        "let h13 := h2.left",
-        "let h14 := h2.right",
-        "let h15 := h13.left",
-        "let h16 := h13.right",
-        "apply False.elim h15"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_180344921350036326571061933581",
-      "tactics": [
-        "intro h1",
-        "apply And.intro",
-        "apply And.intro",
-        "apply And.intro",
-        "let h2 := h1.left",
-        "let h3 := h1.right",
-        "let h4 := h3.left",
-        "let h5 := h3.right",
-        "apply False.elim h4",
-        "let h6 := h1.left",
-        "let h7 := h1.right",
-        "let h8 := h7.left",
-        "let h9 := h7.right",
-        "apply False.elim h8",
-        "let h10 := h1.left",
-        "let h11 := h1.right",
-        "let h12 := h11.left",
-        "let h13 := h11.right",
-        "apply False.elim h12",
-        "intro h14",
-        "intro h15",
-        "apply False.elim h14"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_333542944207965230764972479737",
-      "tactics": [
-        "intro h1",
-        "intro h2",
-        "intro h3",
-        "apply And.intro",
-        "let h4 := h2.left",
-        "let h5 := h2.right",
-        "let h6 := h4.left",
-        "let h7 := h4.right",
-        "let h8 := h7.left",
-        "let h9 := h7.right",
-        "apply False.elim h8",
-        "intro h10",
-        "intro h11",
-        "let h12 := h2.left",
-        "let h13 := h2.right",
-        "let h14 := h12.left",
-        "let h15 := h12.right",
-        "let h16 := h15.left",
-        "let h17 := h15.right",
-        "apply False.elim h16"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_229972526787606814135415396844",
-      "tactics": [
-        "intro h1",
-        "intro h2",
-        "intro h3",
-        "apply And.intro",
-        "apply And.intro",
-        "let h4 := h1.left",
-        "let h5 := h1.right",
-        "let h6 := h4.left",
-        "let h7 := h4.right",
-        "apply False.elim h6",
-        "let h8 := h1.left",
-        "let h9 := h1.right",
-        "let h10 := h8.left",
-        "let h11 := h8.right",
-        "apply False.elim h10",
-        "let h12 := h1.left",
-        "let h13 := h1.right",
-        "let h14 := h12.left",
-        "let h15 := h12.right",
-        "apply False.elim h14"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_53451020350017255163164050676",
-      "tactics": [
-        "apply Or.inl",
-        "intro h1",
-        "apply And.intro",
-        "let h2 := h1.left",
-        "let h3 := h1.right",
-        "let h4 := h2.left",
-        "let h5 := h2.right",
-        "apply False.elim h4",
-        "intro h6",
-        "apply And.intro",
-        "let h7 := h1.left",
-        "let h8 := h1.right",
-        "let h9 := h7.left",
-        "let h10 := h7.right",
-        "apply False.elim h9",
-        "let h11 := h1.left",
-        "let h12 := h1.right",
-        "let h13 := h11.left",
-        "let h14 := h11.right",
-        "apply False.elim h13"
       ]
     },
     {
@@ -753,6 +610,85 @@
         "intro h11",
         "intro h12",
         "exact h12"
+      ]
+    },
+    {
+      "problem_id": "propl_ood_200066688816687521472068135642",
+      "tactics": [
+        "intro h1",
+        "let h2 := h1.left",
+        "let h3 := h1.right",
+        "let h4 := h2.left",
+        "let h5 := h2.right",
+        "let h6 := h4.left",
+        "let h7 := h4.right",
+        "let h8 := h3.left",
+        "let h9 := h3.right",
+        "let h10 := h8.left",
+        "let h11 := h8.right",
+        "apply Or.inl",
+        "apply And.intro",
+        "exact h6",
+        "exact h6"
+      ]
+    },
+    {
+      "problem_id": "propl_ood_180304138519663406842296676023",
+      "tactics": [
+        "intro h1",
+        "intro h2",
+        "intro h3",
+        "let h4 := h2.left",
+        "let h5 := h2.right",
+        "let h6 := h1.left",
+        "let h7 := h1.right",
+        "let h8 := h7.left",
+        "let h9 := h7.right",
+        "apply Or.inl",
+        "intro h10",
+        "let h11 := h10.left",
+        "let h12 := h10.right",
+        "apply Or.inl",
+        "exact h8"
+      ]
+    },
+    {
+      "problem_id": "propl_ood_135893289447309720305064179727",
+      "tactics": [
+        "apply Or.inl",
+        "intro h1",
+        "intro h2",
+        "let h3 := h1.left",
+        "let h4 := h1.right",
+        "let h5 := h3.left",
+        "let h6 := h3.right",
+        "let h7 := h5.left",
+        "let h8 := h5.right",
+        "let h9 := h7.left",
+        "let h10 := h7.right",
+        "let h11 := h8.left",
+        "let h12 := h8.right",
+        "apply Or.inl",
+        "exact h4"
+      ]
+    },
+    {
+      "problem_id": "propl_ood_41199313472035751804611449521",
+      "tactics": [
+        "apply Or.inl",
+        "apply Or.inl",
+        "intro h1",
+        "intro h2",
+        "intro h3",
+        "let h4 := h1.left",
+        "let h5 := h1.right",
+        "let h6 := h5.left",
+        "let h7 := h5.right",
+        "let h8 := h6.left",
+        "let h9 := h6.right",
+        "let h10 := h9.left",
+        "let h11 := h9.right",
+        "exact h2"
       ]
     }
   ]

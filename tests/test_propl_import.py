@@ -105,17 +105,17 @@ def test_rank_candidates_is_deterministic_and_prefers_backtracking() -> None:
 
 def test_candidate_filter_requires_mixed_connectives_length_and_flat_trace() -> None:
     importer = _load_importer()
-    eligible = importer.Candidate("ok", "p1 ∧ p2 ∨ (p2 → p3)", ("x",) * 15, 0, True)
+    eligible = importer.Candidate("ok", "p1 ∧ p2 ∨ (p2 → p3)", ("x",) * 13, 0, True)
 
     assert importer.is_static_candidate(eligible)
     assert not importer.is_static_candidate(
-        importer.Candidate("short", eligible.target, ("x",) * 14, 0, True)
+        importer.Candidate("short", eligible.target, ("x",) * 12, 0, True)
     )
     assert not importer.is_static_candidate(
-        importer.Candidate("simple", "p1 ∧ p2 → p3", ("x",) * 15, 0, True)
+        importer.Candidate("simple", "p1 ∧ p2 → p3", ("x",) * 13, 0, True)
     )
     assert not importer.is_static_candidate(
-        importer.Candidate("nested", eligible.target, ("x",) * 15, 0, False)
+        importer.Candidate("nested", eligible.target, ("x",) * 13, 0, False)
     )
 
 

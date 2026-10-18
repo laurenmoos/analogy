@@ -18,7 +18,7 @@ task boundaries.
 ## Global Constraints
 
 - Source only PropL revision `62a13de410999c20f60ec2f3be93457dcaac0d62`, split `test_ood`.
-- Check in exactly 30 problems, each with all of `∧`, `∨`, and `→`, at least 15 source-proof tactics, and no one-step `simp` proof.
+- Check in exactly 30 problems, each with all of `∧`, `∨`, and `→`, at least 13 source-proof tactics, and no one-step `simp` proof.
 - Every reference proof must complete under the repository's Lean verifier.
 - Keep selection metadata outside model-facing runtime prompts and problem rendering.
 - Remove active `lean4game-logic`, curriculum-split, and `hardest3` assets.

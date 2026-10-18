@@ -106,6 +106,7 @@ class RescueTermination(str, Enum):
     INVALID_OUTPUT = "invalid_output"
     DUPLICATE = "duplicate"
     PREDICTED_NO_CHANGE = "predicted_no_change"
+    SCORED = "scored"
 
 
 class PredictionLabel(str, Enum):
@@ -150,6 +151,17 @@ class RescueProposal:
         if not isinstance(self.candidate, TacticCandidate) or self.candidate.origin is not CandidateOrigin.ANALOGICAL:
             raise ValueError("rescue candidate must have analogical origin")
         _require_text(self.predicted_state, "predicted_state")
+
+
+@dataclass(frozen=True, slots=True)
+class _ScoredRevision:
+    distance: float
+    generation_index: int
+    action: AnalogyUpdateAction
+    model: MentalModel
+    proposal: RescueProposal
+    generation: AnalogyGenerationAttempt
+    rendered_model: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,8 +451,6 @@ class AnalogyFallback:
         proof_belief: ProofBelief | None = None,
     ) -> AnalogyRescueOutcome:
         scratchpad = self.scratchpad
-        if force_domain_change:
-            scratchpad.abandon_current()
         if cancellation.is_cancelled():
             return AnalogyRescueOutcome(cancelled=True)
         attempted_order: list[str] = []
@@ -717,17 +727,7 @@ class AnalogyFallback:
 
         scratchpad = self.scratchpad
         rollouts: list[RescueRollout] = []
-        ranked: list[
-            tuple[
-                float,
-                int,
-                AnalogyUpdateAction,
-                MentalModel,
-                RescueProposal,
-                AnalogyGenerationAttempt,
-                str,
-            ]
-        ] = []
+        ranked: list[_ScoredRevision] = []
         for index in range(self._max_model_calls):
             if cancellation.is_cancelled():
                 return AnalogyRescueOutcome(
@@ -818,7 +818,7 @@ class AnalogyFallback:
                     state.id, index, seed, candidate_model, fit.distance, fit.coupling
                 )
                 ranked.append(
-                    (
+                    _ScoredRevision(
                         fit.distance,
                         index,
                         action,
@@ -887,23 +887,27 @@ class AnalogyFallback:
                     )
                 )
 
-        for _, index, action, candidate_model, proposal, generation, rendered in sorted(
-            ranked, key=lambda item: (item[0], item[1])
-        ):
+        ordered = sorted(
+            ranked, key=lambda item: (item.distance, item.generation_index)
+        )
+        for rank, candidate in enumerate(ordered):
             if cancellation.is_cancelled():
+                _append_unsubmitted_rollouts(rollouts, state.id, ordered[rank:])
                 return AnalogyRescueOutcome(
                     rollouts=tuple(rollouts), cancelled=True
                 )
-            evaluation = evaluator(proposal.candidate)
+            evaluation = evaluator(candidate.proposal.candidate)
             generation = replace(
-                generation,
+                candidate.generation,
                 prediction_label=(
                     PredictionLabel.PREDICTION_MATCHED
-                    if _prediction_matches(proposal.predicted_state, evaluation)
+                    if _prediction_matches(candidate.proposal.predicted_state, evaluation)
                     else PredictionLabel.PREDICTION_MISMATCHED
                 ),
             )
-            attempt = RescueAttempt(proposal, evaluation.result, evaluation.discarded)
+            attempt = RescueAttempt(
+                candidate.proposal, evaluation.result, evaluation.discarded
+            )
             termination = (
                 RescueTermination.COMPLETE
                 if evaluation.completed_proof is not None
@@ -915,28 +919,31 @@ class AnalogyFallback:
             )
             rollouts.append(
                 RescueRollout(
-                    f"{state.id}:analogy:{index}",
+                    f"{state.id}:analogy:{candidate.generation_index}",
                     state.id,
-                    (proposal,),
+                    (candidate.proposal,),
                     (attempt,),
                     termination,
                     generations=(generation,),
-                    analogy_trace=rendered,
+                    analogy_trace=candidate.rendered_model,
                 )
             )
-            record_model_history(scratchpad, _result_feedback(evaluation.result))
             if evaluation.completed_proof is not None or evaluation.successor is not None:
-                scratchpad.apply(action, candidate_model)
+                record_model_history(scratchpad, _result_feedback(evaluation.result))
+                scratchpad.apply(candidate.action, candidate.model)
             if evaluation.completed_proof is not None:
+                _append_unsubmitted_rollouts(rollouts, state.id, ordered[rank + 1 :])
                 return AnalogyRescueOutcome(
                     completed_proof=evaluation.completed_proof,
                     rollouts=tuple(rollouts),
                 )
             if evaluation.successor is not None:
+                _append_unsubmitted_rollouts(rollouts, state.id, ordered[rank + 1 :])
                 return AnalogyRescueOutcome(
                     successor=evaluation.successor, rollouts=tuple(rollouts)
                 )
             if getattr(evaluation.result, "infrastructure_failure", None) is not None:
+                _append_unsubmitted_rollouts(rollouts, state.id, ordered[rank + 1 :])
                 return AnalogyRescueOutcome(rollouts=tuple(rollouts))
         return AnalogyRescueOutcome(rollouts=tuple(rollouts))
 
@@ -972,6 +979,25 @@ class AnalogyFallback:
                     "coupling": [list(row) for row in coupling],
                 }
             )
+
+
+def _append_unsubmitted_rollouts(
+    rollouts: list[RescueRollout],
+    state_id: str,
+    candidates: list[_ScoredRevision],
+) -> None:
+    for candidate in candidates:
+        rollouts.append(
+            RescueRollout(
+                f"{state_id}:analogy:{candidate.generation_index}",
+                state_id,
+                (candidate.proposal,),
+                (),
+                RescueTermination.SCORED,
+                generations=(candidate.generation,),
+                analogy_trace=candidate.rendered_model,
+            )
+        )
 
 
 def _result_feedback(result: TacticResult) -> str:

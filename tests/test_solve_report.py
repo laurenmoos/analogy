@@ -351,6 +351,8 @@ def test_problem_report_shows_analogy_as_one_fallback_inside_shared_search():
                             "repair": False,
                             "error_kind": None,
                             "diagnostic": None,
+                            "structural_distance": 0.125,
+                            "structural_coupling": ((0.5, 0.5),),
                         }
                     ],
                     "attempts": [
@@ -375,6 +377,8 @@ def test_problem_report_shows_analogy_as_one_fallback_inside_shared_search():
     assert "a key fitting a lock" in report
     assert "Analogy generations: **1**" in report
     assert "Analogy tactics submitted to Lean: **1**" in report
+    assert "Structural distance: **0.125**" in report
+    assert "Structural coupling" in report
     assert "Semantic recovery 1 — countermodel" in report
     assert "Trigger state: `bad-child`" in report
     assert "Countermodel: `G=false, H=true`" in report

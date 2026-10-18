@@ -58,6 +58,12 @@ def _append_rollout(
         if generation.get("prediction_label"):
             label += f" — {_enum_value(generation['prediction_label'])}"
         lines.extend(("", f"**{label}**"))
+        distance = generation.get("structural_distance")
+        if distance is not None:
+            lines.extend(("", f"Structural distance: **{distance:.6g}**"))
+        coupling = generation.get("structural_coupling")
+        if coupling is not None:
+            lines.extend(("", "**Structural coupling**", "", _pre(coupling)))
         diagnostic = generation.get("diagnostic")
         if diagnostic:
             kind = generation.get("error_kind")
@@ -172,6 +178,22 @@ def render_problem_trace(
         lines.extend(("", "No completed model call was recorded."))
     for index, event in enumerate(model_events, 1):
         kind = str(event.get("kind", "ordinary_model_call")).removesuffix("_model_call")
+        if kind == "mental_model_structural_score":
+            lines.extend(("", f"#### Structural score {index}"))
+            if event.get("state_id"):
+                lines.extend(("", f"State: `{event['state_id']}`"))
+            lines.extend(
+                (
+                    "",
+                    f"Domain: `{event.get('domain', '(unknown)')}` · "
+                    f"distance: **{event.get('distance', '(unknown)')}**",
+                    "",
+                    "**Structural coupling**",
+                    "",
+                    _pre(event.get("coupling", ())),
+                )
+            )
+            continue
         lines.extend(("", f"#### Model call {index} — {kind}"))
         if event.get("state_id"):
             lines.extend(("", f"State: `{event['state_id']}`"))

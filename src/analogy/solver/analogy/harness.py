@@ -203,8 +203,6 @@ def update_analogies(
         return analogies
     if recovery.event_id in analogies.prepared_recoveries:
         return analogies
-    for track in analogies.tracks:
-        track.scratchpad.abandon_current()
     return replace(
         analogies,
         prepared_recoveries=analogies.prepared_recoveries | {recovery.event_id},

@@ -214,7 +214,7 @@ def test_non_countermodel_update_preserves_every_track():
     assert all(track.scratchpad.current is not None for track in harness.tracks)
 
 
-def test_countermodel_update_abandons_each_track_once_and_keeps_local_memory():
+def test_countermodel_update_marks_tracks_without_mutating_models():
     class Generator:
         calls = 0
 
@@ -227,12 +227,12 @@ def test_countermodel_update_abandons_each_track_once_and_keeps_local_memory():
 
     updated = update_analogies(search, harness)
 
-    assert [track.scratchpad.abandoned_domains for track in updated.tracks] == [
-        ("lock",),
-        ("bridge",),
+    assert [track.scratchpad.abandoned_domains for track in updated.tracks] == [(), ()]
+    assert [track.scratchpad.current.domain for track in updated.tracks] == [
+        "lock",
+        "bridge",
     ]
-    assert all(track.scratchpad.current is None for track in updated.tracks)
-    assert all(track.scratchpad.pending_rebuild for track in updated.tracks)
+    assert all(not track.scratchpad.pending_rebuild for track in updated.tracks)
 
     updated.tracks[0].scratchpad.apply(
         AnalogyUpdateAction.CHANGE_DOMAIN,

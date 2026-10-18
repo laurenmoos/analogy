@@ -275,6 +275,120 @@ def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
     ]
 
 
+def test_rejected_scored_revisions_leave_model_and_history_unchanged(monkeypatch):
+    initial = MentalModel(
+        "navigation",
+        (MentalModelCorrespondence("start", "old", "finish"),),
+    )
+    scratchpad = AnalogyScratchpad(initial)
+    responses = iter(
+        (
+            _mental_response(
+                "gardening", "first", "exact first", action="change_domain"
+            ),
+            _mental_response(
+                "shipping", "second", "exact second", action="change_domain"
+            ),
+        )
+    )
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return next(responses)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder, *, layer: SimpleNamespace(
+            distance=0.1, coupling=((1.0,),)
+        ),
+    )
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=2,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+        embedding_layer=-1,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        lambda candidate: TacticEvaluation(
+            TacticResult(candidate, TacticStatus.ERROR, diagnostics=("rejected",))
+        ),
+        NeverCancelled(),
+        "guidance",
+        force_domain_change=True,
+        proof_belief=_proof_belief(),
+    )
+
+    assert scratchpad.current == initial
+    assert scratchpad.history == ()
+    assert [rollout.termination for rollout in outcome.rollouts] == [
+        RescueTermination.REJECTED,
+        RescueTermination.REJECTED,
+    ]
+
+
+def test_scored_but_unsubmitted_revisions_remain_in_generation_records(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+    responses = iter(
+        (
+            _mental_response("navigation", "best", "exact best"),
+            _mental_response("navigation", "other", "exact other"),
+        )
+    )
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return next(responses)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder, *, layer: SimpleNamespace(
+            distance=(
+                0.1
+                if model.correspondences[0].domain_transition == "best"
+                else 0.2
+            ),
+            coupling=((1.0,),),
+        ),
+    )
+
+    def evaluate(candidate):
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=2,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+        embedding_layer=-1,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        evaluate,
+        NeverCancelled(),
+        "guidance",
+        proof_belief=_proof_belief(),
+    )
+
+    assert [rollout.termination for rollout in outcome.rollouts] == [
+        RescueTermination.COMPLETE,
+        RescueTermination.SCORED,
+    ]
+    assert all(
+        rollout.generations[0].structural_distance is not None
+        for rollout in outcome.rollouts
+    )
+
+
 def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():
     initial = AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
     scratchpad = AnalogyScratchpad(initial)
@@ -340,11 +454,10 @@ def test_countermodel_forces_destruction_and_rejects_step_revision():
 
     class Generator:
         def generate(self, messages, *, seed):
-            assert all(
-                render_analogy_state(initial) not in message.content
+            assert any(
+                render_analogy_state(initial) in message.content
                 for message in messages
             )
-            assert any("locksmithing" in message.content for message in messages)
             return """<analogy>
 domain: locksmithing
 mapping:
@@ -365,8 +478,7 @@ abandoned domains:
     )
 
     assert outcome.completed_proof is None
-    assert scratchpad.current is None
-    assert "- locksmithing" in render_scratchpad_context(scratchpad)
+    assert scratchpad.current == initial
     assert outcome.rollouts[0].termination is RescueTermination.INVALID_OUTPUT
 
 

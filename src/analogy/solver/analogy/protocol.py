@@ -80,13 +80,34 @@ def extract_mental_model_block(text: str) -> tuple[MentalModel, str]:
     if not isinstance(text, str):
         raise AnalogyStateError("mental model output must be text")
     matches = tuple(_MENTAL_MODEL_BLOCK.finditer(text))
-    if len(matches) != 1:
+    if len(matches) > 1:
         raise AnalogyStateError("output must contain exactly one mental model block")
-    match = matches[0]
+    if matches:
+        match = matches[0]
+        model = _parse_mental_model_json(match.group("body"))
+        remainder = text[: match.start()] + text[match.end() :]
+    else:
+        stripped = text.lstrip()
+        try:
+            payload, end = json.JSONDecoder().raw_decode(stripped)
+        except json.JSONDecodeError as error:
+            raise AnalogyStateError(
+                f"mental model must contain strict JSON: {error}"
+            ) from error
+        model = _mental_model_from_payload(payload)
+        remainder = stripped[end:]
+    return model, remainder.strip("\n")
+
+
+def _parse_mental_model_json(body: str) -> MentalModel:
     try:
-        payload = json.loads(match.group("body"))
+        payload = json.loads(body)
     except json.JSONDecodeError as error:
         raise AnalogyStateError(f"mental model must contain strict JSON: {error}") from error
+    return _mental_model_from_payload(payload)
+
+
+def _mental_model_from_payload(payload: object) -> MentalModel:
     if not isinstance(payload, dict) or set(payload) != {
         "domain",
         "correspondences",
@@ -116,15 +137,13 @@ def extract_mental_model_block(text: str) -> tuple[MentalModel, str]:
     abandoned = payload["abandoned_domains"]
     if not isinstance(abandoned, list):
         raise AnalogyStateError("abandoned_domains must be a list")
-    model = MentalModel(
+    return MentalModel(
         payload["domain"], tuple(correspondences), tuple(abandoned)
     )
-    remainder = text[: match.start()] + text[match.end() :]
-    return model, remainder.strip("\n")
 
 
 def extract_working_model_block(text: str) -> tuple[WorkingMentalModel, str]:
-    if "<mental_model>" in text:
+    if "<mental_model>" in text or text.lstrip().startswith("{"):
         return extract_mental_model_block(text)
     return extract_analogy_block(text)
 

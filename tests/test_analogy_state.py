@@ -6,6 +6,7 @@ from analogy.model import prompts as prompts_module
 from analogy.model.prompts import PromptCatalog
 from analogy.solver.analogy.protocol import (
     extract_mental_model_block,
+    extract_working_model_block,
     extract_analogy_block,
     record_model_history,
     render_analogy_state,
@@ -61,6 +62,30 @@ def test_mental_model_round_trips_ordered_complete_and_partial_correspondences()
     ]
     assert restored.correspondences[1].proof_transition is None
     assert remainder == ""
+
+
+def test_mental_model_parser_accepts_complete_bare_json_from_model():
+    bare_json = render_mental_model(MENTAL_MODEL).removeprefix(
+        "<mental_model>\n"
+    ).removesuffix("\n</mental_model>")
+
+    restored, remainder = extract_mental_model_block(bare_json)
+
+    assert restored == MENTAL_MODEL
+    assert remainder == ""
+
+
+def test_working_model_parser_splits_bare_model_from_following_payload():
+    bare_json = render_mental_model(MENTAL_MODEL).removeprefix(
+        "<mental_model>\n"
+    ).removesuffix("\n</mental_model>")
+
+    restored, remainder = extract_working_model_block(
+        bare_json + '\n{"action":"revise_model"}'
+    )
+
+    assert restored == MENTAL_MODEL
+    assert remainder == '{"action":"revise_model"}'
 
 
 @pytest.mark.parametrize(

@@ -10,9 +10,26 @@ from analogy.solver.analogy.harness import (
     AnalogyHarnessInitializationError,
     AnalogyScoreError,
     EqualAnalogyScorer,
+    activate_analogy,
     initialize_analogy_harness,
     score_analogies,
     select_analogy,
+    update_analogies,
+)
+from analogy.solver.analogy.state import AnalogyState, AnalogyUpdateAction
+from analogy.solver.proof.semantic import (
+    ExhaustiveSemanticChecker,
+    SemanticRecoveryEvent,
+    SemanticResult,
+)
+from analogy.solver.search import (
+    AcceptNovelState,
+    CanonicalStateFingerprinter,
+    EpisodeContext,
+    NeverCancelled,
+    ObservableStucknessPolicy,
+    WhitespaceTacticCanonicalizer,
+    start_search,
 )
 from analogy.utils.records import SymbolicState
 
@@ -150,3 +167,118 @@ def test_scoring_rejects_nonfinite_or_nonreal_values(bad_score):
 
     with pytest.raises(AnalogyScoreError, match="finite real"):
         score_analogies(None, harness)
+
+
+def _search_for(harness, result):
+    selected = harness.tracks[0]
+    context = EpisodeContext(
+        tactic_ranker=selected.model_policy,
+        stuckness_policy=ObservableStucknessPolicy(),
+        state_fingerprinter=CanonicalStateFingerprinter(),
+        tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
+        progress_policy=AcceptNovelState(),
+        cancellation=NeverCancelled(),
+        analogy_fallback=selected.fallback,
+        ordinary_width=1,
+        max_expansions=4,
+        state_diversity=None,
+        semantic_checker=ExhaustiveSemanticChecker(),
+    )
+    initial, goal = _states()
+    search = start_search(context, initial, goal)
+    search.recovery = SemanticRecoveryEvent("semantic:1", "initial", result)
+    return search
+
+
+def test_non_countermodel_update_preserves_every_track():
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return _analogy(("lock", "bridge")[self.calls - 1])
+
+    harness = _harness(Generator())
+    search = _search_for(harness, SemanticResult.VALID)
+
+    updated = update_analogies(search, harness)
+
+    assert updated is harness
+    assert all(track.scratchpad.current is not None for track in harness.tracks)
+
+
+def test_countermodel_update_abandons_each_track_once_and_keeps_local_memory():
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return _analogy(("lock", "bridge")[self.calls - 1])
+
+    harness = _harness(Generator())
+    search = _search_for(harness, SemanticResult.COUNTERMODEL)
+
+    updated = update_analogies(search, harness)
+
+    assert [track.scratchpad.abandoned_domains for track in updated.tracks] == [
+        ("lock",),
+        ("bridge",),
+    ]
+    assert all(track.scratchpad.current is None for track in updated.tracks)
+    assert all(track.scratchpad.pending_rebuild for track in updated.tracks)
+
+    updated.tracks[0].scratchpad.apply(
+        AnalogyUpdateAction.CHANGE_DOMAIN,
+        AnalogyState("recipe", ("goal is a dish",), ("finish it",)),
+    )
+    repeated = update_analogies(search, updated)
+    assert repeated.tracks[0].scratchpad.current.domain == "recipe"
+
+
+def test_activate_analogy_replaces_only_policy_and_fallback():
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return _analogy(("lock", "bridge")[self.calls - 1])
+
+    harness = _harness(Generator())
+    search = _search_for(harness, SemanticResult.VALID)
+    before = search.context
+    frontier = search.frontier
+    visited = search.visited
+    recovery = search.recovery
+
+    activate_analogy(search, harness.tracks[1])
+
+    assert search.context.tactic_ranker is harness.tracks[1].model_policy
+    assert search.context.analogy_fallback is harness.tracks[1].fallback
+    for field in before.__dataclass_fields__:
+        if field not in {"tactic_ranker", "analogy_fallback"}:
+            assert getattr(search.context, field) is getattr(before, field)
+    assert search.frontier is frontier
+    assert search.visited is visited
+    assert search.recovery is recovery
+
+
+def test_activate_analogy_rejects_mismatched_track_ownership():
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return _analogy(("lock", "bridge")[self.calls - 1])
+
+    harness = _harness(Generator())
+    search = _search_for(harness, SemanticResult.VALID)
+    first, second = harness.tracks
+    mismatched = SimpleNamespace(
+        id="bad",
+        scratchpad=first.scratchpad,
+        model_policy=first.model_policy,
+        fallback=second.fallback,
+    )
+
+    with pytest.raises(ValueError, match="same scratchpad"):
+        activate_analogy(search, mismatched)

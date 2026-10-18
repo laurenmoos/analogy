@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ...config import AppConfig
 from ...model.model_provider import TextGenerator
+from ...utils.records import SymbolicState
 from ..analogy.rescue import AnalogyFallback
 from ..model_policy import TacticRanker
 from ..proof.adapter import LeanGymAdapter
@@ -26,6 +27,8 @@ def initialize_search(
     model_policy: TacticRanker,
     *,
     analogy_fallback: AnalogyFallback | None = None,
+    initial_state: SymbolicState | None = None,
+    goal_state: SymbolicState | None = None,
 ) -> SearchSession:
     """Create a search session without running any search steps."""
 
@@ -44,7 +47,11 @@ def initialize_search(
         ),
         semantic_checker=ExhaustiveSemanticChecker(),
     )
-    return start_search(context, proof.initial_state(), proof.goal_state())
+    return start_search(
+        context,
+        initial_state if initial_state is not None else proof.initial_state(),
+        goal_state if goal_state is not None else proof.goal_state(),
+    )
 
 
 __all__ = ["initialize_search"]

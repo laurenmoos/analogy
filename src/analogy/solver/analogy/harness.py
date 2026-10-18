@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -16,6 +16,7 @@ from ...model.prompts import (
 )
 from ...utils.records import SymbolicState
 from ..model_policy import TacticRanker, initialize_model_policy
+from ..proof.semantic import SemanticResult
 from .protocol import extract_analogy_block
 from .rescue import AnalogyFallback, initialize_analogy_fallback
 from .state import AnalogyScratchpad
@@ -76,6 +77,7 @@ class EqualAnalogyScorer:
 class AnalogyHarness:
     tracks: tuple[AnalogyTrack, ...]
     scorer: AnalogyScorer
+    prepared_recoveries: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.tracks:
@@ -188,6 +190,42 @@ def select_analogy(scored: tuple[ScoredAnalogy, ...]) -> AnalogyTrack:
     return max(scored, key=lambda item: item.score).track
 
 
+def update_analogies(
+    search: SearchSession,
+    analogies: AnalogyHarness,
+) -> AnalogyHarness:
+    """Prepare every isolated track for the search's pending recovery."""
+
+    recovery = search.recovery
+    if recovery is None:
+        raise RuntimeError("search has no pending analogy rescue")
+    if recovery.result is not SemanticResult.COUNTERMODEL:
+        return analogies
+    if recovery.event_id in analogies.prepared_recoveries:
+        return analogies
+    for track in analogies.tracks:
+        track.scratchpad.abandon_current()
+    return replace(
+        analogies,
+        prepared_recoveries=analogies.prepared_recoveries | {recovery.event_id},
+    )
+
+
+def activate_analogy(search: SearchSession, analogy: AnalogyTrack) -> None:
+    """Use one track without changing the shared search state."""
+
+    if (
+        analogy.model_policy.analogy_scratchpad is not analogy.scratchpad
+        or analogy.fallback.scratchpad is not analogy.scratchpad
+    ):
+        raise ValueError("analogy policy and fallback must share the same scratchpad")
+    search.context = replace(
+        search.context,
+        tactic_ranker=analogy.model_policy,
+        analogy_fallback=analogy.fallback,
+    )
+
+
 def _trace_event(index: int, trace: AnalogyInitializationTrace) -> dict[str, Any]:
     return {
         "kind": "analogy_initialization_call",
@@ -211,7 +249,9 @@ __all__ = [
     "AnalogyTrack",
     "EqualAnalogyScorer",
     "ScoredAnalogy",
+    "activate_analogy",
     "initialize_analogy_harness",
     "score_analogies",
     "select_analogy",
+    "update_analogies",
 ]

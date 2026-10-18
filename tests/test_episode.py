@@ -28,7 +28,11 @@ from analogy.solver.search import (
     CanonicalStateFingerprinter,
     WhitespaceTacticCanonicalizer,
     submit_tactics_to_lean,
+    initialize_search,
 )
+from analogy.config import load_config
+from analogy.utils.records import Embedding
+from pathlib import Path
 from analogy.solver.scoring import DiversityObservation
 from analogy.solver.search import (
     start_search,
@@ -52,6 +56,7 @@ RESCUE_CANDIDATE = TacticCandidate(
     "exact rescued", 1.0, CandidateOrigin.ANALOGICAL
 )
 _VERIFIERS_BY_RANKER = {}
+ROOT = Path(__file__).parents[1]
 
 
 def _run_incremental(context, initial=START, goal=GOAL, *, analogy=False):
@@ -76,6 +81,31 @@ def _run_incremental(context, initial=START, goal=GOAL, *, analogy=False):
 class _Ranker:
     def rank(self, _state, _goal):
         return (CANDIDATE,)
+
+
+def test_initialize_search_reuses_precomputed_proof_states():
+    class Proof:
+        def initial_state(self):
+            raise AssertionError("initial state must be reused")
+
+        def goal_state(self):
+            raise AssertionError("goal state must be reused")
+
+    class Generator:
+        def embed_text(self, _text, *, layer):
+            return Embedding("test", (1.0,), layer=layer)
+
+    search = initialize_search(
+        load_config(ROOT / "config.yaml"),
+        Generator(),
+        Proof(),
+        _Ranker(),
+        initial_state=START,
+        goal_state=GOAL,
+    )
+
+    assert search.goal is GOAL
+    assert START.id in search.nodes_by_id
 
 
 class _FailIfCalledFallback:

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from analogy.model import prompts as prompts_module
 from analogy.model.prompt_runner import GenerationStatus
@@ -24,9 +25,20 @@ from analogy.solver.analogy.rescue import (
 )
 from analogy.solver.analogy.protocol import (
     render_analogy_state,
+    render_mental_model,
     render_scratchpad_context,
 )
-from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
+from analogy.solver.analogy.state import (
+    AnalogyScratchpad,
+    AnalogyState,
+    MentalModel,
+    MentalModelCorrespondence,
+)
+from analogy.solver.analogy.structural_scoring import (
+    ProofBelief,
+    StructuralElement,
+    StructuralGraph,
+)
 from analogy.solver.search import NeverCancelled
 from analogy.solver.proof.semantic import (
     SemanticRecoveryEvent,
@@ -100,6 +112,167 @@ def _block(domain, mapping, steps, abandoned=()):
     return render_analogy_state(
         AnalogyState(domain, tuple(mapping), tuple(steps), tuple(abandoned))
     )
+
+
+def _mental_response(domain, transition, tactic, *, action="revise_model"):
+    model = MentalModel(
+        domain,
+        (
+            MentalModelCorrespondence(
+                "start",
+                transition,
+                "finish",
+                proof_transition=tactic,
+            ),
+        ),
+    )
+    return render_mental_model(model) + "\n" + json.dumps(
+        {
+            "action": action,
+            "predicted_state": "SOLVED",
+            "tactic": tactic,
+        }
+    )
+
+
+def _proof_belief():
+    return ProofBelief(
+        StructuralGraph(
+            (StructuralElement("proof-state:state", "proof-state", "P", 0.0),),
+            (),
+        )
+    )
+
+
+def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
+    monkeypatch,
+):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+    events = []
+    generated = iter(
+        (
+            _mental_response("navigation", "middle", "exact middle"),
+            _mental_response("navigation", "best", "exact best"),
+            _mental_response("navigation", "worst", "exact worst"),
+        )
+    )
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return next(generated)
+
+    distances = {"middle": 0.2, "best": 0.1, "worst": 0.3}
+
+    def score(model, belief, embedder, *, layer):
+        transition = model.correspondences[0].domain_transition
+        events.append(("score", transition))
+        return SimpleNamespace(
+            distance=distances[transition],
+            coupling=((1.0,),),
+        )
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision", score
+    )
+
+    def evaluate(candidate):
+        events.append(("lean", candidate.source))
+        if candidate.source == "exact middle":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+            return TacticEvaluation(result, completed_proof="done")
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.ERROR, diagnostics=("rejected",))
+        )
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=3,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+        embedding_layer=-1,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        evaluate,
+        NeverCancelled(),
+        "guidance",
+        proof_belief=_proof_belief(),
+    )
+
+    assert events == [
+        ("score", "middle"),
+        ("score", "best"),
+        ("score", "worst"),
+        ("lean", "exact best"),
+        ("lean", "exact middle"),
+    ]
+    assert outcome.completed_proof == "done"
+    assert scratchpad.current.correspondences[0].domain_transition == "middle"
+
+
+def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+    responses = iter(
+        (
+            _mental_response("navigation", "invalid", "exact invalid"),
+            _mental_response(
+                "gardening", "plant", "exact h", action="change_domain"
+            ),
+        )
+    )
+    lean_calls = []
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return next(responses)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder, *, layer: SimpleNamespace(
+            distance=0.1, coupling=((1.0,),)
+        ),
+    )
+
+    def evaluate(candidate):
+        lean_calls.append(candidate.source)
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=2,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+        embedding_layer=-1,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        evaluate,
+        NeverCancelled(),
+        "guidance",
+        force_domain_change=True,
+        proof_belief=_proof_belief(),
+    )
+
+    assert outcome.completed_proof == "done"
+    assert lean_calls == ["exact h"]
+    assert scratchpad.current.domain == "gardening"
+    assert [rollout.termination for rollout in outcome.rollouts] == [
+        RescueTermination.INVALID_OUTPUT,
+        RescueTermination.COMPLETE,
+    ]
 
 
 def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():

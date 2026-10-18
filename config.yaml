@@ -14,11 +14,11 @@ model:
 
 benchmark:
   corpus: src/analogy/lean_gym/corpus/problems.json
-  selection: previous_failures
+  selection: exhaustive
 
 search:
   top_k: 3
-  max_steps: 8
+  max_steps: 32
   stuck_after: 2
 
 analogy:

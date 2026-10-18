@@ -110,3 +110,44 @@ def test_candidate_filter_requires_mixed_connectives_length_and_flat_trace() -> 
     assert not importer.is_static_candidate(
         importer.Candidate("nested", eligible.target, ("x",) * 15, 0, False)
     )
+
+
+def test_build_documents_separates_runtime_problem_from_selection_metadata() -> None:
+    importer = _load_importer()
+    selected = [
+        importer.ValidatedCandidate(
+            importer.Candidate(
+                "42",
+                "p1 ∧ p2 ∨ (p2 → p3)",
+                ("intro h",) * 15,
+                2,
+                True,
+            ),
+            "open",
+        )
+    ]
+
+    corpus, proofs, metadata = importer.build_documents(selected)
+
+    assert corpus["source"] == {
+        "repository": "https://huggingface.co/datasets/KomeijiForce/PropL",
+        "license": "MIT",
+    }
+    assert corpus["problems"][0] == {
+        "id": "propl_ood_42",
+        "title": "PropL OOD 01",
+        "binders": "(p1 p2 p3 p4 p5 : Prop)",
+        "target": "p1 ∧ p2 ∨ (p2 → p3)",
+        "source_path": "normal/test_ood.csv",
+        "source_level": "test_ood/42",
+        "connective": "mixed",
+        "difficulty": 17,
+    }
+    assert proofs["proofs"][0] == {
+        "problem_id": "propl_ood_42",
+        "tactics": ["intro h"] * 15,
+    }
+    assert "failed_attempts" not in corpus["problems"][0]
+    assert metadata["source"]["revision"] == importer.SOURCE_REVISION
+    assert metadata["records"][0]["failed_attempts"] == 2
+    assert metadata["records"][0]["one_step_simp_status"] == "open"

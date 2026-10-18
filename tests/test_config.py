@@ -25,7 +25,7 @@ def test_runtime_config_has_one_analogy_boolean_and_schema_call_budget():
     assert config.analogy.enabled is True
     assert config.analogy.max_model_calls == 3
     assert set(config.analogy.__dataclass_fields__) == {"enabled", "max_model_calls"}
-    assert config.benchmark.selection == "previous_failures"
+    assert config.benchmark.selection == "exhaustive"
     assert config.run.seed == 0
 
 

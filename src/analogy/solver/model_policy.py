@@ -19,6 +19,12 @@ from ..inference.prompts import (
     render_lean_goal_for_model,
 )
 from ..records import CandidateOrigin, Message, TacticCandidate
+from .analogy_state import (
+    AnalogyScratchpad,
+    AnalogyState,
+    AnalogyStateError,
+    extract_analogy_block,
+)
 
 class TacticRankingError(RuntimeError):
     """Raised when the conventional model cannot produce a candidate pool."""
@@ -36,6 +42,7 @@ class TacticRanker:
         failed_tactics_for: Any | None = None,
         trace_sink: Any | None = None,
         tolerate_failure: bool = False,
+        analogy_scratchpad: AnalogyScratchpad | None = None,
     ) -> None:
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
             raise ValueError("top_k must be a positive integer")
@@ -45,6 +52,7 @@ class TacticRanker:
         self._failed_tactics_for = failed_tactics_for or (lambda _state_id: ())
         self._trace_sink = trace_sink
         self._tolerate_failure = tolerate_failure
+        self._analogy_scratchpad = analogy_scratchpad
 
     def rank(
         self,
@@ -56,8 +64,16 @@ class TacticRanker:
         accepted = "\n".join(state.context) if state.context else "(none)"
         failed_values = tuple(self._failed_tactics_for(state.id))
         failed = "\n".join(failed_values) if failed_values else "(none)"
-        messages = prompt_catalog().messages(
-            "conventional_ranker",
+        use_analogy_protocol = (
+            self._analogy_scratchpad is not None
+            and not self._analogy_scratchpad.pending_rebuild
+        )
+        base_messages = prompt_catalog().messages(
+            (
+                "analogy_conventional_ranker"
+                if use_analogy_protocol
+                else "conventional_ranker"
+            ),
             overall_target=render_lean_goal_for_model(goal.expression),
             current_goals=render_lean_goal_for_model(focused_lean_goal(state.expression)),
             accepted=accepted,
@@ -65,6 +81,7 @@ class TacticRanker:
             tactic_card=lean_tactic_card(state.expression),
             top_k=self._top_k,
         )
+        messages = self._scratchpad_messages(base_messages, use_analogy_protocol)
         discarded_candidates: list[str] = []
         accepted: dict[str, TacticCandidate] = {}
         attempts = []
@@ -76,12 +93,12 @@ class TacticRanker:
             blocked = frozenset(excluded_tactics) | frozenset(accepted)
             run = PromptRunner(self._generator).run(
                 active_messages,
-                parser=lambda raw, current=blocked, removed=batch_discarded: parse_tactic_candidates(
+                parser=lambda raw, current=blocked, removed=batch_discarded: self._parse_output(
                     raw,
-                    self._top_k,
-                    discarded_candidates=removed,
                     proof_state=state.expression,
                     excluded_tactics=current,
+                    discarded_candidates=removed,
+                    use_analogy_protocol=use_analogy_protocol,
                 ),
                 seed=self._seed + index,
                 max_attempts=1,
@@ -97,11 +114,19 @@ class TacticRanker:
                 error = None
                 if not batch_discarded or index == 2:
                     break
-                active_messages = _replacement_repair(messages, batch_discarded)
+                active_messages = _replacement_repair(
+                    self._scratchpad_messages(base_messages, use_analogy_protocol),
+                    batch_discarded,
+                    require_analogy=use_analogy_protocol,
+                )
                 continue
             error = run.error or RuntimeError("generation cancelled")
             if isinstance(error, (IncompleteCandidatePool, FilteredCandidatePool)) and index < 2:
-                active_messages = _replacement_repair(messages, batch_discarded or [str(error)])
+                active_messages = _replacement_repair(
+                    self._scratchpad_messages(base_messages, use_analogy_protocol),
+                    batch_discarded or [str(error)],
+                    require_analogy=use_analogy_protocol,
+                )
                 continue
             break
 
@@ -154,6 +179,66 @@ class TacticRanker:
             return ()
         raise TacticRankingError(f"{type(error).__name__}: {error}") from error
 
+    def _scratchpad_messages(
+        self,
+        messages: tuple[Message, ...],
+        use_analogy_protocol: bool = True,
+    ) -> tuple[Message, ...]:
+        scratchpad = self._analogy_scratchpad
+        if scratchpad is None or not use_analogy_protocol:
+            return messages
+        user = messages[1]
+        if scratchpad.history:
+            user = Message(
+                user.role,
+                user.content
+                + "\n\nProof search history (analogy blocks removed):\n"
+                + "\n".join(scratchpad.history),
+            )
+        if scratchpad.current is None:
+            return messages[0], user
+        return messages[0], Message("system", scratchpad.current.render()), user
+
+    def _parse_output(
+        self,
+        raw: str,
+        *,
+        proof_state: str,
+        excluded_tactics: set[str] | frozenset[str],
+        discarded_candidates: list[str],
+        use_analogy_protocol: bool = True,
+    ) -> tuple[TacticCandidate, ...]:
+        scratchpad = self._analogy_scratchpad
+        analogy: AnalogyState | None = None
+        payload = raw
+        if scratchpad is not None and use_analogy_protocol:
+            try:
+                analogy, payload = extract_analogy_block(raw)
+            except AnalogyStateError as error:
+                raise ModelOutputError(str(error)) from error
+            if scratchpad.current is not None and analogy != scratchpad.current:
+                raise ModelOutputError(
+                    "analogy block must remain unchanged during ordinary search"
+                )
+        candidates = parse_tactic_candidates(
+            payload,
+            self._top_k,
+            discarded_candidates=discarded_candidates,
+            proof_state=proof_state,
+            excluded_tactics=excluded_tactics,
+        )
+        if scratchpad is not None and use_analogy_protocol:
+            if scratchpad.current is None:
+                assert analogy is not None
+                try:
+                    scratchpad.initialize(analogy)
+                except AnalogyStateError as error:
+                    raise ModelOutputError(str(error)) from error
+            scratchpad.record_history(payload)
+        elif scratchpad is not None:
+            scratchpad.record_history(payload)
+        return candidates
+
 
 def _incomplete_pool_repair(messages, raw: str, error: Exception):
     return messages + (
@@ -168,7 +253,14 @@ def _incomplete_pool_repair(messages, raw: str, error: Exception):
     )
 
 
-def _replacement_repair(messages, discarded: list[str]):
+def _replacement_repair(
+    messages, discarded: list[str], *, require_analogy: bool = False
+):
+    contract = (
+        "Return the current <analogy> block unchanged, followed by the requested JSON array."
+        if require_analogy
+        else "Return only the requested JSON array."
+    )
     return messages + (
         Message(
             "user",
@@ -177,7 +269,7 @@ def _replacement_repair(messages, discarded: list[str]):
             + "\nReturn replacement candidates only. Do not repeat any removed or "
             "already tried tactic. Supply every operand, for example `exact h2`, "
             "`apply h1`, `rw [h1]`, or `rcases h with ⟨hH,hU⟩`. "
-            "Return only the requested JSON array.",
+            + contract,
         ),
     )
 

@@ -26,6 +26,7 @@ from ..records import (
     TacticStatus,
 )
 from .diversity import FrozenEmbeddingDiversity
+from .analogy_state import AnalogyScratchpad
 from .episode import EpisodeContext, run_episode
 from .lean_adapter import LeanGymAdapter
 from .model_policy import TacticRanker, TacticRankingError
@@ -394,6 +395,9 @@ def _run_runtime(
         search_result = None
         try:
             lean = LeanGymAdapter(problem, verifier)
+            analogy_scratchpad = (
+                AnalogyScratchpad() if config.analogy.enabled else None
+            )
             search_result = run_episode(
                 EpisodeContext(
                     tactic_ranker=TacticRanker(
@@ -402,6 +406,7 @@ def _run_runtime(
                         seed=config.run.seed,
                         failed_tactics_for=lean.failed_tactics_for,
                         trace_sink=model_events.append,
+                        analogy_scratchpad=analogy_scratchpad,
                     ),
                     verifier=lean,
                     stuckness_policy=ObservableStucknessPolicy(),
@@ -415,6 +420,7 @@ def _run_runtime(
                         max_model_calls=config.analogy.max_model_calls,
                         seed=config.run.seed,
                         trace_sink=model_events.append,
+                        analogy_scratchpad=analogy_scratchpad,
                     ),
                     ordinary_width=config.search.top_k,
                     max_expansions=config.search.max_steps,

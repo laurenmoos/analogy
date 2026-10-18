@@ -97,6 +97,26 @@ def test_analogy_fallback_requests_exactly_one_tactic():
     assert "REJECTED tactics" in prompt
 
 
+def test_conventional_ranker_explains_initial_and_immutable_analogy_blocks():
+    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
+    values = {
+        "overall_target": "P",
+        "current_goals": "P",
+        "accepted": "(none)",
+        "failed": "(none)",
+        "tactic_card": "Lean card: one line.",
+        "top_k": 1,
+    }
+
+    prompt = "\n".join(
+        message.content for message in catalog.messages("analogy_conventional_ranker", **values)
+    )
+
+    assert "<analogy>" in prompt
+    assert "create one" in prompt
+    assert "repeat it unchanged" in prompt
+
+
 def test_tactic_card_is_generic_and_bans_automation():
     state = """B S : Prop
 h1 : B → S

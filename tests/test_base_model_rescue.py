@@ -18,6 +18,7 @@ from analogy.solver.rescue import (
     TacticEvaluation,
     parse_analogy_tactic,
 )
+from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
 from analogy.solver.search import NeverCancelled
 from analogy.solver.semantic import (
     SemanticRecoveryEvent,
@@ -40,12 +41,15 @@ def _search(
     ordinary_attempts=(),
     semantic_guidance="SAT: no countermodel; continue from this state.",
     dependency_table="(none)",
+    scratchpad=None,
+    force_domain_change=False,
 ):
     return AnalogyFallback(
         generator,
         max_model_calls=calls,
         seed=7,
         trace_sink=None if traces is None else traces.append,
+        analogy_scratchpad=scratchpad,
     ).search(
         STATE,
         GOAL,
@@ -55,7 +59,207 @@ def _search(
         cancellation or NeverCancelled(),
         semantic_guidance,
         dependency_table,
+        force_domain_change=force_domain_change,
     )
+
+
+def _block(domain, mapping, steps, abandoned=()):
+    return AnalogyState(domain, tuple(mapping), tuple(steps), tuple(abandoned)).render()
+
+
+def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():
+    initial = AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
+    scratchpad = AnalogyScratchpad(initial)
+    successor = SymbolicState("next", "h : P\n⊢ P", "lean4")
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            assert messages[1].content == initial.render()
+            return _block(
+                "locksmithing", ("P -> lock",), ("Turn the matching key.",)
+            ) + '\n{"action":"revise_steps","predicted_state":"h : P\\n⊢ P","tactic":"intro h"}'
+
+    def evaluate(candidate):
+        from analogy.records import SearchNode
+        result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
+        return TacticEvaluation(result, successor=SearchNode(successor, 1.0))
+
+    outcome = _search(Generator(), evaluate, calls=1, scratchpad=scratchpad)
+
+    assert outcome.successor is not None
+    assert scratchpad.current is not None
+    assert scratchpad.current.domain == initial.domain
+    assert scratchpad.current.mapping == initial.mapping
+    assert scratchpad.current.steps == ("Turn the matching key.",)
+
+
+def test_change_domain_trials_continue_until_lean_accepts_and_abandon_old_domain():
+    initial = AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
+    scratchpad = AnalogyScratchpad(initial)
+    calls = []
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            calls.append(seed)
+            if len(calls) == 1:
+                state = _block("shipping", ("P -> parcel",), ("Send it.",))
+                tactic = "exact missing"
+            else:
+                state = _block("gardening", ("P -> seed",), ("Plant it.",))
+                tactic = "exact h"
+            return state + f'\n{{"action":"change_domain","predicted_state":"SOLVED","tactic":"{tactic}"}}'
+
+    def evaluate(candidate):
+        if candidate.source == "exact h":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+            return TacticEvaluation(result, completed_proof="done")
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.ERROR, diagnostics=("unknown",))
+        )
+
+    outcome = _search(Generator(), evaluate, calls=3, scratchpad=scratchpad)
+
+    assert outcome.completed_proof == "done"
+    assert len(calls) == 2
+    assert scratchpad.current is not None
+    assert scratchpad.current.domain == "gardening"
+    assert scratchpad.current.abandoned_domains == ("locksmithing",)
+
+
+def test_countermodel_forces_destruction_and_rejects_step_revision():
+    initial = AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
+    scratchpad = AnalogyScratchpad(initial)
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            assert all(initial.render() not in message.content for message in messages)
+            assert any("locksmithing" in message.content for message in messages)
+            return """<analogy>
+domain: locksmithing
+mapping:
+- P -> lock
+steps:
+1. Try a different key.
+abandoned domains:
+- locksmithing
+</analogy>
+{"action":"revise_steps","predicted_state":"SOLVED","tactic":"exact h"}"""
+
+    outcome = _search(
+        Generator(),
+        lambda _candidate: (_ for _ in ()).throw(AssertionError("must not call Lean")),
+        calls=1,
+        scratchpad=scratchpad,
+        force_domain_change=True,
+    )
+
+    assert outcome.completed_proof is None
+    assert scratchpad.current is None
+    assert scratchpad.abandoned_domains == ("locksmithing",)
+    assert outcome.rollouts[0].termination is RescueTermination.INVALID_OUTPUT
+
+
+def test_prediction_match_is_provisional_while_later_domain_can_make_progress():
+    scratchpad = AnalogyScratchpad(
+        AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
+    )
+    repeated = TacticResult(
+        TacticCandidate("assumption", 1.0, CandidateOrigin.ANALOGICAL),
+        TacticStatus.ACCEPTED,
+        state=SymbolicState("same", "Q : Prop\n⊢ Q", "lean4"),
+    )
+
+    calls = []
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            calls.append(seed)
+            if len(calls) == 1:
+                return _block("shipping", ("P -> parcel",), ("Send it.",)) + (
+                    '\n{"action":"change_domain","predicted_state":"Q : Prop\\n⊢ Q",'
+                    '"tactic":"assumption"}'
+                )
+            return _block("gardening", ("P -> seed",), ("Plant it.",)) + (
+                '\n{"action":"change_domain","predicted_state":"SOLVED",'
+                '"tactic":"exact h"}'
+            )
+
+    def evaluate(candidate):
+        if candidate.source == "exact h":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+            return TacticEvaluation(result, completed_proof="done")
+        return TacticEvaluation(
+            repeated,
+            discarded=DiscardedSuccessor(repeated, DiscardReason.REPEATED_STATE),
+        )
+
+    outcome = _search(
+        Generator(),
+        evaluate,
+        calls=2,
+        scratchpad=scratchpad,
+    )
+
+    assert outcome.completed_proof == "done"
+    assert len(calls) == 2
+    assert scratchpad.current is not None
+    assert scratchpad.current.domain == "gardening"
+    assert outcome.rollouts[0].generations[0].prediction_label is PredictionLabel.PREDICTION_MATCHED
+
+
+def test_abandoned_domain_update_is_rejected_before_lean_without_mutation():
+    current = AnalogyState(
+        "locksmithing", ("P -> lock",), ("Inspect it.",), ("shipping",)
+    )
+    scratchpad = AnalogyScratchpad(current)
+    lean_calls = []
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return _block("shipping", ("P -> parcel",), ("Send it.",)) + (
+                '\n{"action":"change_domain","predicted_state":"SOLVED",'
+                '"tactic":"exact h"}'
+            )
+
+    outcome = _search(
+        Generator(),
+        lambda candidate: lean_calls.append(candidate),
+        calls=1,
+        scratchpad=scratchpad,
+    )
+
+    assert lean_calls == []
+    assert scratchpad.current == current
+    assert scratchpad.abandoned_domains == ("shipping",)
+    assert outcome.rollouts[0].termination is RescueTermination.INVALID_OUTPUT
+
+
+def test_update_repair_prompt_strips_previous_block_and_uses_action_schema():
+    current = AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
+    scratchpad = AnalogyScratchpad(current)
+    calls = []
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            calls.append(messages)
+            if len(calls) == 1:
+                return current.render() + "\nnot json"
+            feedback = messages[-1].content
+            assert current.render() not in feedback
+            assert feedback.count("<analogy>") == 1
+            assert '"action", "predicted_state", and "tactic"' in feedback
+            assert '"analogy", "predicted_state"' not in feedback
+            return _block(
+                "locksmithing", ("P -> lock",), ("Turn the key.",)
+            ) + '\n{"action":"revise_steps","predicted_state":"SOLVED","tactic":"exact h"}'
+
+    def evaluate(candidate):
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    assert _search(
+        Generator(), evaluate, calls=2, scratchpad=scratchpad
+    ).completed_proof == "done"
 
 
 def test_semantic_guidance_distinguishes_continue_from_restart() -> None:

@@ -6,10 +6,17 @@ ROOT = Path(__file__).parents[1]
 PACKAGE = ROOT / "src" / "analogy"
 
 
+def _find_spec_or_none(name):
+    try:
+        return find_spec(name)
+    except ModuleNotFoundError:
+        return None
+
+
 def test_retired_execution_packages_are_absent():
-    assert find_spec("analogy.experiments.activation_cli") is None
-    assert find_spec("analogy.transfer.generated_loop") is None
-    assert find_spec("analogy.training.trainer") is None
+    assert _find_spec_or_none("analogy.experiments.activation_cli") is None
+    assert _find_spec_or_none("analogy.transfer.generated_loop") is None
+    assert _find_spec_or_none("analogy.training.trainer") is None
 
 
 def test_no_secondary_runtime_entry_points_exist():

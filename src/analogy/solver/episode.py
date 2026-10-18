@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from heapq import heappop, heappush
+from inspect import Parameter, signature
 from itertools import count
 from typing import Iterable
 
@@ -244,6 +245,7 @@ def run_episode(
             render_countermodel_table(recovery.countermodel_table),
             semantic_cache,
             semantic_prunes,
+            force_domain_change=recovery.result is SemanticResult.COUNTERMODEL,
         )
         if rescue is None:
             if forced_successor is not None:
@@ -484,6 +486,7 @@ def _rescue_step(
     dependency_table: str,
     semantic_cache: dict[str, SemanticAssessment],
     semantic_prunes: list[SemanticPrune],
+    force_domain_change: bool = False,
 ):
     if not context.analogy_enabled:
         return None
@@ -499,29 +502,25 @@ def _rescue_step(
         semantic_cache,
         semantic_prunes,
     )
-    try:
-        return context.analogy_fallback.search(
-            node.state,
-            goal,
-            ordinary.candidate_pool,
-            ordinary.attempts,
-            evaluator,
-            context.cancellation,
-            semantic_guidance,
-            dependency_table=dependency_table,
-        )
-    except TypeError as error:
-        if "dependency_table" not in str(error):
-            raise
-        return context.analogy_fallback.search(
-            node.state,
-            goal,
-            ordinary.candidate_pool,
-            ordinary.attempts,
-            evaluator,
-            context.cancellation,
-            semantic_guidance,
-        )
+    search = context.analogy_fallback.search
+    parameters = signature(search).parameters.values()
+    accepts_keywords = any(item.kind is Parameter.VAR_KEYWORD for item in parameters)
+    names = {item.name for item in parameters}
+    keyword_arguments = {}
+    if accepts_keywords or "dependency_table" in names:
+        keyword_arguments["dependency_table"] = dependency_table
+    if accepts_keywords or "force_domain_change" in names:
+        keyword_arguments["force_domain_change"] = force_domain_change
+    return search(
+        node.state,
+        goal,
+        ordinary.candidate_pool,
+        ordinary.attempts,
+        evaluator,
+        context.cancellation,
+        semantic_guidance,
+        **keyword_arguments,
+    )
 
 
 def _forced_move_step(

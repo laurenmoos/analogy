@@ -1,13 +1,69 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from pathlib import Path
 from types import SimpleNamespace
 
-from analogy.records import InferenceStatus, SearchStatus
-from analogy.solver.inference import _problem_result, _problem_route, render_problem_trace
+from analogy.config import load_config
+from analogy.lean_gym.models import Problem
+from analogy.records import InferenceStatus, SearchStatus, SymbolicState
+from analogy.solver import inference as inference_module
+from analogy.solver.inference import (
+    _problem_result,
+    _problem_route,
+    _run_runtime,
+    render_problem_trace,
+)
 from analogy.solver.search import SearchResult
 from analogy.solver.semantic import (
     SemanticRecoveryEvent,
     SemanticResult,
 )
+
+
+ROOT = Path(__file__).parents[1]
+
+
+def test_runtime_shares_one_scratchpad_within_each_problem_and_isolates_problems(
+    tmp_path, monkeypatch
+) -> None:
+    contexts = []
+
+    class FakeLean:
+        def __init__(self, problem, verifier):
+            self.problem = problem
+
+        def failed_tactics_for(self, _state_id):
+            return ()
+
+        def initial_state(self):
+            return SymbolicState(f"{self.problem.id}:initial", "P : Prop\n⊢ P", "lean4")
+
+    def fake_run_episode(context, initial, goal):
+        contexts.append(context)
+        return SearchResult(SearchStatus.EXHAUSTED, None)
+
+    monkeypatch.setattr(inference_module, "LeanGymAdapter", FakeLean)
+    monkeypatch.setattr(inference_module, "run_episode", fake_run_episode)
+    config = load_config(ROOT / "config.yaml")
+    config = replace(config, analogy=replace(config.analogy, enabled=True))
+    problems = tuple(
+        Problem(f"p{index}", "demo", "", "P", "test", "test", "atom", 1)
+        for index in range(2)
+    )
+
+    _run_runtime(
+        config,
+        problems,
+        object(),
+        object(),
+        run_directory=tmp_path,
+    )
+
+    assert len(contexts) == 2
+    first_ranker = contexts[0].tactic_ranker._analogy_scratchpad
+    first_fallback = contexts[0].analogy_fallback._analogy_scratchpad
+    second_ranker = contexts[1].tactic_ranker._analogy_scratchpad
+    assert first_ranker is first_fallback
+    assert first_ranker is not second_ranker
 
 
 def test_problem_report_shows_analogy_as_one_fallback_inside_shared_search():

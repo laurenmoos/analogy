@@ -388,8 +388,9 @@ def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
             return TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
 
     class Rescue:
-        def search(self, state, _goal, _pool, _attempts, evaluator, _cancellation, semantic_guidance):
+        def search(self, state, _goal, _pool, _attempts, evaluator, _cancellation, semantic_guidance, *, force_domain_change=False):
             seen.append(state.id)
+            assert force_domain_change is True
             assert semantic_guidance == (
                 "SAT restart: assumption led to a countermodel (P=false); "
                 "choose a different plan from this last valid state."

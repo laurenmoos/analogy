@@ -17,6 +17,27 @@ prompts:
       {{tactic_card}}
       Return at most {{top_k}} candidates.
 
+  analogy_conventional_ranker:
+    version: analogy-conventional-ranker-v1
+    system: >-
+      Rank next Lean 4 tactics while maintaining the external analogy scratchpad. Return exactly one
+      <analogy> block followed by a nonempty JSON array of objects with exactly `tactic` and `score`.
+      Tactics are one-line strings; scores are nonnegative numbers. Use visible identifiers only. Never repeat
+      a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.
+    user: |-
+      Overall target:
+      {{overall_target}}
+      Current goals:
+      {{current_goals}}
+      Accepted prefix:
+      {{accepted}}
+      Recent path failure feedback:
+      {{failed}}
+      {{tactic_card}}
+      If no current analogy block was supplied, create one with domain, mapping, numbered steps, and abandoned domains.
+      If a current analogy block was supplied, repeat it unchanged; ordinary search must not revise it.
+      Then return at most {{top_k}} candidates after the block.
+
   analogy_rescue:
     version: analogy-rescue-v8
     system: >-
@@ -51,3 +72,38 @@ prompts:
       predicted_state must be literal SOLVED or the exact full focused Lean state expected immediately after the tactic,
       including its visible context and goal. Never predict the unchanged current state. tactic is one complete Lean 4 line;
       use ; or <;> to sequence.
+
+  analogy_update:
+    version: analogy-update-v1
+    system: >-
+      Update the external analogy scratchpad to escape this stuck Lean 4 proof state, then return the first tactic
+      from the updated story. Lean is the judge. Return exactly one <analogy> block followed by JSON only.
+    user: |-
+      Overall target:
+      {{overall_target}}
+
+      Current goals:
+      {{current_goals}}
+
+      Semantic recovery:
+      {{semantic_guidance}}
+
+      Countermodel dependency table:
+      {{dependency_table}}
+
+      Accepted prefix:
+      {{accepted}}
+
+      OPEN tactics (Lean accepted and left goals):
+      {{open_tactics}}
+
+      REJECTED tactics (Lean errors or unusable results):
+      {{rejected_tactics}}
+
+      {{tactic_card}}
+
+      Choose action revise_steps or change_domain. revise_steps must keep the supplied domain and mapping exactly
+      and change only the numbered steps. change_domain must choose a new domain not listed under abandoned domains,
+      with a new mapping and numbered story. A SAT restart/countermodel requires change_domain.
+      Return the updated <analogy> block, then JSON with exactly "action", "predicted_state", and "tactic".
+      predicted_state is literal SOLVED or the exact full focused Lean state expected immediately after the first tactic.

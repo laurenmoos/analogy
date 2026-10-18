@@ -7,6 +7,7 @@ import pytest
 from analogy.config import load_config
 from analogy.inference import model_provider
 from analogy.solver.model_policy import TacticRanker, TacticRankingError
+from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
 from analogy.inference.prompts import configure_prompt_catalog
 
 
@@ -149,6 +150,148 @@ def test_tactic_ranker_prompt_contains_only_the_focused_goal():
 
     assert "h : P" in seen[0]
     assert "bad : Q" not in seen[0]
+
+
+def test_enabled_ranker_initializes_scratchpad_and_strips_block_before_candidate_parser():
+    scratchpad = AnalogyScratchpad()
+
+    class Provider:
+        def generate(self, messages, *, seed):
+            assert seed == 7
+            assert len(messages) == 2
+            assert "create one" in messages[-1].content
+            return """<analogy>
+domain: locksmithing
+mapping:
+- P -> locked door
+steps:
+1. Open the matching lock.
+abandoned domains:
+- (none)
+</analogy>
+[{"tactic":"exact h","score":1}]"""
+
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    candidates = TacticRanker(
+        Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
+    ).rank(
+        SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
+        SimpleNamespace(expression="P"),
+    )
+
+    assert [item.source for item in candidates] == ["exact h"]
+    assert scratchpad.current is not None
+    assert scratchpad.current.domain == "locksmithing"
+    assert scratchpad.history == ('[{"tactic":"exact h","score":1}]',)
+
+
+def test_enabled_ranker_injects_current_block_and_rejects_ordinary_mutation():
+    current = AnalogyState("locksmithing", ("P -> lock",), ("Open it.",))
+    scratchpad = AnalogyScratchpad(current)
+    calls = []
+
+    class Provider:
+        def generate(self, messages, *, seed):
+            calls.append(messages)
+            assert messages[0].role == "system"
+            assert messages[1].role == "system"
+            assert messages[1].content == current.render()
+            assert messages[2].role == "user"
+            if len(calls) == 1:
+                return """<analogy>
+domain: shipping
+mapping:
+- P -> parcel
+steps:
+1. Deliver it.
+abandoned domains:
+- (none)
+</analogy>
+[{"tactic":"exact h","score":1}]"""
+            return current.render() + '\n[{"tactic":"exact h","score":1}]'
+
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    ranker = TacticRanker(
+        Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
+    )
+
+    with pytest.raises(TacticRankingError, match="must remain unchanged"):
+        ranker.rank(
+            SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
+            SimpleNamespace(expression="P"),
+        )
+
+    assert scratchpad.current == current
+
+
+def test_disabled_ranker_keeps_existing_two_message_contract():
+    seen = []
+
+    class Provider:
+        def generate(self, messages, *, seed):
+            seen.append(messages)
+            return '[{"tactic":"exact h","score":1}]'
+
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    TacticRanker(Provider(), top_k=1, seed=7).rank(
+        SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
+        SimpleNamespace(expression="P"),
+    )
+
+    assert len(seen[0]) == 2
+
+
+def test_pending_rebuild_uses_plain_ordinary_tactics_without_reinitializing():
+    scratchpad = AnalogyScratchpad(
+        AnalogyState("locksmithing", ("P -> lock",), ("Open it.",))
+    )
+    scratchpad.abandon_current()
+
+    class Provider:
+        def generate(self, messages, *, seed):
+            assert len(messages) == 2
+            assert "<analogy>" not in "\n".join(item.content for item in messages)
+            return '[{"tactic":"exact h","score":1}]'
+
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    candidates = TacticRanker(
+        Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
+    ).rank(
+        SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
+        SimpleNamespace(expression="P"),
+    )
+
+    assert [item.source for item in candidates] == ["exact h"]
+    assert scratchpad.current is None
+    assert scratchpad.pending_rebuild is True
+
+
+def test_enabled_partial_candidate_repair_refreshes_current_block_and_contract():
+    scratchpad = AnalogyScratchpad()
+    state = AnalogyState("locksmithing", ("P -> lock",), ("Open it.",))
+    calls = []
+
+    class Provider:
+        def generate(self, messages, *, seed):
+            calls.append(messages)
+            if len(calls) == 1:
+                return state.render() + (
+                    '\n[{"tactic":"exact h","score":2},'
+                    '{"tactic":"left","score":1}]'
+                )
+            assert messages[1].content == state.render()
+            assert "<analogy> block" in messages[-1].content
+            return state.render() + '\n[{"tactic":"assumption","score":1}]'
+
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    candidates = TacticRanker(
+        Provider(), top_k=2, seed=7, analogy_scratchpad=scratchpad
+    ).rank(
+        SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
+        SimpleNamespace(expression="P"),
+    )
+
+    assert [item.source for item in candidates] == ["exact h", "assumption"]
 
 
 def test_tactic_ranker_does_not_retry_unrelated_malformed_json():

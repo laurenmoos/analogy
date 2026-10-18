@@ -18,7 +18,7 @@ from .analogy.state import initialize_analogy_scratchpad, update_analogy
 from .episode import update_search
 from .model_policy import generate_tactics_with_model_policy, initialize_model_policy
 from .proof.adapter import initialize_proof, submit_tactics_to_lean
-from .run_records import (
+from .report import (
     SolveRunRecord,
     build_problem_record,
     build_run_record,

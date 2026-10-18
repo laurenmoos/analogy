@@ -10,30 +10,9 @@ from pathlib import Path
 from .config import ConfigError
 from .model.model_provider import ModelConfigurationError
 from .runtime import get_runtime
+from .solver.report import SolveRunRecord
+from .solver.report.render import render_cli_report
 from .solver.run import run_analogy_assisted, run_vanilla
-from .solver.run_records import SolveRunRecord
-
-
-def render_report(run: SolveRunRecord) -> str:
-    """Render one runtime invocation."""
-
-    lines: list[str] = []
-    for result in run.summary.results:
-        lines.append(
-            f"{result.status.value.upper()} {result.problem_id}: "
-            f"lean_calls={result.verifier_call_count}, "
-            f"analogy_fallbacks={result.analogy_fallback_count}"
-        )
-    fallback_count = sum(
-        result.analogy_fallback_count for result in run.summary.results
-    )
-    lines.extend((
-        "",
-        f"SUMMARY: analogy={'on' if run.analogy_enabled else 'off'}, "
-        f"solved={run.summary.solved_count}/{run.summary.attempted_count}, "
-        f"analogy_fallbacks={fallback_count}",
-    ))
-    return "\n".join(lines)
 
 
 def run_solve(args: argparse.Namespace) -> int:
@@ -70,7 +49,7 @@ def run_solve(args: argparse.Namespace) -> int:
         runtime.verifier,
         checkpoint=runtime.checkpoint,
     )
-    print(render_report(run))
+    print(render_cli_report(run))
     print(f"\nDETAILS: {run.output_directory}")
     return 0
 

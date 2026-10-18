@@ -4,11 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from analogy.__main__ import build_parser, main, render_report, run_solve
+from analogy.__main__ import build_parser, main, run_solve
 from analogy.config import load_config
 from analogy.utils.records import ProblemResult, SolveSummary, SolveStatus
 from analogy.runtime import with_analogy_enabled
-from analogy.solver.run_records import SolveRunRecord
+from analogy.solver.report import SolveRunRecord
+from analogy.solver.report.render import render_cli_report
 
 
 ROOT = Path(__file__).parents[1]
@@ -75,7 +76,7 @@ def test_report_describes_one_runtime_run():
     )
     run = SolveRunRecord("run-1", True, summary, 1.5, Path("/tmp/run-1"))
 
-    assert render_report(run) == (
+    assert render_cli_report(run) == (
         "COMPLETE easy: lean_calls=1, analogy_fallbacks=0\n"
         "EXHAUSTED hard: lean_calls=2, analogy_fallbacks=1\n"
         "\nSUMMARY: analogy=on, solved=1/2, analogy_fallbacks=1"
@@ -90,7 +91,7 @@ def test_report_names_semantic_failure_distinctly():
     )
     run = SolveRunRecord("run-2", True, summary, 0.2, Path("/tmp/run-2"))
 
-    assert render_report(run).startswith(
+    assert render_cli_report(run).startswith(
         "SEMANTIC_FAILURE false-root: lean_calls=1, analogy_fallbacks=0"
     )
 

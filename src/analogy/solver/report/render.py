@@ -1,12 +1,11 @@
-"""Human-readable reporting for solver runs."""
+"""Pure human-readable rendering for solver runs."""
 
 from __future__ import annotations
 
 import html
-from pathlib import Path
 from typing import Any, Sequence
 
-from ..utils.records import SolveStatus
+from ...utils.records import SolveStatus
 
 def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
@@ -256,10 +255,10 @@ def render_problem_trace(
 
 
 
-def write_run_report(
+def render_run_report(
     run: Any,
     traces: Sequence[str],
-) -> None:
+) -> str:
     summary = run.summary
     report = [
         "# Proof search run",
@@ -272,9 +271,31 @@ def write_run_report(
         "",
         *traces,
     ]
-    (Path(run.output_directory) / "report.md").write_text(
-        "\n".join(report) + "\n", encoding="utf-8"
+    return "\n".join(report) + "\n"
+
+
+def render_cli_report(run: Any) -> str:
+    """Render one runtime invocation for the command line."""
+
+    lines: list[str] = []
+    for result in run.summary.results:
+        lines.append(
+            f"{result.status.value.upper()} {result.problem_id}: "
+            f"lean_calls={result.verifier_call_count}, "
+            f"analogy_fallbacks={result.analogy_fallback_count}"
+        )
+    fallback_count = sum(
+        result.analogy_fallback_count for result in run.summary.results
     )
+    lines.extend(
+        (
+            "",
+            f"SUMMARY: analogy={'on' if run.analogy_enabled else 'off'}, "
+            f"solved={run.summary.solved_count}/{run.summary.attempted_count}, "
+            f"analogy_fallbacks={fallback_count}",
+        )
+    )
+    return "\n".join(lines)
 
 
-__all__ = ["render_problem_trace", "write_run_report"]
+__all__ = ["render_cli_report", "render_problem_trace", "render_run_report"]

@@ -33,6 +33,10 @@ def test_retired_execution_packages_are_absent():
     assert _find_spec_or_none("analogy.solver.proof.syntax") is not None
     assert _find_spec_or_none("analogy.solver.proof.state") is not None
     assert _find_spec_or_none("analogy.solver.analogy.protocol") is not None
+    report_spec = _find_spec_or_none("analogy.solver.report")
+    assert report_spec is not None
+    assert report_spec.submodule_search_locations is not None
+    assert _find_spec_or_none("analogy.solver.run_records") is None
 
 
 def test_no_secondary_runtime_entry_points_exist():

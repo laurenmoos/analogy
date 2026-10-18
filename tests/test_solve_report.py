@@ -7,12 +7,9 @@ from analogy.config import load_config
 from analogy.lean_gym.models import Problem
 from analogy.utils.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
 from analogy.solver import run as run_module
-from analogy.solver.report import render_problem_trace
+from analogy.solver.report.build import _problem_result, _problem_route
+from analogy.solver.report.render import render_problem_trace
 from analogy.solver.run import run_analogy_assisted, run_vanilla
-from analogy.solver.run_records import (
-    _problem_result,
-    _problem_route,
-)
 from analogy.solver.search import SearchResult
 from analogy.solver.proof.semantic import (
     SemanticRecoveryEvent,

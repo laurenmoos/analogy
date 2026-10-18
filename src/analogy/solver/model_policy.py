@@ -17,6 +17,7 @@ from ..model.parser import (
 )
 from ..model.prompt_runner import PromptRunner
 from ..model.prompts import (
+    configure_prompt_catalog,
     focused_lean_goal,
     lean_tactic_card,
     prompt_catalog,
@@ -307,6 +308,7 @@ def initialize_model_policy(
 ) -> TacticRanker:
     """Create the ordinary tactic policy used by one problem search."""
 
+    configure_prompt_catalog(config.prompts.path)
     return TacticRanker(
         generator,
         top_k=config.search.top_k,

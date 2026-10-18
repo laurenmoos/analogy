@@ -597,25 +597,68 @@ def run_analogy_assisted(
     return _finish_runtime("analogy-on", started, results, traces, details)
 
 
-def _run_runtime(
+def _build_solve_run_record(
+    run_id: str,
     config: AppConfig,
-    problems: Sequence[Problem],
-    generator: TextGenerator,
-    verifier: Verifier,
-    *,
     run_directory: Path,
-    checkpoint: Checkpoint | None = None,
-) -> tuple[SolveSummary, list[str], dict[str, dict[str, Any]]]:
-    recipe = run_analogy_assisted if config.analogy.enabled else run_vanilla
-    result = recipe(
-        config,
-        problems,
-        generator,
-        verifier,
-        run_directory=run_directory,
-        checkpoint=checkpoint,
+    summary: SolveSummary,
+    started: float,
+) -> SolveRunRecord:
+    return SolveRunRecord(
+        run_id,
+        config.analogy.enabled,
+        summary,
+        time.monotonic() - started,
+        run_directory,
     )
-    return result.summary, result.traces, result.details
+
+
+def _write_run_record(
+    config: AppConfig,
+    run: SolveRunRecord,
+    checkpoint: Checkpoint | None,
+) -> None:
+    _write_json(
+        run.output_directory / "run.json",
+        {
+            "run_id": run.run_id,
+            "analogy_enabled": run.analogy_enabled,
+            "model": config.model.name,
+            "top_k": config.search.top_k,
+            "max_steps": config.search.max_steps,
+            "max_analogy_model_calls_per_stuck_state": config.analogy.max_model_calls,
+            "problem_index_signature": (
+                checkpoint.signature if checkpoint is not None else None
+            ),
+            "problem_index_fingerprints": (
+                checkpoint.fingerprints if checkpoint is not None else None
+            ),
+            "elapsed_seconds": run.elapsed_seconds,
+            "summary": asdict(run.summary),
+        },
+    )
+
+
+def _write_run_report(
+    config: AppConfig,
+    run: SolveRunRecord,
+    traces: Sequence[str],
+) -> None:
+    summary = run.summary
+    report = [
+        "# Proof search run",
+        "",
+        f"- Analogy fallback: {'enabled' if config.analogy.enabled else 'disabled'}",
+        f"- Solved: {summary.solved_count}/{summary.attempted_count}",
+        f"- Analogy tactics submitted to Lean: {sum(item.analogy_fallback_count for item in summary.results)}",
+        "",
+        "## Detailed traces",
+        "",
+        *traces,
+    ]
+    (run.output_directory / "report.md").write_text(
+        "\n".join(report) + "\n", encoding="utf-8"
+    )
 
 
 def solve_problems(
@@ -631,53 +674,38 @@ def solve_problems(
     run_id = uuid.uuid4().hex
     run_directory = config.run.output_dir / "solve" / run_id
     run_directory.mkdir(parents=True, exist_ok=False)
-    summary, traces, _details = _run_runtime(
-        config,
-        problems,
-        generator,
-        verifier,
-        run_directory=run_directory,
-        checkpoint=checkpoint,
+
+    if config.analogy.enabled:
+        runtime = run_analogy_assisted(
+            config,
+            problems,
+            generator,
+            verifier,
+            run_directory=run_directory,
+            checkpoint=checkpoint,
+        )
+    else:
+        runtime = run_vanilla(
+            config,
+            problems,
+            generator,
+            verifier,
+            run_directory=run_directory,
+            checkpoint=checkpoint,
+        )
+
+    run = _build_solve_run_record(
+        run_id, config, run_directory, runtime.summary, started
     )
-    run = SolveRunRecord(
-        run_id,
-        config.analogy.enabled,
-        summary,
-        time.monotonic() - started,
-        run_directory,
-    )
-    _write_json(
-        run_directory / "run.json",
-        {
-            "run_id": run_id,
-            "analogy_enabled": config.analogy.enabled,
-            "model": config.model.name,
-            "top_k": config.search.top_k,
-            "max_steps": config.search.max_steps,
-            "max_analogy_model_calls_per_stuck_state": config.analogy.max_model_calls,
-            "problem_index_signature": (
-                checkpoint.signature if checkpoint is not None else None
-            ),
-            "problem_index_fingerprints": (
-                checkpoint.fingerprints if checkpoint is not None else None
-            ),
-            "elapsed_seconds": run.elapsed_seconds,
-            "summary": asdict(summary),
-        },
-    )
-    report = [
-        "# Proof search run",
-        "",
-        f"- Analogy fallback: {'enabled' if config.analogy.enabled else 'disabled'}",
-        f"- Solved: {summary.solved_count}/{summary.attempted_count}",
-        f"- Analogy tactics submitted to Lean: {sum(item.analogy_fallback_count for item in summary.results)}",
-        "",
-        "## Detailed traces",
-        "",
-        *traces,
-    ]
-    (run_directory / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    _write_run_record(config, run, checkpoint)
+    _write_run_report(config, run, runtime.traces)
     return run
 
 
-__all__ = ["SolveRunRecord", "render_problem_trace", "solve_problems"]
+__all__ = [
+    "SolveRunRecord",
+    "render_problem_trace",
+    "run_analogy_assisted",
+    "run_vanilla",
+    "solve_problems",
+]

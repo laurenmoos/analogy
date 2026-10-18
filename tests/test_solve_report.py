@@ -24,6 +24,11 @@ from analogy.solver.proof.semantic import (
 ROOT = Path(__file__).parents[1]
 
 
+def test_run_module_exports_the_two_explicit_recipes() -> None:
+    assert "run_vanilla" in run_module.__all__
+    assert "run_analogy_assisted" in run_module.__all__
+
+
 def test_vanilla_run_has_no_analogy_state_or_fallback(
     tmp_path, monkeypatch
 ) -> None:
@@ -114,8 +119,12 @@ def test_solve_artifact_uses_summary_key(tmp_path, monkeypatch) -> None:
     summary = SolveSummary("analogy-on", (), 0.0)
     monkeypatch.setattr(
         run_module,
-        "_run_runtime",
-        lambda *args, **kwargs: (summary, [], {}),
+        "run_analogy_assisted",
+        lambda *args, **kwargs: SimpleNamespace(
+            summary=summary,
+            traces=[],
+            details={},
+        ),
     )
 
     run = run_module.solve_problems(config, (), object(), object())

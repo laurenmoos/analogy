@@ -15,6 +15,22 @@ def _find_spec_or_none(name):
         return None
 
 
+def _resolved_import_targets(path: Path, node: ast.ImportFrom) -> set[str]:
+    module_parts = node.module.split(".") if node.module else []
+    if node.level:
+        package_parts = list(
+            path.relative_to(ROOT / "src").with_suffix("").parts[:-1]
+        )
+        package_parts = package_parts[: len(package_parts) - node.level + 1]
+        module_parts = package_parts + module_parts
+    base = ".".join(module_parts)
+    targets = {base} if base else set()
+    targets.update(
+        ".".join((*module_parts, alias.name)) for alias in node.names
+    )
+    return targets
+
+
 def test_retired_execution_packages_are_absent():
     assert _find_spec_or_none("analogy.experiments.activation_cli") is None
     assert _find_spec_or_none("analogy.transfer.generated_loop") is None
@@ -160,15 +176,21 @@ def test_run_uses_search_facade_and_proof_does_not_depend_on_search() -> None:
     )
 
     reverse_dependencies = []
-    for path in (PACKAGE / "solver" / "proof").glob("*.py"):
+    for path in (PACKAGE / "solver" / "proof").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module == "search" or node.module.endswith(".solver.search"):
+            if isinstance(node, ast.ImportFrom):
+                if any(
+                    target == "analogy.solver.search"
+                    or target.startswith("analogy.solver.search.")
+                    for target in _resolved_import_targets(path, node)
+                ):
                     reverse_dependencies.append((path.name, node.lineno))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("analogy.solver.search"):
+                    if alias.name == "analogy.solver.search" or alias.name.startswith(
+                        "analogy.solver.search."
+                    ):
                         reverse_dependencies.append((path.name, node.lineno))
 
     assert reverse_dependencies == []

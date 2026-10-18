@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Protocol
 
 from ...lean_gym.models import (
     Problem,
@@ -168,6 +169,12 @@ class LeanGymAdapter:
         return SymbolicState(state_id, proof_state, "lean4", prefix)
 
 
+class TacticSubmitter(Protocol):
+    def run_tactic(
+        self, state: SymbolicState, candidate: TacticCandidate
+    ) -> TacticResult: ...
+
+
 def initialize_proof(problem: Problem, verifier: Verifier) -> LeanGymAdapter:
     """Create the solver-facing adapter for one Lean problem."""
 
@@ -176,5 +183,6 @@ def initialize_proof(problem: Problem, verifier: Verifier) -> LeanGymAdapter:
 __all__ = [
     "LeanGymAdapter",
     "LeanInfrastructureResult",
+    "TacticSubmitter",
     "initialize_proof",
 ]

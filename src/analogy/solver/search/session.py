@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from heapq import heappop, heappush
 from itertools import count
-from typing import Iterable, Protocol
+from typing import Iterable
 
 from ...utils.records import (
     CancellationToken,
@@ -31,6 +31,7 @@ from ..analogy.rescue import (
     RescueTermination,
     TacticEvaluation,
 )
+from ..proof.adapter import TacticSubmitter
 from ..proof.semantic import (
     SemanticAssessment,
     SemanticCheckError,
@@ -138,14 +139,8 @@ class TacticBatchResult:
             raise ValueError("tactic results must match the submitted candidates")
 
 
-class _TacticSubmitter(Protocol):
-    def run_tactic(
-        self, state: SymbolicState, candidate: TacticCandidate
-    ) -> TacticResult: ...
-
-
 def submit_tactics_to_lean(
-    proof: _TacticSubmitter,
+    proof: TacticSubmitter,
     tactics: TacticBatch,
 ) -> TacticBatchResult:
     """Submit one generated batch to Lean without mutating search state."""

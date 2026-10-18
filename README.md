@@ -40,13 +40,13 @@ uv run python -m analogy solve --all-problems
 uv run python -m analogy solve --previous-failures
 ```
 
-At startup the runner creates or loads `.artifacts/problem-index.json`. The index is keyed by the
-corpus, prompts, model settings, search budgets, and analogy settings. A changed experiment
-therefore starts with every problem unresolved instead of inheriting incompatible results. The index
-is updated after each attempted problem, so an interrupted run can restart with the same MLX model
-loaded once for only the remaining failures. If every compatible problem is already complete, the
-command exits before initializing prompts, MLX, or Lean. If the index is missing, compatible
-`run.json` files are used to reconstruct it.
+At startup the runner creates or loads the checkpoint file `.artifacts/problem-index.json`. The
+checkpoint is keyed by the corpus, prompts, model settings, search budgets, and analogy settings. A
+changed experiment therefore starts with every problem unresolved instead of inheriting
+incompatible results. The checkpoint is updated after each attempted problem, so an interrupted run
+can restart with the same MLX model loaded once for only the remaining failures. If every compatible
+problem is already complete, the command exits before initializing prompts, MLX, or Lean. If the
+checkpoint is missing, compatible `run.json` files are used to reconstruct it.
 
 Each run writes `run.json`, per-problem JSON, and a readable `report.md` beneath
 `.artifacts/runs/solve/<run-id>/`. `analogy_fallback_count` counts analogy tactics actually submitted

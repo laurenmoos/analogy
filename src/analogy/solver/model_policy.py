@@ -47,9 +47,8 @@ class TacticRanker:
         *,
         top_k: int,
         seed: int,
-        failed_tactics_for: Any | None = None,
-        trace_sink: Any | None = None,
-        tolerate_failure: bool = False,
+        failed_tactics_for: Any,
+        trace_sink: Any,
         analogy_scratchpad: AnalogyScratchpad | None = None,
     ) -> None:
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
@@ -57,9 +56,8 @@ class TacticRanker:
         self._generator = generator
         self._top_k = top_k
         self._seed = seed
-        self._failed_tactics_for = failed_tactics_for or (lambda _state_id: ())
+        self._failed_tactics_for = failed_tactics_for
         self._trace_sink = trace_sink
-        self._tolerate_failure = tolerate_failure
         self._analogy_scratchpad = analogy_scratchpad
 
     def rank(
@@ -148,43 +146,40 @@ class TacticRanker:
             error = None
         else:
             value = None
-        if self._trace_sink is not None:
-            self._trace_sink(
-                {
-                    "kind": "ordinary_model_call",
-                    "state_id": state.id,
-                    "messages": [
-                        {"role": item.role, "content": item.content}
-                        for item in messages
-                    ],
-                    "responses": [
-                        {
-                            "seed": item.seed,
-                            "raw_text": item.raw_text,
-                            "status": item.status.value,
-                            "repair": item.repair,
-                            "error_kind": item.error_kind,
-                            "diagnostic": item.diagnostic,
-                        }
-                        | {
-                            "messages": [
-                                {"role": message.role, "content": message.content}
-                                for message in attempt_messages[position]
-                            ]
-                        }
-                        for position, item in enumerate(attempts)
-                    ],
-                    "normalized_candidates": [
-                        item.source for item in (value or ())
-                    ],
-                    "discarded_candidates": discarded_candidates,
-                    "error": None if error is None else f"{type(error).__name__}: {error}",
-                }
-            )
+        self._trace_sink(
+            {
+                "kind": "ordinary_model_call",
+                "state_id": state.id,
+                "messages": [
+                    {"role": item.role, "content": item.content}
+                    for item in messages
+                ],
+                "responses": [
+                    {
+                        "seed": item.seed,
+                        "raw_text": item.raw_text,
+                        "status": item.status.value,
+                        "repair": item.repair,
+                        "error_kind": item.error_kind,
+                        "diagnostic": item.diagnostic,
+                    }
+                    | {
+                        "messages": [
+                            {"role": message.role, "content": message.content}
+                            for message in attempt_messages[position]
+                        ]
+                    }
+                    for position, item in enumerate(attempts)
+                ],
+                "normalized_candidates": [
+                    item.source for item in (value or ())
+                ],
+                "discarded_candidates": discarded_candidates,
+                "error": None if error is None else f"{type(error).__name__}: {error}",
+            }
+        )
         if value is not None:
             return value
-        if self._tolerate_failure:
-            return ()
         raise TacticRankingError(f"{type(error).__name__}: {error}") from error
 
     def _scratchpad_messages(

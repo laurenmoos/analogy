@@ -31,7 +31,6 @@ def initialize_search(
 
     context = EpisodeContext(
         tactic_ranker=model_policy,
-        verifier=proof,
         stuckness_policy=ObservableStucknessPolicy(),
         state_fingerprinter=CanonicalStateFingerprinter(),
         tactic_canonicalizer=WhitespaceTacticCanonicalizer(),

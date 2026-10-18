@@ -58,7 +58,6 @@ class RunState:
     started: float
     results: list[ProblemResult] = field(default_factory=list)
     traces: list[str] = field(default_factory=list)
-    details: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def start_run(config: AppConfig, checkpoint: Checkpoint | None = None) -> RunState:
@@ -193,7 +192,6 @@ def write_problem_record(run: RunState, record: ProblemRunRecord) -> None:
     _write_json(run.output_directory / f"{record.problem.id}.json", record.payload)
     if run.checkpoint is not None:
         record_status(run.checkpoint, record.problem.id, record.outcome.status.value)
-    run.details[record.problem.id] = record.payload
     run.traces.append(record.trace)
     run.results.append(record.outcome)
 

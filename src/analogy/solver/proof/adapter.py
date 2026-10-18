@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from ...lean_gym.models import (
     Problem,
-    ProofStructure,
-    ProofStructureError,
     VerificationStatus,
     has_unresolved_metavariable,
 )
@@ -18,7 +16,6 @@ from ...utils.records import SymbolicState, TacticCandidate, TacticResult, Tacti
 
 if TYPE_CHECKING:
     from ..episode import TacticBatch, TacticBatchResult
-    from .inventory import LocalProofInventory
 
 
 _MAX_FAILURE_FEEDBACK = 8
@@ -94,31 +91,6 @@ class LeanGymAdapter:
                 continue
             eligible.append(f"{scope} state — {failure.text}")
         return tuple(eligible[-_MAX_FAILURE_FEEDBACK:])
-
-    def proof_structure_for(self, state: SymbolicState) -> ProofStructure:
-        try:
-            prefix = self._prefixes[state.id]
-        except KeyError as error:
-            raise ValueError(f"unknown Lean search state: {state.id}") from error
-        extractor = getattr(self.verifier, "proof_structure_after", None)
-        if extractor is None:
-            raise ProofStructureError(
-                "configured verifier cannot extract proof structure"
-            )
-        return extractor(self.problem, prefix)
-
-    def local_inventory_for(self, state: SymbolicState) -> LocalProofInventory:
-        from .inventory import build_local_inventory
-
-        return build_local_inventory(
-            state, self.proof_structure_for(state), fixed_target=self.problem.target
-        )
-
-    def register_replay_state(self, state: SymbolicState) -> SymbolicState:
-        if not isinstance(state, SymbolicState):
-            raise ValueError("replay state must be a SymbolicState")
-        self._prefixes[state.id] = tuple(state.context)
-        return state
 
     def run_tactic(
         self, state: SymbolicState, candidate: TacticCandidate

@@ -1,61 +1,20 @@
-"""Exact, state-bound declarations available to grounded proof reasoning."""
+"""Lean proof-state syntax used by prompts and semantic checking."""
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
-from enum import Enum
-
-from ...lean_gym.models import ProofStructure
-from ...utils.records import SymbolicState
-from .replay import proof_state_fingerprint
-
 
 class InventoryError(ValueError):
     pass
 
 
-class InventoryKind(str, Enum):
-    LOCAL = "local"
-    ACTIVE_SUBGOAL = "active_subgoal"
-    TARGET_COMPONENT = "target_component"
-    CONSTRUCTOR = "constructor"
-
-
-@dataclass(frozen=True, slots=True)
-class InventoryEntry:
-    inventory_id: str
-    kind: InventoryKind
-    identifier: str | None
-    proposition: str
-    structural_shape: str
-
-
-@dataclass(frozen=True, slots=True)
-class LocalProofInventory:
-    state_fingerprint: str
-    fixed_target: str
-    active_subgoal: str
-    locals: tuple[InventoryEntry, ...]
-    target_entries: tuple[InventoryEntry, ...]
-
-    def resolve(self, inventory_id: str) -> InventoryEntry:
-        matches = tuple(item for item in self.locals + self.target_entries
-                        if item.inventory_id == inventory_id)
-        if len(matches) != 1:
-            raise InventoryError(f"unknown inventory id {inventory_id!r}")
-        return matches[0]
-
-
-_OPAQUE = '{"children":[],"root":"opaque"}'
 _IDENTIFIER_TEXT = r"«[^»]+»|[^\s«»:]+"
 _IDENTIFIER = re.compile(_IDENTIFIER_TEXT)
 _DECLARATION = re.compile(
     rf"(?P<names>(?:{_IDENTIFIER_TEXT})(?:\s+(?:{_IDENTIFIER_TEXT}))*) :(?![=]) ?(?P<proposition>.*)"
 )
 _WORD = re.compile(r"[\w']+")
-_SORT = re.compile(r"(?:Prop|Type(?:\s+\S+)?|Sort\s+\S+)")
 _ROOT_WORD = re.compile(r"[\w']+")
 _ROOT_BINDERS = {"forall", "exists", "fun", "λ", "let", "if", "match", "by", "do", "have", "show", "calc"}
 
@@ -144,20 +103,6 @@ def proposition_root(proposition: str) -> PropositionRoot:
                 return PropositionRoot(text, operator, (left, right)) if left and right else opaque
         return opaque
     return PropositionRoot(text)
-
-
-def proposition_binary(proposition: str, operator: str) -> tuple[str, str] | None:
-    root = proposition_root(proposition)
-    return root.parts if root.operator == operator else None
-
-
-def same_proposition(left: str, right: str) -> bool:
-    return proposition_root(left).text == proposition_root(right).text
-
-
-def implication_parts(proposition: str) -> tuple[str, str] | None:
-    root = proposition_root(proposition)
-    return root.parts if root.operator in ("→", "¬") else None
 
 
 def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], str]:
@@ -299,76 +244,6 @@ def _split_component(expression: str, operator: str) -> tuple[str, str] | None:
     return None
 
 
-def _target_entries(target: str, structure: ProofStructure) -> tuple[InventoryEntry, ...]:
-    entries = [InventoryEntry("active_subgoal", InventoryKind.ACTIVE_SUBGOAL, None, target, structure.target_shape)]
-    shape = json.loads(structure.target_shape)
-    if not isinstance(shape, dict):
-        raise InventoryError("target structural shape must be an object")
-    root = shape.get("root")
-    operator = {"and": "∧", "or": "∨", "iff": "↔", "implication": "→"}.get(root)
-    components = _split_component(target, operator) if operator is not None else None
-    children = shape.get("children", [])
-    if components is not None and len(children) == 2:
-        entries.extend(
-            InventoryEntry(f"target:{index}", InventoryKind.TARGET_COMPONENT, None, component,
-                           json.dumps(children[index], sort_keys=True, separators=(",", ":")))
-            for index, component in enumerate(components)
-        )
-    constructors = {"and": ("And.intro",), "or": ("Or.inl", "Or.inr"), "iff": ("Iff.intro",)}.get(root, ())
-    entries.extend(
-        InventoryEntry(f"constructor:{index}", InventoryKind.CONSTRUCTOR, identifier, target, structure.target_shape)
-        for index, identifier in enumerate(constructors)
-    )
-    return tuple(entries)
 
 
-def build_local_inventory(
-    state: SymbolicState, structure: ProofStructure, *, fixed_target: str,
-) -> LocalProofInventory:
-    """Preserve the active goal's exact names/types without invoking Lean.
-
-    Lean's current shape extractor only includes proposition hypotheses. Known
-    sort declarations are excluded when aligning those shapes. If that does not
-    yield an unambiguous alignment, retain opaque metadata rather than attaching
-    another declaration's verified shape to a local identifier.
-    """
-    if not isinstance(fixed_target, str) or not fixed_target.strip():
-        raise InventoryError("fixed theorem target must be nonblank")
-    declarations, target = _declarations_and_target(state.expression)
-    proposition_indices = [index for index, (_, proposition) in enumerate(declarations)
-                           if not _SORT.fullmatch(proposition)]
-    shapes: dict[int, str] = {}
-    if len(proposition_indices) == len(structure.hypothesis_shapes):
-        shapes = dict(zip(proposition_indices, structure.hypothesis_shapes))
-    locals_ = tuple(
-        InventoryEntry(f"local:{index}", InventoryKind.LOCAL, identifier, proposition, shapes.get(index, _OPAQUE))
-        for index, (identifier, proposition) in enumerate(declarations)
-    )
-    return LocalProofInventory(
-        proof_state_fingerprint(state.expression), fixed_target, target, locals_,
-        _target_entries(target, structure),
-    )
-
-
-def render_model_inventory(inventory: LocalProofInventory) -> str:
-    """Formula-free model view; code retains exact propositions internally."""
-    items = []
-    for entry in inventory.locals + inventory.target_entries:
-        try:
-            shape = json.loads(entry.structural_shape)
-        except json.JSONDecodeError as error:
-            raise InventoryError("inventory structural shape must be valid JSON") from error
-        items.append({
-            "inventory_id": entry.inventory_id,
-            "kind": entry.kind.value,
-            "structural_shape": shape,
-        })
-    return json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-__all__ = [
-    "InventoryEntry", "InventoryError", "InventoryKind", "LocalProofInventory",
-    "ProofGoal", "PropositionRoot", "build_local_inventory", "implication_parts",
-    "proof_goals", "proposition_binary", "proposition_root", "render_model_inventory",
-    "same_proposition",
-]
+__all__ = ["InventoryError", "ProofGoal", "PropositionRoot", "proof_goals", "proposition_root"]

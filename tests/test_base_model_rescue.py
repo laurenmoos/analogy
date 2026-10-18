@@ -1,3 +1,5 @@
+import json
+
 from analogy.model import prompts as prompts_module
 from analogy.model.prompt_runner import GenerationStatus
 from analogy.model.prompts import PromptCatalog
@@ -19,7 +21,6 @@ from analogy.solver.analogy.rescue import (
     RescueTermination,
     TacticEvaluation,
     _analogy_correction_feedback,
-    parse_analogy_tactic,
 )
 from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
 from analogy.solver.search import NeverCancelled
@@ -47,8 +48,32 @@ def _search(
     scratchpad=None,
     force_domain_change=False,
 ):
+    scratchpad = scratchpad or AnalogyScratchpad()
+
+    class CurrentSchemaGenerator:
+        def generate(self, messages, *, seed):
+            raw = generator.generate(messages, seed=seed)
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return raw
+            if set(payload) != {"analogy", "predicted_state", "tactic"}:
+                return raw
+            analogy = AnalogyState(
+                payload["analogy"],
+                ("proof state -> analogous situation",),
+                ("Apply the analogous step.",),
+            ).render()
+            return analogy + "\n" + json.dumps(
+                {
+                    "action": "change_domain",
+                    "predicted_state": payload["predicted_state"],
+                    "tactic": payload["tactic"],
+                }
+            )
+
     return AnalogyFallback(
-        generator,
+        CurrentSchemaGenerator(),
         max_model_calls=calls,
         seed=7,
         trace_sink=None if traces is None else traces.append,
@@ -56,7 +81,6 @@ def _search(
     ).search(
         STATE,
         GOAL,
-        (),
         ordinary_attempts,
         evaluate,
         cancellation or NeverCancelled(),
@@ -158,7 +182,7 @@ abandoned domains:
 
     assert outcome.completed_proof is None
     assert scratchpad.current is None
-    assert scratchpad.abandoned_domains == ("locksmithing",)
+    assert "- locksmithing" in scratchpad.context_block()
     assert outcome.rollouts[0].termination is RescueTermination.INVALID_OUTPUT
 
 
@@ -233,7 +257,7 @@ def test_abandoned_domain_update_is_rejected_before_lean_without_mutation():
 
     assert lean_calls == []
     assert scratchpad.current == current
-    assert scratchpad.abandoned_domains == ("shipping",)
+    assert scratchpad.current.abandoned_domains == ("shipping",)
     assert outcome.rollouts[0].termination is RescueTermination.INVALID_OUTPUT
 
 
@@ -356,40 +380,6 @@ def test_analogy_prompt_requires_using_available_dependency_evidence():
 
     assert "Dependency evidence (may be absent)" in prompts[0]
     assert "hPQ=left" in prompts[0] and "hPQ=right" in prompts[0]
-    assert "account for it explicitly" in prompts[0]
-
-
-def test_analogy_schema_requires_one_singular_tactic():
-    valid = '{"analogy":"a lock and key","predicted_state":"closed","tactic":"exact h"}'
-
-    analogy, proposal = parse_analogy_tactic(valid)
-
-    assert analogy == "a lock and key"
-    assert proposal.candidate.source == "exact h"
-    assert proposal.candidate.origin is CandidateOrigin.ANALOGICAL
-    for invalid in (
-        '{"analogy":"x","predicted_state":"y","tactics":["a"]}',
-        '{"analogy":"x","predicted_state":"y","tactic":"a","extra":1}',
-        '{"analogy":"x","predicted_state":"y","tactic":"a\\nb"}',
-    ):
-        try:
-            parse_analogy_tactic(invalid)
-        except RescueOutputError:
-            pass
-        else:
-            raise AssertionError(f"accepted invalid schema: {invalid}")
-
-
-def test_analogy_tactic_is_normalized_with_the_current_proof_state():
-    raw = (
-        '{"analogy":"unpack a pair","predicted_state":"H and U available",'
-        '"tactic":"rcases hB with ⟨hA,hB⟩; exact hA"}'
-    )
-    state = "G H U : Prop\nhA : G\nhB : H ∧ U\n⊢ H"
-
-    _, proposal = parse_analogy_tactic(raw, proof_state=state)
-
-    assert proposal.candidate.source == "rcases hB with ⟨hH,hU⟩; exact hH"
 
 
 def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call():
@@ -401,11 +391,11 @@ def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call()
         def generate(self, messages, *, seed):
             model_calls.append((messages, seed))
             if len(model_calls) == 1:
-                assert "Lean card:" in messages[1].content
-                assert "SAT: no countermodel; continue from this state." in messages[1].content
+                assert "Lean card:" in messages[-1].content
+                assert "SAT: no countermodel; continue from this state." in messages[-1].content
                 return "not json"
             assert "not json" in messages[-1].content
-            assert "must be one JSON object" in messages[-1].content
+            assert '"action", "predicted_state", and "tactic"' in messages[-1].content
             return '{"analogy":"a lock and key","predicted_state":"solved","tactic":"exact h"}'
 
     def evaluate(candidate):
@@ -424,7 +414,7 @@ def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call()
         RescueTermination.COMPLETE,
     ]
     assert outcome.rollouts[0].generations[0].status is GenerationStatus.INVALID
-    assert outcome.rollouts[1].analogy_trace == "a lock and key"
+    assert "domain: a lock and key" in outcome.rollouts[1].analogy_trace
     assert outcome.rollouts[1].generations[0].repair is True
     assert [trace["kind"] for trace in traces] == [
         "analogy_model_call",
@@ -638,9 +628,12 @@ def test_correction_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
         "_ACTIVE_CATALOG",
         PromptCatalog.load(path),
     )
-    proposal = parse_analogy_tactic(
-        '{"analogy":"lock","predicted_state":"SOLVED","tactic":"exact h"}'
-    )[1]
+    from analogy.solver.analogy.rescue import RescueProposal
+
+    proposal = RescueProposal(
+        TacticCandidate("exact h", 1.0, CandidateOrigin.ANALOGICAL),
+        "SOLVED",
+    )
     evaluation = TacticEvaluation(
         TacticResult(
             proposal.candidate,
@@ -770,13 +763,17 @@ def test_fallback_seed_namespace_is_stable_and_distinct_per_state():
             seeds.append(seed)
             return "invalid"
 
-    fallback = AnalogyFallback(Generator(), max_model_calls=1, seed=7)
+    fallback = AnalogyFallback(
+        Generator(),
+        max_model_calls=1,
+        seed=7,
+        analogy_scratchpad=AnalogyScratchpad(),
+    )
 
     def run(state):
         return fallback.search(
             state,
             GOAL,
-            (),
             (),
             lambda _candidate: None,
             NeverCancelled(),

@@ -90,13 +90,6 @@ def extract_analogy_block(text: str) -> tuple[AnalogyState, str]:
     return state, remainder.strip("\n")
 
 
-def parse_analogy_block(text: str) -> AnalogyState:
-    state, remainder = extract_analogy_block(text)
-    if remainder.strip():
-        raise AnalogyStateError("analogy block input must not contain other text")
-    return state
-
-
 def remove_analogy_blocks(text: str) -> str:
     """Remove complete analogy blocks before text enters prompt history."""
 
@@ -169,10 +162,6 @@ class AnalogyScratchpad:
     @property
     def current(self) -> AnalogyState | None:
         return self._current
-
-    @property
-    def abandoned_domains(self) -> tuple[str, ...]:
-        return tuple(self._abandoned)
 
     @property
     def history(self) -> tuple[str, ...]:
@@ -290,7 +279,6 @@ __all__ = [
     "AnalogyUpdateAction",
     "extract_analogy_block",
     "initialize_analogy_scratchpad",
-    "parse_analogy_block",
     "remove_analogy_blocks",
     "update_analogy",
 ]

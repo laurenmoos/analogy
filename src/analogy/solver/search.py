@@ -87,10 +87,6 @@ class TacticRanker(Protocol):
     ) -> Sequence[TacticCandidate]: ...
 
 
-class LeanVerifier(Protocol):
-    def run_tactic(self, state: SymbolicState, candidate: TacticCandidate) -> TacticResult: ...
-
-
 class StucknessPolicy(Protocol):
     def evaluate(self, outcome: ExpansionOutcome) -> StucknessDecision: ...
 
@@ -105,16 +101,6 @@ class ProgressPolicy(Protocol):
 
 class StateDiversity(Protocol):
     def observe(self, state: SymbolicState) -> DiversityObservation: ...
-
-
-class StuckStateSink(Protocol):
-    def capture(
-        self,
-        state: SymbolicState,
-        goal: SymbolicState,
-        outcome: ExpansionOutcome,
-        decision: StucknessDecision,
-    ) -> None: ...
 
 
 class ObservableStucknessPolicy:
@@ -138,7 +124,7 @@ class ObservableStucknessPolicy:
 
 class CanonicalStateFingerprinter:
     def fingerprint(self, state: SymbolicState) -> str:
-        from .proof.replay import proof_state_fingerprint
+        from .proof.state import proof_state_fingerprint
 
         return proof_state_fingerprint(state.expression)
 

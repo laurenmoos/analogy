@@ -14,6 +14,17 @@ from analogy.model.prompts import configure_prompt_catalog
 ROOT = Path(__file__).parents[1]
 
 
+def _ranker(generator, *, top_k, seed, trace_sink=None, analogy_scratchpad=None):
+    return TacticRanker(
+        generator,
+        top_k=top_k,
+        seed=seed,
+        failed_tactics_for=lambda _state_id: (),
+        trace_sink=trace_sink or (lambda _event: None),
+        analogy_scratchpad=analogy_scratchpad,
+    )
+
+
 @pytest.fixture(autouse=True)
 def clear_model_provider_cache():
     model_provider.get_model_provider.cache_clear()
@@ -27,7 +38,7 @@ def test_tactic_ranker_wraps_provider_failures_in_its_loop_exception():
             raise RuntimeError(f"generation failed at seed {seed}")
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    ranker = TacticRanker(BrokenProvider(), top_k=3, seed=7)
+    ranker = _ranker(BrokenProvider(), top_k=3, seed=7)
 
     with pytest.raises(TacticRankingError, match="generation failed at seed 7"):
         ranker.rank(
@@ -45,7 +56,7 @@ def test_tactic_ranker_records_the_prompt_and_raw_model_response():
             return '[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    ranker = TacticRanker(
+    ranker = _ranker(
         Provider(), top_k=1, seed=7, trace_sink=events.append
     )
     ranker.rank(
@@ -83,7 +94,7 @@ def test_tactic_ranker_repairs_an_all_incomplete_pool_once_and_traces_both_gener
             return '[{"tactic":"exact h2","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    ranker = TacticRanker(
+    ranker = _ranker(
         Provider(), top_k=2, seed=7, trace_sink=events.append
     )
 
@@ -118,7 +129,7 @@ def test_tactic_ranker_requests_replacements_for_filtered_and_state_tried_candid
             return '[{"tactic":"assumption","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    ranker = TacticRanker(Provider(), top_k=2, seed=7)
+    ranker = _ranker(Provider(), top_k=2, seed=7)
 
     candidates = ranker.rank(
         SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
@@ -139,7 +150,7 @@ def test_tactic_ranker_prompt_contains_only_the_focused_goal():
             return '[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    TacticRanker(Provider(), top_k=1, seed=1).rank(
+    _ranker(Provider(), top_k=1, seed=1).rank(
         SimpleNamespace(
             id="state",
             context=(),
@@ -172,7 +183,7 @@ abandoned domains:
 [{"tactic":"exact h","score":1}]"""
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    candidates = TacticRanker(
+    candidates = _ranker(
         Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
     ).rank(
         SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
@@ -211,7 +222,7 @@ abandoned domains:
             return current.render() + '\n[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    ranker = TacticRanker(
+    ranker = _ranker(
         Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
     )
 
@@ -233,7 +244,7 @@ def test_disabled_ranker_keeps_existing_two_message_contract():
             return '[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    TacticRanker(Provider(), top_k=1, seed=7).rank(
+    _ranker(Provider(), top_k=1, seed=7).rank(
         SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
         SimpleNamespace(expression="P"),
     )
@@ -254,7 +265,7 @@ def test_pending_rebuild_uses_plain_ordinary_tactics_without_reinitializing():
             return '[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    candidates = TacticRanker(
+    candidates = _ranker(
         Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
     ).rank(
         SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
@@ -284,7 +295,7 @@ def test_enabled_partial_candidate_repair_refreshes_current_block_and_contract()
             return state.render() + '\n[{"tactic":"assumption","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    candidates = TacticRanker(
+    candidates = _ranker(
         Provider(), top_k=2, seed=7, analogy_scratchpad=scratchpad
     ).rank(
         SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
@@ -303,7 +314,7 @@ def test_tactic_ranker_does_not_retry_unrelated_malformed_json():
             return "not json"
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
-    ranker = TacticRanker(Provider(), top_k=2, seed=7)
+    ranker = _ranker(Provider(), top_k=2, seed=7)
 
     with pytest.raises(TacticRankingError, match="valid JSON"):
         ranker.rank(

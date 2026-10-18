@@ -1,4 +1,5 @@
 import ast
+import inspect
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -26,6 +27,11 @@ def test_retired_execution_packages_are_absent():
     assert _find_spec_or_none("analogy.utils.records") is not None
     assert _find_spec_or_none("analogy.problem_index") is None
     assert _find_spec_or_none("analogy.utils.checkpoint") is not None
+    assert _find_spec_or_none("analogy.solver.proof.replay") is None
+    assert _find_spec_or_none("analogy.solver.proof.views") is None
+    assert _find_spec_or_none("analogy.solver.proof.inventory") is None
+    assert _find_spec_or_none("analogy.solver.proof.syntax") is not None
+    assert _find_spec_or_none("analogy.solver.proof.state") is not None
 
 
 def test_no_secondary_runtime_entry_points_exist():
@@ -66,3 +72,24 @@ def test_run_module_contains_only_two_visible_recipes():
             and node.test.func.attr == "has_work"
             for node in ast.walk(function)
         )
+
+
+def test_live_solver_types_do_not_expose_retired_hooks() -> None:
+    from analogy.solver.analogy import rescue
+    from analogy.solver.analogy.state import AnalogyScratchpad
+    from analogy.solver.episode import EpisodeContext
+    from analogy.solver.model_policy import TacticRanker
+    from analogy.solver.proof.adapter import LeanGymAdapter
+
+    assert not hasattr(LeanGymAdapter, "proof_structure_for")
+    assert not hasattr(LeanGymAdapter, "local_inventory_for")
+    assert not hasattr(LeanGymAdapter, "register_replay_state")
+    assert "stuck_state_sink" not in EpisodeContext.__dataclass_fields__
+    assert "verifier" not in EpisodeContext.__dataclass_fields__
+    ranker_parameters = inspect.signature(TacticRanker).parameters
+    assert "tolerate_failure" not in ranker_parameters
+    assert ranker_parameters["failed_tactics_for"].default is inspect.Parameter.empty
+    assert ranker_parameters["trace_sink"].default is inspect.Parameter.empty
+    assert not hasattr(AnalogyScratchpad, "abandoned_domains")
+    assert not hasattr(rescue, "parse_analogy_tactic")
+    assert not hasattr(rescue, "PolicyActionRecord")

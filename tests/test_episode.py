@@ -10,7 +10,6 @@ from analogy.utils.records import (
 )
 from analogy.solver.analogy.rescue import (
     AnalogyRescueOutcome,
-    PolicyActionRecord,
     RescueAttempt,
     RescueProposal,
     RescueRollout,
@@ -47,20 +46,24 @@ CANDIDATE = TacticCandidate("exact h", 1.0, CandidateOrigin.ORDINARY)
 RESCUE_CANDIDATE = TacticCandidate(
     "exact rescued", 1.0, CandidateOrigin.ANALOGICAL
 )
+_VERIFIERS_BY_RANKER = {}
 
 
 def _run_incremental(context, initial=START, goal=GOAL, *, analogy=False):
+    verifier = _VERIFIERS_BY_RANKER[id(context.tactic_ranker)]
     scratchpad = initialize_analogy_scratchpad() if analogy else None
+    if scratchpad is not None:
+        context.analogy_fallback.scratchpad = scratchpad
     search = start_search(context, initial, goal)
     while search.has_work():
         tactics = generate_tactics_with_model_policy(search)
-        results = submit_tactics_to_lean(context.verifier, tactics)
+        results = submit_tactics_to_lean(verifier, tactics)
         update_search(search, results)
         if search.is_stuck():
             assert scratchpad is not None
             scratchpad = update_analogy(search, scratchpad)
             rescue = generate_analogy_rescue(search, scratchpad)
-            result = submit_analogy_rescue_to_lean(context.verifier, rescue)
+            result = submit_analogy_rescue_to_lean(verifier, rescue)
             update_search(search, result)
     return search.result
 
@@ -88,9 +91,8 @@ def _context(
 ):
     from analogy.solver.episode import EpisodeContext
 
-    return EpisodeContext(
+    context = EpisodeContext(
         tactic_ranker=ranker or _Ranker(),
-        verifier=verifier,
         stuckness_policy=ObservableStucknessPolicy(),
         state_fingerprinter=CanonicalStateFingerprinter(),
         tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
@@ -102,6 +104,8 @@ def _context(
         state_diversity=diversity,
         semantic_checker=semantic_checker or ExhaustiveSemanticChecker(),
     )
+    _VERIFIERS_BY_RANKER[id(context.tactic_ranker)] = verifier
+    return context
 
 
 def test_episode_returns_immediately_after_ordinary_completion():
@@ -136,7 +140,7 @@ def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
             return TacticResult(candidate, TacticStatus.ERROR)
 
     class Rescue:
-        def search(self, state, _goal, _pool, _attempts, evaluator, _cancellation, semantic_guidance):
+        def search(self, state, _goal, _attempts, evaluator, _cancellation, semantic_guidance, **_kwargs):
             events.append("rescue")
             assert semantic_guidance == "SAT: no countermodel; continue from this state."
             proposal = RescueProposal(RESCUE_CANDIDATE, "solved")
@@ -145,7 +149,6 @@ def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
             rollout = RescueRollout(
                 "rollout-1",
                 state.id,
-                PolicyActionRecord(0, 0.0, 0.0, 0.0),
                 (proposal,),
                 (attempt,),
                 RescueTermination.COMPLETE,
@@ -210,7 +213,7 @@ def test_analogy_successor_returns_to_the_shared_frontier():
             return TacticResult(candidate, TacticStatus.ERROR)
 
     class Rescue:
-        def search(self, state, _goal, _pool, _attempts, evaluator, _cancellation, semantic_guidance):
+        def search(self, state, _goal, _attempts, evaluator, _cancellation, semantic_guidance, **_kwargs):
             assert semantic_guidance == "SAT: no countermodel; continue from this state."
             evaluation = evaluator(RESCUE_CANDIDATE)
             proposal = RescueProposal(RESCUE_CANDIDATE, "Q")
@@ -218,7 +221,6 @@ def test_analogy_successor_returns_to_the_shared_frontier():
             rollout = RescueRollout(
                 "rollout-progress",
                 state.id,
-                None,
                 (proposal,),
                 (attempt,),
                 RescueTermination.PROGRESS,
@@ -392,7 +394,7 @@ def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
             return TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
 
     class Rescue:
-        def search(self, state, _goal, _pool, _attempts, evaluator, _cancellation, semantic_guidance, *, force_domain_change=False):
+        def search(self, state, _goal, _attempts, evaluator, _cancellation, semantic_guidance, *, force_domain_change=False, **_kwargs):
             seen.append(state.id)
             assert force_domain_change is True
             assert semantic_guidance == (
@@ -407,7 +409,6 @@ def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
                     RescueRollout(
                         "restart",
                         state.id,
-                        None,
                         (proposal,),
                         (RescueAttempt(proposal, evaluation.result),),
                         RescueTermination.COMPLETE,
@@ -456,7 +457,7 @@ def test_false_path_walks_multiple_levels_and_orders_abandoned_tactics():
             return TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
 
     class Rescue:
-        def search(self, state, _goal, _pool, _attempts, evaluator, _cancellation, semantic_guidance):
+        def search(self, state, _goal, _attempts, evaluator, _cancellation, semantic_guidance, **_kwargs):
             assert state.id == "start"
             assert semantic_guidance.startswith("SAT restart: apply h led")
             proposal = RescueProposal(RESCUE_CANDIDATE, "done")
@@ -467,7 +468,6 @@ def test_false_path_walks_multiple_levels_and_orders_abandoned_tactics():
                     RescueRollout(
                         "restart-root",
                         state.id,
-                        None,
                         (proposal,),
                         (RescueAttempt(proposal, evaluation.result),),
                         RescueTermination.COMPLETE,
@@ -849,7 +849,7 @@ def test_failed_forced_move_is_shared_with_analogy_duplicate_ledger():
             return SemanticAssessment(state.id, SemanticResult.VALID)
 
     class Rescue:
-        def search(self, _state, _goal, _pool, attempts, _evaluator, _cancellation, _guidance, **_kwargs):
+        def search(self, _state, _goal, attempts, _evaluator, _cancellation, _guidance, **_kwargs):
             assert [item.candidate.source for item in attempts] == [
                 "assumption",
                 "rfl",

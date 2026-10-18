@@ -6,7 +6,6 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from enum import Enum
-from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from ...config import AppConfig
@@ -126,22 +125,10 @@ class RescueProposal:
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyActionRecord:
-    seed: int
-    delta_norm: float
-    log_probability: float
-    entropy: float
-    radius: float | None = None
-    raw_direction_norm: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class RescueAttempt:
     proposal: RescueProposal
     result: TacticResult
     discarded: DiscardedSuccessor | None = None
-    prediction_distance: float | None = None
-    stage: str = "analogy_fallback"
 
     def __post_init__(self) -> None:
         if self.result.candidate != self.proposal.candidate:
@@ -154,13 +141,10 @@ class RescueAttempt:
 class RescueRollout:
     rollout_id: str
     state_id: str
-    action: PolicyActionRecord | None
     proposals: tuple[RescueProposal, ...]
     attempts: tuple[RescueAttempt, ...]
     termination: RescueTermination
-    reward: float | None = None
     generations: tuple[AnalogyGenerationAttempt, ...] = ()
-    analogy_stream: Any | None = None
     analogy_trace: Any | None = None
     semantic_event_id: str | None = None
 
@@ -204,7 +188,6 @@ class AnalogyRescue:
     runner: AnalogyRescueRunner
     state: SymbolicState
     goal: SymbolicState
-    tactic_pool: tuple[TacticCandidate, ...]
     ordinary_attempts: tuple[TacticResult, ...]
     cancellation: CancellationToken
     semantic_guidance: str
@@ -215,16 +198,16 @@ class AnalogyRescue:
 
 @dataclass(frozen=True, slots=True)
 class AnalogyRescueResult:
-    rescue: AnalogyRescue
     outcome: AnalogyRescueOutcome
 
 
 class AnalogyRescueRunner(Protocol):
+    scratchpad: AnalogyScratchpad
+
     def search(
         self,
         state: SymbolicState,
         goal: SymbolicState,
-        tactic_pool: tuple[TacticCandidate, ...],
         ordinary_attempts: tuple[TacticResult, ...],
         evaluator: Callable[[TacticCandidate], TacticEvaluation],
         cancellation: CancellationToken,
@@ -247,14 +230,12 @@ def generate_analogy_rescue(
     ordinary = search.rescue_ordinary
     if runner is None or recovery is None or rescue_node is None or ordinary is None:
         raise RuntimeError("search has no pending analogy rescue")
-    owned_scratchpad = getattr(runner, "_analogy_scratchpad", scratchpad)
-    if owned_scratchpad is not None and owned_scratchpad is not scratchpad:
+    if runner.scratchpad is not scratchpad:
         raise ValueError("analogy policy and rescue must share one scratchpad")
     return AnalogyRescue(
         runner=runner,
         state=rescue_node.state,
         goal=search.goal,
-        tactic_pool=ordinary.candidate_pool,
         ordinary_attempts=ordinary.attempts,
         cancellation=search.context.cancellation,
         semantic_guidance=render_semantic_guidance(recovery),
@@ -291,26 +272,17 @@ def submit_analogy_rescue_to_lean(
         result = proof.run_tactic(rescue.state, candidate)
         return rescue.classify(rescue.state, result)
 
-    search_method = rescue.runner.search
-    parameters = signature(search_method).parameters.values()
-    accepts_keywords = any(item.kind is Parameter.VAR_KEYWORD for item in parameters)
-    names = {item.name for item in parameters}
-    keyword_arguments = {}
-    if accepts_keywords or "dependency_table" in names:
-        keyword_arguments["dependency_table"] = rescue.dependency_table
-    if accepts_keywords or "force_domain_change" in names:
-        keyword_arguments["force_domain_change"] = rescue.force_domain_change
-    outcome = search_method(
+    outcome = rescue.runner.search(
         rescue.state,
         rescue.goal,
-        rescue.tactic_pool,
         rescue.ordinary_attempts,
         evaluate,
         rescue.cancellation,
         rescue.semantic_guidance,
-        **keyword_arguments,
+        dependency_table=rescue.dependency_table,
+        force_domain_change=rescue.force_domain_change,
     )
-    return AnalogyRescueResult(rescue, outcome)
+    return AnalogyRescueResult(outcome)
 
 
 class RescueOutputError(ValueError):
@@ -328,42 +300,6 @@ def _extract_json_object(text: str) -> str:
     if "```" in inner:
         raise RescueOutputError("fenced output must contain exactly one json block")
     return inner
-
-
-def parse_analogy_tactic(
-    text: str,
-    *,
-    proof_state: str | None = None,
-) -> tuple[str, RescueProposal]:
-    if not isinstance(text, str):
-        raise RescueOutputError("analogy fallback output must be text")
-    try:
-        payload = json.loads(_extract_json_object(text))
-    except (json.JSONDecodeError, TypeError) as error:
-        raise RescueOutputError("analogy fallback output must be one JSON object") from error
-    if not isinstance(payload, dict) or set(payload) != {"analogy", "predicted_state", "tactic"}:
-        raise RescueOutputError('analogy fallback output must contain exactly "analogy", "predicted_state", and "tactic"')
-    analogy, predicted_state, tactic = payload["analogy"], payload["predicted_state"], payload["tactic"]
-    if not isinstance(analogy, str) or not analogy.strip():
-        raise RescueOutputError("analogy must be nonblank text")
-    if not isinstance(predicted_state, str) or not predicted_state.strip():
-        raise RescueOutputError("predicted_state must be nonblank text")
-    if not isinstance(tactic, str) or not tactic.strip():
-        raise RescueOutputError("tactic must be nonblank text")
-    if "\n" in tactic or "\r" in tactic or "\x00" in tactic:
-        raise RescueOutputError("tactic must be one safe single line")
-    canonical = normalize_lean4_tactic(tactic, proof_state)
-    if tactic_is_incomplete(canonical):
-        raise RescueOutputError(
-            f"tactic {canonical!r} is incomplete; supply its required operands"
-        )
-    rejection = candidate_rejection_reason(canonical, proof_state)
-    if rejection is not None:
-        raise RescueOutputError(f"tactic {canonical!r} was filtered: {rejection}")
-    return analogy.strip(), RescueProposal(
-        TacticCandidate(canonical, 1.0, CandidateOrigin.ANALOGICAL),
-        predicted_state.strip(),
-    )
 
 
 def parse_analogy_update(
@@ -435,24 +371,25 @@ class AnalogyFallback:
         *,
         max_model_calls: int,
         seed: int,
+        analogy_scratchpad: AnalogyScratchpad,
         trace_sink: Any | None = None,
-        analogy_scratchpad: AnalogyScratchpad | None = None,
     ) -> None:
         if isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls <= 0:
             raise ValueError("max_model_calls must be a positive integer")
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValueError("seed must be a non-negative integer")
+        if not isinstance(analogy_scratchpad, AnalogyScratchpad):
+            raise ValueError("analogy_scratchpad must be an AnalogyScratchpad")
         self._generator = generator
         self._max_model_calls = max_model_calls
         self._seed = seed
         self._trace_sink = trace_sink
-        self._analogy_scratchpad = analogy_scratchpad
+        self.scratchpad = analogy_scratchpad
 
     def search(
         self,
         state,
         goal,
-        tactic_pool,
         ordinary_attempts,
         evaluator,
         cancellation,
@@ -461,9 +398,8 @@ class AnalogyFallback:
         *,
         force_domain_change=False,
     ) -> AnalogyRescueOutcome:
-        del tactic_pool
-        scratchpad = self._analogy_scratchpad
-        if force_domain_change and scratchpad is not None:
+        scratchpad = self.scratchpad
+        if force_domain_change:
             scratchpad.abandon_current()
         if cancellation.is_cancelled():
             return AnalogyRescueOutcome(cancelled=True)
@@ -485,7 +421,7 @@ class AnalogyFallback:
             if item.status is not TacticStatus.ACCEPTED
         )
         messages = prompt_catalog().messages(
-            "analogy_update" if scratchpad is not None else "analogy_rescue",
+            "analogy_update",
             overall_target=render_lean_goal_for_model(goal.expression),
             current_goals=render_lean_goal_for_model(focused_lean_goal(state.expression)),
             accepted="\n".join(state.context) or "(none)",
@@ -495,21 +431,20 @@ class AnalogyFallback:
             semantic_guidance=semantic_guidance,
             dependency_table=dependency_table,
         )
-        if scratchpad is not None:
-            user = messages[1]
-            if scratchpad.history:
-                user = Message(
-                    user.role,
-                    user.content + "\n\n" + prompt_catalog().text(
-                        "proof_search_history",
-                        history="\n".join(scratchpad.history),
-                    ),
-                )
-            messages = (
-                messages[0],
-                Message("system", scratchpad.context_block()),
-                user,
+        user = messages[1]
+        if scratchpad.history:
+            user = Message(
+                user.role,
+                user.content + "\n\n" + prompt_catalog().text(
+                    "proof_search_history",
+                    history="\n".join(scratchpad.history),
+                ),
             )
+        messages = (
+            messages[0],
+            Message("system", scratchpad.context_block()),
+            user,
+        )
         active_messages = messages
         rollouts: list[RescueRollout] = []
         calibrated_update: tuple[AnalogyUpdateAction, AnalogyState] | None = None
@@ -523,25 +458,17 @@ class AnalogyFallback:
             try:
                 raw = self._generator.generate(active_messages, seed=seed)
                 self._trace(state.id, active_messages, seed, raw)
-                update_action = None
-                update_state = None
-                if scratchpad is None:
-                    analogy, proposal = parse_analogy_tactic(
-                        raw,
-                        proof_state=state.expression,
-                    )
-                else:
-                    update_action, update_state, proposal = parse_analogy_update(
-                        raw,
-                        proof_state=state.expression,
-                        current=scratchpad.current,
-                        force_domain_change=force_domain_change,
-                    )
-                    try:
-                        scratchpad.validate_transition(update_action, update_state)
-                    except AnalogyStateError as error:
-                        raise RescueOutputError(str(error)) from error
-                    analogy = update_state.render()
+                update_action, update_state, proposal = parse_analogy_update(
+                    raw,
+                    proof_state=state.expression,
+                    current=scratchpad.current,
+                    force_domain_change=force_domain_change,
+                )
+                try:
+                    scratchpad.validate_transition(update_action, update_state)
+                except AnalogyStateError as error:
+                    raise RescueOutputError(str(error)) from error
+                analogy = update_state.render()
                 if proposal.candidate.source in attempted_tactics:
                     diagnostic = (
                         f"tactic {proposal.candidate.source!r} was already attempted "
@@ -559,7 +486,6 @@ class AnalogyFallback:
                         RescueRollout(
                             f"{state.id}:analogy:{index}",
                             state.id,
-                            None,
                             (),
                             (),
                             RescueTermination.DUPLICATE,
@@ -575,7 +501,7 @@ class AnalogyFallback:
                                 tried_tactics=_bounded_tactic_ledger(attempted_order),
                                 diagnostic=diagnostic,
                                 previous_response=remove_analogy_blocks(raw),
-                                contract=_rescue_output_contract(scratchpad),
+                                contract=_rescue_output_contract(),
                             ),
                         ),
                     )
@@ -594,7 +520,7 @@ class AnalogyFallback:
                     "schema",
                     str(error),
                 )
-                rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, None, (), (), RescueTermination.INVALID_OUTPUT, generations=(generation,)))
+                rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, (), (), RescueTermination.INVALID_OUTPUT, generations=(generation,)))
                 active_messages = messages + (
                     Message(
                         "user",
@@ -602,7 +528,7 @@ class AnalogyFallback:
                             "analogy_invalid_repair",
                             diagnostic=error,
                             previous_response=remove_analogy_blocks(raw),
-                            contract=_rescue_output_contract(scratchpad),
+                            contract=_rescue_output_contract(),
                         ),
                     ),
                 )
@@ -617,14 +543,13 @@ class AnalogyFallback:
                     type(error).__name__,
                     str(error) or type(error).__name__,
                 )
-                rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, None, (), (), RescueTermination.GENERATION_ERROR, generations=(generation,)))
+                rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, (), (), RescueTermination.GENERATION_ERROR, generations=(generation,)))
                 continue
             if cancellation.is_cancelled():
                 rollouts.append(
                     RescueRollout(
                         f"{state.id}:analogy:{index}",
                         state.id,
-                        None,
                         (proposal,),
                         (),
                         RescueTermination.CANCELLED,
@@ -646,7 +571,6 @@ class AnalogyFallback:
                     RescueRollout(
                         f"{state.id}:analogy:{index}",
                         state.id,
-                        None,
                         (proposal,),
                         (),
                         RescueTermination.PREDICTED_NO_CHANGE,
@@ -660,7 +584,7 @@ class AnalogyFallback:
                         prompt_catalog().text(
                             "analogy_no_change_repair",
                             tried_tactics=_bounded_tactic_ledger(attempted_order),
-                            contract=_rescue_output_contract(scratchpad),
+                            contract=_rescue_output_contract(),
                         ),
                     ),
                 )
@@ -682,18 +606,16 @@ class AnalogyFallback:
                 else RescueTermination.REJECTED if evaluation.result.status is TacticStatus.ERROR
                 else RescueTermination.EXHAUSTED
             )
-            rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, None, (proposal,), (attempt,), termination, generations=(generation,), analogy_trace=analogy))
-            if scratchpad is not None:
-                scratchpad.record_history(_result_feedback(evaluation.result))
-                if (
-                    evaluation.completed_proof is not None
-                    or evaluation.successor is not None
-                ):
-                    assert update_action is not None and update_state is not None
-                    try:
-                        scratchpad.apply(update_action, update_state)
-                    except AnalogyStateError as error:
-                        raise RescueOutputError(str(error)) from error
+            rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, (proposal,), (attempt,), termination, generations=(generation,), analogy_trace=analogy))
+            scratchpad.record_history(_result_feedback(evaluation.result))
+            if (
+                evaluation.completed_proof is not None
+                or evaluation.successor is not None
+            ):
+                try:
+                    scratchpad.apply(update_action, update_state)
+                except AnalogyStateError as error:
+                    raise RescueOutputError(str(error)) from error
             if evaluation.completed_proof is not None:
                 return AnalogyRescueOutcome(
                     completed_proof=evaluation.completed_proof,
@@ -703,9 +625,8 @@ class AnalogyFallback:
                 return AnalogyRescueOutcome(
                     successor=evaluation.successor, rollouts=tuple(rollouts)
                 )
-            if scratchpad is not None and matched:
+            if matched:
                 if calibrated_update is None:
-                    assert update_action is not None and update_state is not None
                     calibrated_update = update_action, update_state
             if getattr(evaluation.result, "infrastructure_failure", None) is not None:
                 return AnalogyRescueOutcome(rollouts=tuple(rollouts))
@@ -715,11 +636,11 @@ class AnalogyFallback:
                     _analogy_correction_feedback(
                         proposal,
                         evaluation,
-                        contract=_rescue_output_contract(scratchpad),
+                        contract=_rescue_output_contract(),
                     ),
                 ),
             )
-        if scratchpad is not None and calibrated_update is not None:
+        if calibrated_update is not None:
             scratchpad.apply(*calibrated_update)
         return AnalogyRescueOutcome(rollouts=tuple(rollouts))
 
@@ -753,12 +674,8 @@ def _bounded_tactic_ledger(tactics: list[str], *, count: int = 8, limit: int = 2
     return rendered if len(rendered) <= limit else rendered[: limit - 1].rstrip() + "…"
 
 
-def _rescue_output_contract(scratchpad: AnalogyScratchpad | None) -> str:
-    return prompt_catalog().text(
-        "analogy_rescue_output_contract"
-        if scratchpad is None
-        else "analogy_update_output_contract"
-    )
+def _rescue_output_contract() -> str:
+    return prompt_catalog().text("analogy_update_output_contract")
 
 
 def _normalized_prediction_state(text: str) -> str:
@@ -827,9 +744,9 @@ def _fallback_seed(base_seed: int, state: SymbolicState, attempt: int) -> int:
 __all__ = [
     "AnalogyFallback", "AnalogyGenerationAttempt", "AnalogyRescue",
     "AnalogyRescueOutcome", "AnalogyRescueResult", "AnalogyRescueRunner",
-    "PolicyActionRecord", "PredictionLabel", "RescueAttempt", "RescueOutputError",
+    "PredictionLabel", "RescueAttempt", "RescueOutputError",
     "RescueProposal", "RescueRollout", "RescueTermination", "TacticEvaluation",
-    "generate_analogy_rescue", "parse_analogy_tactic", "parse_analogy_update",
+    "generate_analogy_rescue", "parse_analogy_update",
     "initialize_analogy_fallback",
     "submit_analogy_rescue_to_lean",
 ]

@@ -10,7 +10,6 @@ from analogy.solver.analogy.state import (
     AnalogyStateError,
     AnalogyUpdateAction,
     extract_analogy_block,
-    parse_analogy_block,
 )
 
 
@@ -33,7 +32,6 @@ steps:
 abandoned domains:
 - (none)
 </analogy>"""
-    assert parse_analogy_block(LOCK.render()) == LOCK
 
 
 def test_extract_removes_exactly_one_block_and_leaves_tactic_payload() -> None:
@@ -123,7 +121,7 @@ def test_forced_abandonment_destroys_active_state_but_keeps_domain_ledger() -> N
     scratchpad.abandon_current()
 
     assert scratchpad.current is None
-    assert scratchpad.abandoned_domains == ("locksmithing",)
+    assert "- locksmithing" in scratchpad.context_block()
     assert scratchpad.pending_rebuild is True
     with pytest.raises(AnalogyStateError, match="active analogy"):
         scratchpad.apply(
@@ -142,7 +140,7 @@ def test_invalid_domain_change_is_validated_without_partial_mutation() -> None:
         )
 
     assert scratchpad.current == LOCK
-    assert scratchpad.abandoned_domains == ()
+    assert scratchpad.current.abandoned_domains == ()
 
 
 def test_pending_rebuild_blocks_initialization_until_change_domain_is_applied() -> None:

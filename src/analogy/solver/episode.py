@@ -41,17 +41,13 @@ from .proof.semantic import (
     build_countermodel_table,
     ForcedMoveEvent,
     forced_disjunction_tactic,
-    render_countermodel_table,
-    render_semantic_guidance,
 )
 from .search import (
-    LeanVerifier,
     ProgressPolicy,
     SearchResult,
     StateFingerprinter,
     StateDiversity,
     StucknessPolicy,
-    StuckStateSink,
     TacticRanker,
 )
 
@@ -59,7 +55,6 @@ from .search import (
 @dataclass(frozen=True, slots=True)
 class EpisodeContext:
     tactic_ranker: TacticRanker
-    verifier: LeanVerifier
     stuckness_policy: StucknessPolicy
     state_fingerprinter: StateFingerprinter
     tactic_canonicalizer: TacticCanonicalizer
@@ -68,7 +63,6 @@ class EpisodeContext:
     analogy_fallback: AnalogyRescueRunner | None = None
     ordinary_width: int = 1
     max_expansions: int | None = None
-    stuck_state_sink: StuckStateSink | None = None
     state_diversity: StateDiversity | None = None
     semantic_checker: SemanticChecker | None = None
 
@@ -384,10 +378,6 @@ def _finish_ordinary_expansion(
     if not stuckness.is_stuck:
         search.clear_active_node()
         return
-    if search.context.stuck_state_sink is not None:
-        search.context.stuck_state_sink.capture(
-            search.node.state, search.goal, ordinary, stuckness
-        )
     recovery, rescue_node, rescue_ordinary = _resolve_semantic_recovery(
         search.context.semantic_checker,
         search.node,

@@ -10,7 +10,7 @@ from typing import Protocol, TypeAlias
 
 from ...model.prompts import prompt_catalog
 from ...utils.records import SymbolicState, TacticResult
-from .inventory import InventoryError, ProofGoal, proof_goals, proposition_root
+from .syntax import InventoryError, ProofGoal, proof_goals, proposition_root
 
 
 class SemanticCheckError(ValueError):

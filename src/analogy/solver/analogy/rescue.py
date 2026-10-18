@@ -9,6 +9,7 @@ from enum import Enum
 from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from ...config import AppConfig
 from ...model.parser import (
     candidate_rejection_reason,
     normalize_lean4_tactic,
@@ -260,6 +261,23 @@ def generate_analogy_rescue(
         dependency_table=render_countermodel_table(recovery.countermodel_table),
         force_domain_change=recovery.result is SemanticResult.COUNTERMODEL,
         classify=search.classify_rescue_result,
+    )
+
+
+def initialize_analogy_fallback(
+    config: AppConfig,
+    generator: Any,
+    model_events: list[dict[str, Any]],
+    scratchpad: AnalogyScratchpad,
+) -> AnalogyFallback:
+    """Create the analogy-only fallback policy for one problem search."""
+
+    return AnalogyFallback(
+        generator,
+        max_model_calls=config.analogy.max_model_calls,
+        seed=config.run.seed,
+        trace_sink=model_events.append,
+        analogy_scratchpad=scratchpad,
     )
 
 
@@ -812,5 +830,6 @@ __all__ = [
     "PolicyActionRecord", "PredictionLabel", "RescueAttempt", "RescueOutputError",
     "RescueProposal", "RescueRollout", "RescueTermination", "TacticEvaluation",
     "generate_analogy_rescue", "parse_analogy_tactic", "parse_analogy_update",
+    "initialize_analogy_fallback",
     "submit_analogy_rescue_to_lean",
 ]

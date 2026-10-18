@@ -7,12 +7,11 @@ from analogy.config import load_config
 from analogy.lean_gym.models import Problem
 from analogy.utils.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
 from analogy.solver import run as run_module
-from analogy.solver.run import (
+from analogy.solver.report import render_problem_trace
+from analogy.solver.run import run_analogy_assisted, run_vanilla
+from analogy.solver.run_records import (
     _problem_result,
     _problem_route,
-    render_problem_trace,
-    run_analogy_assisted,
-    run_vanilla,
 )
 from analogy.solver.search import SearchResult
 from analogy.solver.proof.semantic import (
@@ -32,7 +31,8 @@ def test_run_module_exports_the_two_explicit_recipes() -> None:
 def test_vanilla_run_has_no_analogy_state_or_fallback(
     tmp_path, monkeypatch
 ) -> None:
-    contexts = []
+    policies = []
+    fallbacks = []
 
     class FakeLean:
         def __init__(self, problem, verifier):
@@ -44,14 +44,29 @@ def test_vanilla_run_has_no_analogy_state_or_fallback(
         def initial_state(self):
             return SymbolicState(f"{self.problem.id}:initial", "P : Prop\n⊢ P", "lean4")
 
-    def fake_run_episode(context, initial, goal):
-        contexts.append(context)
-        return SearchResult(SearchStatus.EXHAUSTED, None)
+    class FakeSearch:
+        result = SearchResult(SearchStatus.EXHAUSTED, None)
 
-    monkeypatch.setattr(run_module, "LeanGymAdapter", FakeLean)
-    monkeypatch.setattr(run_module, "run_episode", fake_run_episode)
+        def has_work(self):
+            return False
+
+    monkeypatch.setattr(run_module, "initialize_proof", FakeLean)
+    monkeypatch.setattr(
+        run_module,
+        "initialize_model_policy",
+        lambda *args, **kwargs: policies.append(kwargs.get("analogy_scratchpad")) or object(),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "initialize_search",
+        lambda *args, **kwargs: fallbacks.append(kwargs.get("analogy_fallback")) or FakeSearch(),
+    )
     config = load_config(ROOT / "config.yaml")
-    config = replace(config, analogy=replace(config.analogy, enabled=False))
+    config = replace(
+        config,
+        analogy=replace(config.analogy, enabled=False),
+        run=replace(config.run, output_dir=tmp_path),
+    )
     problem = Problem("plain", "demo", "", "P", "test", "test", "atom", 1)
 
     result = run_vanilla(
@@ -59,19 +74,17 @@ def test_vanilla_run_has_no_analogy_state_or_fallback(
         (problem,),
         object(),
         object(),
-        run_directory=tmp_path,
     )
 
     assert result.summary.run_id == "analogy-off"
-    assert len(contexts) == 1
-    assert contexts[0].tactic_ranker._analogy_scratchpad is None
-    assert contexts[0].analogy_fallback is None
+    assert policies == [None]
+    assert fallbacks == [None]
 
 
 def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
     tmp_path, monkeypatch
 ) -> None:
-    contexts = []
+    pairs = []
 
     class FakeLean:
         def __init__(self, problem, verifier):
@@ -83,14 +96,34 @@ def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
         def initial_state(self):
             return SymbolicState(f"{self.problem.id}:initial", "P : Prop\n⊢ P", "lean4")
 
-    def fake_run_episode(context, initial, goal):
-        contexts.append(context)
-        return SearchResult(SearchStatus.EXHAUSTED, None)
+    class FakeSearch:
+        result = SearchResult(SearchStatus.EXHAUSTED, None)
 
-    monkeypatch.setattr(run_module, "LeanGymAdapter", FakeLean)
-    monkeypatch.setattr(run_module, "run_episode", fake_run_episode)
+        def has_work(self):
+            return False
+
+    monkeypatch.setattr(run_module, "initialize_proof", FakeLean)
+    monkeypatch.setattr(
+        run_module,
+        "initialize_model_policy",
+        lambda *args, **kwargs: kwargs["analogy_scratchpad"],
+    )
+    monkeypatch.setattr(
+        run_module,
+        "initialize_analogy_fallback",
+        lambda *args: args[-1],
+    )
+    monkeypatch.setattr(
+        run_module,
+        "initialize_search",
+        lambda *args, **kwargs: pairs.append((args[-1], kwargs["analogy_fallback"])) or FakeSearch(),
+    )
     config = load_config(ROOT / "config.yaml")
-    config = replace(config, analogy=replace(config.analogy, enabled=True))
+    config = replace(
+        config,
+        analogy=replace(config.analogy, enabled=True),
+        run=replace(config.run, output_dir=tmp_path),
+    )
     problems = tuple(
         Problem(f"p{index}", "demo", "", "P", "test", "test", "atom", 1)
         for index in range(2)
@@ -101,14 +134,12 @@ def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
         problems,
         object(),
         object(),
-        run_directory=tmp_path,
     )
 
     assert result.summary.run_id == "analogy-on"
-    assert len(contexts) == 2
-    first_ranker = contexts[0].tactic_ranker._analogy_scratchpad
-    first_fallback = contexts[0].analogy_fallback._analogy_scratchpad
-    second_ranker = contexts[1].tactic_ranker._analogy_scratchpad
+    assert len(pairs) == 2
+    first_ranker, first_fallback = pairs[0]
+    second_ranker, _ = pairs[1]
     assert first_ranker is first_fallback
     assert first_ranker is not second_ranker
 
@@ -116,18 +147,7 @@ def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
 def test_solve_artifact_uses_summary_key(tmp_path, monkeypatch) -> None:
     config = load_config(ROOT / "config.yaml")
     config = replace(config, run=replace(config.run, output_dir=tmp_path))
-    summary = SolveSummary("analogy-on", (), 0.0)
-    monkeypatch.setattr(
-        run_module,
-        "run_analogy_assisted",
-        lambda *args, **kwargs: SimpleNamespace(
-            summary=summary,
-            traces=[],
-            details={},
-        ),
-    )
-
-    run = run_module.solve_problems(config, (), object(), object())
+    run = run_module.run_analogy_assisted(config, (), object(), object())
     payload = json.loads((run.output_directory / "run.json").read_text())
 
     assert payload["summary"]["results"] == []

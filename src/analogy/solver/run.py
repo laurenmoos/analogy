@@ -1,506 +1,32 @@
-"""One proof-search runtime with an optional analogy fallback."""
+"""Visible recipes for vanilla and analogy-assisted proof-search runs."""
 
 from __future__ import annotations
 
-import html
-import json
-import time
-import uuid
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, Sequence
+from collections.abc import Sequence
 
 from ..config import AppConfig
-from ..model.model_provider import TextGenerator
-from ..model.prompts import configure_prompt_catalog
 from ..lean_gym.models import Problem
 from ..lean_gym.verifier import Verifier
-from ..utils.checkpoint import Checkpoint, record_status
-from ..utils.records import (
-    DiscardReason,
-    ProblemResult,
-    SolveSummary,
-    SolveStatus,
-    SearchStatus,
-    SymbolicState,
-    TacticStatus,
+from ..model.model_provider import TextGenerator
+from ..utils.checkpoint import Checkpoint
+from .analogy.rescue import (
+    generate_analogy_rescue,
+    initialize_analogy_fallback,
+    submit_analogy_rescue_to_lean,
 )
-from .analogy.rescue import AnalogyFallback
-from .analogy.state import AnalogyScratchpad
-from .episode import EpisodeContext, run_episode
-from .model_policy import TacticRanker, TacticRankingError
-from .proof.adapter import LeanGymAdapter
-from .proof.diversity import FrozenEmbeddingDiversity
-from .proof.semantic import ExhaustiveSemanticChecker
-from .search import (
-    AcceptNovelState,
-    CanonicalStateFingerprinter,
-    NeverCancelled,
-    ObservableStucknessPolicy,
-    WhitespaceTacticCanonicalizer,
+from .analogy.state import initialize_analogy_scratchpad, update_analogy
+from .episode import update_search
+from .model_policy import generate_tactics_with_model_policy, initialize_model_policy
+from .proof.adapter import initialize_proof, submit_tactics_to_lean
+from .run_records import (
+    SolveRunRecord,
+    build_problem_record,
+    build_run_record,
+    start_run,
+    write_problem_record,
+    write_run_record,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class SolveRunRecord:
-    """Stored metadata and results from one completed solve invocation."""
-
-    run_id: str
-    analogy_enabled: bool
-    summary: SolveSummary
-    elapsed_seconds: float
-    output_directory: Path
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeResult:
-    """In-memory evidence produced while solving a collection of problems."""
-
-    summary: SolveSummary
-    traces: list[str]
-    details: dict[str, dict[str, Any]]
-
-
-def _enum_value(value: Any) -> Any:
-    return getattr(value, "value", value)
-
-
-def _pre(value: Any) -> str:
-    return f"<pre><code>{html.escape(str(value))}</code></pre>"
-
-
-def _attempt_line(attempt: dict[str, Any], *, fallback: bool = False) -> str:
-    result = attempt.get("result", attempt)
-    candidate = (
-        attempt.get("proposal", {}).get("candidate", {})
-        if fallback
-        else result.get("candidate", {})
-    )
-    source = candidate.get("source", "(unknown tactic)")
-    discarded = attempt.get("discarded")
-    if discarded:
-        reason = _enum_value(discarded.get("reason", "discarded"))
-        status = {
-            "repeated_state": "repeated state",
-            "no_progress": "no progress",
-            "semantic_refuted": "SAT-refuted successor",
-        }.get(reason, str(reason).replace("_", " "))
-    else:
-        raw_status = _enum_value(result.get("status", "unknown"))
-        status = "progress" if raw_status == "accepted" else raw_status
-    diagnostics = "; ".join(result.get("diagnostics") or ())
-    suffix = f" — {diagnostics}" if diagnostics else ""
-    lines = [f"- `{source}` → **{status}**{suffix}"]
-    if result.get("state"):
-        lines.extend(("", _pre(result["state"].get("expression", result["state"]))))
-    if result.get("proof"):
-        lines.extend(("", _pre(result["proof"])))
-    return "\n".join(lines)
-
-
-def _append_rollout(
-    lines: list[str], rollout: dict[str, Any], index: int
-) -> None:
-    termination = _enum_value(rollout.get("termination", "unknown"))
-    lines.extend(("", f"#### Analogy fallback {index} — {termination}"))
-    for generation in rollout.get("generations", ()):
-        label = "Generation"
-        if generation.get("status"):
-            label += f" — {_enum_value(generation['status'])}"
-        if generation.get("repair"):
-            label += " — retry"
-        if generation.get("prediction_label"):
-            label += f" — {_enum_value(generation['prediction_label'])}"
-        lines.extend(("", f"**{label}**"))
-        diagnostic = generation.get("diagnostic")
-        if diagnostic:
-            kind = generation.get("error_kind")
-            prefix = f"{kind}: " if kind else ""
-            lines.extend(("", f"**Failure:** {prefix}{diagnostic}"))
-    if rollout.get("analogy_trace"):
-        lines.extend(("", f"**Analogy:** {rollout['analogy_trace']}"))
-    for attempt in rollout.get("attempts", ()):
-        lines.extend(("", _attempt_line(attempt, fallback=True)))
-
-
-def _append_semantic_event(
-    lines: list[str], event: dict[str, Any], index: int
-) -> None:
-    result = _enum_value(event.get("result")) if event.get("result") else "error"
-    lines.extend(("", f"#### Semantic recovery {index} — {result}"))
-    lines.extend(("", f"Trigger state: `{event.get('trigger_state_id', '(unknown)')}`"))
-    countermodel = event.get("countermodel", ())
-    if countermodel:
-        assignments = ", ".join(
-            f"{atom}={'true' if value else 'false'}" for atom, value in countermodel
-        )
-        lines.extend(("", f"Countermodel: `{assignments}`"))
-    if event.get("rescue_state_id"):
-        lines.extend(("", f"Rescue state: `{event['rescue_state_id']}`"))
-    abandoned = event.get("abandoned_tactics", ())
-    if abandoned:
-        lines.extend(("", "Abandoned tactics: " + ", ".join(f"`{item}`" for item in abandoned)))
-    if event.get("error"):
-        lines.extend(("", f"Semantic check error: {event['error']}"))
-    table = event.get("countermodel_table")
-    if table and table.get("rows"):
-        lines.extend(("", "**Countermodel dependency table**"))
-        for row in table["rows"]:
-            sides = ", ".join(
-                f"{name}={side}" for name, side in row.get("hypothesis_sides", ())
-            ) or "no disjunctive hypotheses"
-            lines.append(f"- `{row.get('tactic', '(unknown)')}` → {sides}")
-
-
-def _append_semantic_prune(lines: list[str], prune: dict[str, Any], index: int) -> None:
-    assignments = ", ".join(
-        f"{atom}={'true' if value else 'false'}"
-        for atom, value in prune.get("countermodel", ())
-    ) or "(none)"
-    lines.extend(
-        (
-            "",
-            f"#### SAT prune {index}",
-            "",
-            f"`{prune.get('tactic', '(unknown)')}` from "
-            f"`{prune.get('parent_state_id', '(unknown)')}` produced "
-            f"`{prune.get('successor_state_id', '(unknown)')}`.",
-            "",
-            f"Countermodel: `{assignments}`",
-        )
-    )
-
-
-def _append_forced_move(lines: list[str], event: dict[str, Any], index: int) -> None:
-    result = event.get("result", {})
-    diagnostics = "; ".join(result.get("diagnostics") or ())
-    suffix = f" — {diagnostics}" if diagnostics else ""
-    lines.extend(
-        (
-            "",
-            f"#### Forced move {index} — {event.get('outcome', 'unknown')}",
-            "",
-            f"`{event.get('tactic', '(unknown)')}` on disjunction "
-            f"`{event.get('hypothesis', '(unknown)')}`{suffix}",
-        )
-    )
-
-
-def render_problem_trace(
-    detail: dict[str, Any],
-    model_events: Sequence[dict[str, Any]],
-    *,
-    route: str,
-) -> str:
-    problem = detail["problem"]
-    outcome = detail["outcome"]
-    search = detail.get("search")
-    status = _enum_value(outcome["status"])
-    rescue_rollouts = () if search is None else search.get("rescue_rollouts", ())
-    analogy_generations = sum(
-        len(rollout.get("generations", ())) for rollout in rescue_rollouts
-    )
-    analogy_submissions = sum(
-        len(rollout.get("attempts", ())) for rollout in rescue_rollouts
-    )
-    icon = "✅" if status == SolveStatus.COMPLETE.value else "❌"
-    binders = f" {problem.get('binders', '')}" if problem.get("binders") else ""
-    lines = [
-        "<details>",
-        f"<summary>{icon} `{problem['id']}` — {status} — {route}</summary>",
-        "",
-        "### Problem",
-        "",
-        _pre(f"theorem current_problem{binders} : {problem['target']} := by"),
-        "",
-        f"Lean calls: **{outcome.get('verifier_call_count', 0)}** · "
-        f"invalid tactics: **{outcome.get('invalid_tactic_count', 0)}** · "
-        f"stuck states: **{outcome.get('stuck_state_count', 0)}** · "
-        f"Analogy generations: **{analogy_generations}** · "
-        f"Analogy tactics submitted to Lean: **{analogy_submissions}**",
-    ]
-    if outcome.get("failure"):
-        lines.extend(("", f"**Failure:** {outcome['failure']}"))
-    lines.extend(("", "### Model trace"))
-    if not model_events:
-        lines.extend(("", "No completed model call was recorded."))
-    for index, event in enumerate(model_events, 1):
-        kind = str(event.get("kind", "ordinary_model_call")).removesuffix("_model_call")
-        lines.extend(("", f"#### Model call {index} — {kind}"))
-        if event.get("state_id"):
-            lines.extend(("", f"State: `{event['state_id']}`"))
-        discarded_candidates = event.get("discarded_candidates", ())
-        if discarded_candidates:
-            lines.extend(("", "**Pre-Lean filters**"))
-            lines.extend(f"- {item}" for item in discarded_candidates)
-        responses = event.get("responses") or ({"raw_text": event.get("response", "")},)
-        for response in responses:
-            response_messages = response.get("messages", event.get("messages", ()))
-            for message in response_messages:
-                lines.extend(("", f"**{str(message.get('role', 'message')).title()} prompt**", "", _pre(message.get("content", ""))))
-            label = "Response"
-            if response.get("status"):
-                label += f" — {_enum_value(response['status'])}"
-            if response.get("repair"):
-                label += " — retry"
-            lines.extend(("", f"**{label}**", "", _pre(response.get("raw_text", ""))))
-            diagnostic = response.get("diagnostic")
-            if diagnostic:
-                kind = response.get("error_kind")
-                prefix = f"{kind}: " if kind else ""
-                lines.extend(("", f"**Failure:** {prefix}{diagnostic}"))
-    lines.extend(("", "### Lean trace"))
-    if search is None:
-        lines.extend(("", "Search did not start."))
-    else:
-        for index, prune in enumerate(search.get("semantic_prunes", ()), 1):
-            _append_semantic_prune(lines, prune, index)
-        for index, event in enumerate(search.get("forced_moves", ()), 1):
-            _append_forced_move(lines, event, index)
-        for index, decision in enumerate(search.get("stuckness_decisions", ()), 1):
-            label = "stuck" if decision.get("is_stuck") else "searchable"
-            reasons = ", ".join(
-                str(_enum_value(item)).replace("_", " ")
-                for item in decision.get("reasons", ())
-            ) or "none"
-            lines.extend(
-                (
-                    "",
-                    f"#### Stuck decision {index} — {label}",
-                    "",
-                    f"State: `{decision.get('state_id', '(unknown)')}` · reasons: {reasons}",
-                )
-            )
-        for index, expansion in enumerate(search.get("ordinary_expansions", ()), 1):
-            lines.extend(("", f"#### Lean expansion {index}"))
-            discarded_by_source = {
-                item.get("result", {}).get("candidate", {}).get("source"): item
-                for item in expansion.get("discarded", ())
-            }
-            for attempt in expansion.get("attempts", ()):
-                rendered_attempt = dict(attempt)
-                source = attempt.get("candidate", {}).get("source")
-                if source in discarded_by_source:
-                    rendered_attempt["discarded"] = discarded_by_source[source]
-                lines.extend(("", _attempt_line(rendered_attempt)))
-            skipped = expansion.get("skipped_candidates", ())
-            if skipped:
-                lines.extend(("", "Skipped before Lean:"))
-                for item in skipped:
-                    source = item.get("candidate", {}).get("source", "(unknown)")
-                    reason = str(item.get("reason", "unknown")).replace("_", " ")
-                    lines.append(f"- `{source}` — {reason}")
-        rollouts = tuple(search.get("rescue_rollouts", ()))
-        emitted: set[int] = set()
-        for event_index, event in enumerate(search.get("semantic_recoveries", ()), 1):
-            _append_semantic_event(lines, event, event_index)
-            for rollout_index, rollout in enumerate(rollouts, 1):
-                if rollout.get("semantic_event_id") == event.get("event_id"):
-                    _append_rollout(lines, rollout, rollout_index)
-                    emitted.add(rollout_index)
-        for rollout_index, rollout in enumerate(rollouts, 1):
-            if rollout_index not in emitted:
-                _append_rollout(lines, rollout, rollout_index)
-    lines.extend(("", "### Final outcome", ""))
-    lines.append(_pre(outcome["proof"]) if outcome.get("proof") else outcome.get("failure") or f"Stopped: {status}")
-    lines.extend(("", "</details>"))
-    return "\n".join(lines)
-
-
-def _problem_result(problem_id: str, search_result: Any) -> ProblemResult:
-    ordinary = tuple(
-        attempt
-        for expansion in search_result.ordinary_expansions
-        for attempt in expansion.attempts
-    )
-    fallback = tuple(
-        attempt.result
-        for rollout in search_result.rescue_rollouts
-        for attempt in rollout.attempts
-    )
-    forced = tuple(event.result for event in search_result.forced_moves)
-    all_attempts = ordinary + forced + fallback
-    discarded = tuple(
-        item
-        for expansion in search_result.ordinary_expansions
-        for item in expansion.discarded
-    )
-    status = (
-        SolveStatus.COMPLETE
-        if search_result.status is SearchStatus.COMPLETE
-        else SolveStatus.BUDGET_EXHAUSTED
-        if search_result.status is SearchStatus.BUDGET_EXHAUSTED
-        else SolveStatus.SEMANTIC_FAILURE
-        if search_result.status is SearchStatus.SEMANTIC_FAILURE
-        else SolveStatus.EXHAUSTED
-    )
-    failure = None
-    if status is SolveStatus.SEMANTIC_FAILURE:
-        event = search_result.semantic_recoveries[-1]
-        failure = (
-            f"semantic check failed: {event.error}"
-            if event.error is not None
-            else "no propositionally valid rescue ancestor"
-        )
-    return ProblemResult(
-        problem_id=problem_id,
-        status=status,
-        proof=search_result.proof,
-        failure=failure,
-        expansion_count=len(search_result.ordinary_expansions),
-        verifier_call_count=len(all_attempts),
-        invalid_tactic_count=sum(item.status is TacticStatus.ERROR for item in all_attempts),
-        repeated_state_count=sum(item.reason is DiscardReason.REPEATED_STATE for item in discarded),
-        no_progress_count=sum(item.reason is DiscardReason.NO_PROGRESS for item in discarded),
-        stuck_state_count=sum(item.is_stuck for item in search_result.stuckness_decisions),
-        analogy_fallback_count=len(fallback),
-    )
-
-
-def _failed_problem_result(problem_id: str, status: SolveStatus, failure: str) -> ProblemResult:
-    return ProblemResult(problem_id, status, None, failure, 0, 0, 0, 0, 0, 0, 0)
-
-
-def _problem_route(outcome: ProblemResult, search_result: Any | None) -> str:
-    if search_result is not None and search_result.rescue_rollouts:
-        return "analogy-assisted"
-    if _enum_value(outcome.status) == SolveStatus.COMPLETE.value:
-        return "ordinary"
-    return "unsolved"
-
-
-def _write_json(path: Path, value: Any) -> None:
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-
-
-def _public_payload(value: Any) -> Any:
-    """Remove internal random-generation controls from persisted experiment evidence."""
-    if isinstance(value, dict):
-        return {
-            key: _public_payload(item)
-            for key, item in value.items()
-            if key != "seed"
-        }
-    if isinstance(value, (list, tuple)):
-        return [_public_payload(item) for item in value]
-    return value
-
-
-def _initialize_proof(problem: Problem, verifier: Verifier) -> LeanGymAdapter:
-    return LeanGymAdapter(problem, verifier)
-
-
-def _create_model_policy(
-    config: AppConfig,
-    generator: TextGenerator,
-    lean: LeanGymAdapter,
-    model_events: list[dict[str, Any]],
-    *,
-    analogy_scratchpad: AnalogyScratchpad | None = None,
-) -> TacticRanker:
-    return TacticRanker(
-        generator,
-        top_k=config.search.top_k,
-        seed=config.run.seed,
-        failed_tactics_for=lean.failed_tactics_for,
-        trace_sink=model_events.append,
-        analogy_scratchpad=analogy_scratchpad,
-    )
-
-
-def _create_analogy_fallback(
-    config: AppConfig,
-    generator: TextGenerator,
-    model_events: list[dict[str, Any]],
-    analogy_scratchpad: AnalogyScratchpad,
-) -> AnalogyFallback:
-    return AnalogyFallback(
-        generator,
-        max_model_calls=config.analogy.max_model_calls,
-        seed=config.run.seed,
-        trace_sink=model_events.append,
-        analogy_scratchpad=analogy_scratchpad,
-    )
-
-
-def _configure_search(
-    config: AppConfig,
-    generator: TextGenerator,
-    lean: LeanGymAdapter,
-    model_policy: TacticRanker,
-    *,
-    analogy_fallback: AnalogyFallback | None = None,
-) -> EpisodeContext:
-    return EpisodeContext(
-        tactic_ranker=model_policy,
-        verifier=lean,
-        stuckness_policy=ObservableStucknessPolicy(),
-        state_fingerprinter=CanonicalStateFingerprinter(),
-        tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
-        progress_policy=AcceptNovelState(),
-        cancellation=NeverCancelled(),
-        analogy_fallback=analogy_fallback,
-        ordinary_width=config.search.top_k,
-        max_expansions=config.search.max_steps,
-        state_diversity=FrozenEmbeddingDiversity(
-            generator, layer=config.model.hidden_layer, neighbors=3
-        ),
-        semantic_checker=ExhaustiveSemanticChecker(),
-    )
-
-
-def _generate_and_verify_tactics(
-    problem: Problem,
-    lean: LeanGymAdapter,
-    search: EpisodeContext,
-) -> Any:
-    return run_episode(
-        search,
-        lean.initial_state(),
-        SymbolicState(f"{problem.id}:goal", problem.target, "lean4"),
-    )
-
-
-def _build_problem_record(
-    problem: Problem,
-    outcome: ProblemResult,
-    search_result: Any | None,
-    model_events: Sequence[dict[str, Any]],
-) -> dict[str, Any]:
-    return _public_payload(
-        {
-            "problem": asdict(problem),
-            "outcome": asdict(outcome),
-            "search": None if search_result is None else asdict(search_result),
-            "model_events": model_events,
-        }
-    )
-
-
-def _write_problem_record(
-    run_directory: Path, problem: Problem, record: dict[str, Any]
-) -> None:
-    _write_json(run_directory / f"{problem.id}.json", record)
-
-
-def _update_checkpoint(
-    checkpoint: Checkpoint | None, problem: Problem, outcome: ProblemResult
-) -> None:
-    if checkpoint is not None:
-        record_status(checkpoint, problem.id, outcome.status.value)
-
-
-def _finish_runtime(
-    label: str,
-    started: float,
-    results: list[ProblemResult],
-    traces: list[str],
-    details: dict[str, dict[str, Any]],
-) -> RuntimeResult:
-    summary = SolveSummary(label, tuple(results), time.monotonic() - started)
-    return RuntimeResult(summary, traces, details)
+from .search_setup import initialize_search
 
 
 def run_vanilla(
@@ -509,37 +35,38 @@ def run_vanilla(
     generator: TextGenerator,
     verifier: Verifier,
     *,
-    run_directory: Path,
     checkpoint: Checkpoint | None = None,
-) -> RuntimeResult:
-    started = time.monotonic()
-    details: dict[str, dict[str, Any]] = {}
-    traces: list[str] = []
-    results: list[ProblemResult] = []
+) -> SolveRunRecord:
+    """Run the ordinary model-policy and Lean search recipe."""
+
+    run_state = start_run(config, checkpoint)
 
     for problem in problems:
-        model_events: list[dict[str, Any]] = []
-        search_result = None
+        model_events = []
+        search = None
+        failure = None
         try:
-            lean = _initialize_proof(problem, verifier)
-            model_policy = _create_model_policy(config, generator, lean, model_events)
-            search = _configure_search(config, generator, lean, model_policy)
-            search_result = _generate_and_verify_tactics(problem, lean, search)
-            outcome = _problem_result(problem.id, search_result)
-        except TacticRankingError as error:
-            outcome = _failed_problem_result(problem.id, SolveStatus.MODEL_FAILURE, str(error))
+            proof = initialize_proof(problem, verifier)
+            model_policy = initialize_model_policy(
+                config, generator, proof, model_events
+            )
+            search = initialize_search(config, generator, proof, model_policy)
+
+            while search.has_work():
+                tactics = generate_tactics_with_model_policy(search)
+                results = submit_tactics_to_lean(proof, tactics)
+                update_search(search, results)
         except Exception as error:
-            outcome = _failed_problem_result(problem.id, SolveStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
+            failure = error
 
-        problem_record = _build_problem_record(problem, outcome, search_result, model_events)
-        _write_problem_record(run_directory, problem, problem_record)
-        _update_checkpoint(checkpoint, problem, outcome)
-        route = _problem_route(outcome, search_result)
-        details[problem.id] = problem_record
-        traces.append(render_problem_trace(problem_record, model_events, route=route))
-        results.append(outcome)
+        record = build_problem_record(problem, search, model_events, failure)
+        write_problem_record(run_state, record)
 
-    return _finish_runtime("analogy-off", started, results, traces, details)
+    run = build_run_record(
+        run_state, label="analogy-off", analogy_enabled=False
+    )
+    write_run_record(run_state, run)
+    return run
 
 
 def run_analogy_assisted(
@@ -548,164 +75,58 @@ def run_analogy_assisted(
     generator: TextGenerator,
     verifier: Verifier,
     *,
-    run_directory: Path,
     checkpoint: Checkpoint | None = None,
-) -> RuntimeResult:
-    started = time.monotonic()
-    details: dict[str, dict[str, Any]] = {}
-    traces: list[str] = []
-    results: list[ProblemResult] = []
+) -> SolveRunRecord:
+    """Run the ordinary recipe with analogy rescue at stuck states."""
+
+    run_state = start_run(config, checkpoint)
 
     for problem in problems:
-        model_events: list[dict[str, Any]] = []
-        search_result = None
+        model_events = []
+        search = None
+        failure = None
         try:
-            lean = _initialize_proof(problem, verifier)
-            analogy_scratchpad = AnalogyScratchpad()
-            model_policy = _create_model_policy(
+            proof = initialize_proof(problem, verifier)
+            analogy = initialize_analogy_scratchpad()
+            model_policy = initialize_model_policy(
                 config,
                 generator,
-                lean,
+                proof,
                 model_events,
-                analogy_scratchpad=analogy_scratchpad,
+                analogy_scratchpad=analogy,
             )
-            analogy_fallback = _create_analogy_fallback(
-                config, generator, model_events, analogy_scratchpad
+            analogy_fallback = initialize_analogy_fallback(
+                config, generator, model_events, analogy
             )
-            search = _configure_search(
+            search = initialize_search(
                 config,
                 generator,
-                lean,
+                proof,
                 model_policy,
                 analogy_fallback=analogy_fallback,
             )
-            search_result = _generate_and_verify_tactics(problem, lean, search)
-            outcome = _problem_result(problem.id, search_result)
-        except TacticRankingError as error:
-            outcome = _failed_problem_result(problem.id, SolveStatus.MODEL_FAILURE, str(error))
+
+            while search.has_work():
+                tactics = generate_tactics_with_model_policy(search)
+                results = submit_tactics_to_lean(proof, tactics)
+                update_search(search, results)
+
+                if search.is_stuck():
+                    analogy = update_analogy(search, analogy)
+                    rescue = generate_analogy_rescue(search, analogy)
+                    result = submit_analogy_rescue_to_lean(proof, rescue)
+                    update_search(search, result)
         except Exception as error:
-            outcome = _failed_problem_result(problem.id, SolveStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
+            failure = error
 
-        problem_record = _build_problem_record(problem, outcome, search_result, model_events)
-        _write_problem_record(run_directory, problem, problem_record)
-        _update_checkpoint(checkpoint, problem, outcome)
-        route = _problem_route(outcome, search_result)
-        details[problem.id] = problem_record
-        traces.append(render_problem_trace(problem_record, model_events, route=route))
-        results.append(outcome)
+        record = build_problem_record(problem, search, model_events, failure)
+        write_problem_record(run_state, record)
 
-    return _finish_runtime("analogy-on", started, results, traces, details)
-
-
-def _build_solve_run_record(
-    run_id: str,
-    config: AppConfig,
-    run_directory: Path,
-    summary: SolveSummary,
-    started: float,
-) -> SolveRunRecord:
-    return SolveRunRecord(
-        run_id,
-        config.analogy.enabled,
-        summary,
-        time.monotonic() - started,
-        run_directory,
+    run = build_run_record(
+        run_state, label="analogy-on", analogy_enabled=True
     )
-
-
-def _write_run_record(
-    config: AppConfig,
-    run: SolveRunRecord,
-    checkpoint: Checkpoint | None,
-) -> None:
-    _write_json(
-        run.output_directory / "run.json",
-        {
-            "run_id": run.run_id,
-            "analogy_enabled": run.analogy_enabled,
-            "model": config.model.name,
-            "top_k": config.search.top_k,
-            "max_steps": config.search.max_steps,
-            "max_analogy_model_calls_per_stuck_state": config.analogy.max_model_calls,
-            "problem_index_signature": (
-                checkpoint.signature if checkpoint is not None else None
-            ),
-            "problem_index_fingerprints": (
-                checkpoint.fingerprints if checkpoint is not None else None
-            ),
-            "elapsed_seconds": run.elapsed_seconds,
-            "summary": asdict(run.summary),
-        },
-    )
-
-
-def _write_run_report(
-    config: AppConfig,
-    run: SolveRunRecord,
-    traces: Sequence[str],
-) -> None:
-    summary = run.summary
-    report = [
-        "# Proof search run",
-        "",
-        f"- Analogy fallback: {'enabled' if config.analogy.enabled else 'disabled'}",
-        f"- Solved: {summary.solved_count}/{summary.attempted_count}",
-        f"- Analogy tactics submitted to Lean: {sum(item.analogy_fallback_count for item in summary.results)}",
-        "",
-        "## Detailed traces",
-        "",
-        *traces,
-    ]
-    (run.output_directory / "report.md").write_text(
-        "\n".join(report) + "\n", encoding="utf-8"
-    )
-
-
-def solve_problems(
-    config: AppConfig,
-    problems: Sequence[Problem],
-    generator: TextGenerator,
-    verifier: Verifier,
-    *,
-    checkpoint: Checkpoint | None = None,
-) -> SolveRunRecord:
-    configure_prompt_catalog(config.prompts.path)
-    started = time.monotonic()
-    run_id = uuid.uuid4().hex
-    run_directory = config.run.output_dir / "solve" / run_id
-    run_directory.mkdir(parents=True, exist_ok=False)
-
-    if config.analogy.enabled:
-        runtime = run_analogy_assisted(
-            config,
-            problems,
-            generator,
-            verifier,
-            run_directory=run_directory,
-            checkpoint=checkpoint,
-        )
-    else:
-        runtime = run_vanilla(
-            config,
-            problems,
-            generator,
-            verifier,
-            run_directory=run_directory,
-            checkpoint=checkpoint,
-        )
-
-    run = _build_solve_run_record(
-        run_id, config, run_directory, runtime.summary, started
-    )
-    _write_run_record(config, run, checkpoint)
-    _write_run_report(config, run, runtime.traces)
+    write_run_record(run_state, run)
     return run
 
 
-__all__ = [
-    "SolveRunRecord",
-    "render_problem_trace",
-    "run_analogy_assisted",
-    "run_vanilla",
-    "solve_problems",
-]
+__all__ = ["run_analogy_assisted", "run_vanilla"]

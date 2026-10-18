@@ -8,8 +8,7 @@ from analogy.__main__ import build_parser, main, render_report, run_solve
 from analogy.config import load_config
 from analogy.utils.records import ProblemResult, SolveSummary, SolveStatus
 from analogy.runtime import with_analogy_enabled
-from analogy.solver import run as run_module
-from analogy.solver.run import SolveRunRecord
+from analogy.solver.run_records import SolveRunRecord
 
 
 ROOT = Path(__file__).parents[1]
@@ -110,24 +109,29 @@ def test_solve_selects_explicit_run_recipe(
         run=replace(configured.run, output_dir=tmp_path),
     )
 
+    calls = []
+    runtime = SimpleNamespace(
+        config=configured,
+        problems=(object(),),
+        model=object(),
+        verifier=object(),
+        checkpoint=None,
+    )
+
     def recipe(label):
         def run(*args, **kwargs):
-            return SimpleNamespace(
-                summary=SolveSummary(label, (), 0.0),
-                traces=[],
-                details={},
+            calls.append(label)
+            return SolveRunRecord(
+                "run", analogy_enabled, SolveSummary(label, (), 0.0), 0.0, tmp_path
             )
 
         return run
 
-    monkeypatch.setattr(run_module, "run_vanilla", recipe("vanilla"))
+    monkeypatch.setattr("analogy.__main__.get_runtime", lambda *args: runtime)
+    monkeypatch.setattr("analogy.__main__.run_vanilla", recipe("vanilla"))
     monkeypatch.setattr(
-        run_module,
-        "run_analogy_assisted",
-        recipe("analogy-assisted"),
+        "analogy.__main__.run_analogy_assisted", recipe("analogy-assisted")
     )
-    run = run_module.solve_problems(configured, (), object(), object())
 
-    assert run.summary.run_id == expected_label
-    assert run.analogy_enabled is analogy_enabled
-    assert run.summary.results == ()
+    assert run_solve(SimpleNamespace(config=ROOT / "config.yaml", analogy_enabled=None, problem_selection=None)) == 0
+    assert calls == [expected_label]

@@ -10,7 +10,8 @@ from pathlib import Path
 from .config import ConfigError
 from .model.model_provider import ModelConfigurationError
 from .runtime import get_runtime
-from .solver.run import SolveRunRecord, solve_problems
+from .solver.run import run_analogy_assisted, run_vanilla
+from .solver.run_records import SolveRunRecord
 
 
 def render_report(run: SolveRunRecord) -> str:
@@ -61,7 +62,8 @@ def run_solve(args: argparse.Namespace) -> int:
     if not runtime.problems:
         print("No unresolved problems for this experiment configuration.")
         return 0
-    run = solve_problems(
+    recipe = run_analogy_assisted if config.analogy.enabled else run_vanilla
+    run = recipe(
         config,
         runtime.problems,
         runtime.model,

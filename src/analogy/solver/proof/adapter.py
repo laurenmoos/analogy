@@ -71,6 +71,11 @@ class LeanGymAdapter:
             raise RuntimeError(f"could not initialize {self.problem.id}: {detail}")
         return self._register(result.proof_state.normalized, ())
 
+    def goal_state(self) -> SymbolicState:
+        return SymbolicState(
+            f"{self.problem.id}:goal", self.problem.target, "lean4"
+        )
+
     def failed_tactics_for(self, state_id: str) -> tuple[str, ...]:
         try:
             prefix = self._prefixes[state_id]
@@ -202,6 +207,12 @@ class TacticSubmitter(Protocol):
     ) -> TacticResult: ...
 
 
+def initialize_proof(problem: Problem, verifier: Verifier) -> LeanGymAdapter:
+    """Create the solver-facing adapter for one Lean problem."""
+
+    return LeanGymAdapter(problem, verifier)
+
+
 def submit_tactics_to_lean(
     proof: TacticSubmitter,
     tactics: TacticBatch,
@@ -220,5 +231,6 @@ def submit_tactics_to_lean(
 __all__ = [
     "LeanGymAdapter",
     "LeanInfrastructureResult",
+    "initialize_proof",
     "submit_tactics_to_lean",
 ]

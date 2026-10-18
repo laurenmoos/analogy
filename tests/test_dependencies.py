@@ -1,3 +1,4 @@
+import ast
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -38,3 +39,30 @@ def test_no_secondary_runtime_entry_points_exist():
     )
 
     assert [name for name in retired if (PACKAGE / name).exists()] == []
+
+
+def test_run_module_contains_only_two_visible_recipes():
+    tree = ast.parse((PACKAGE / "solver" / "run.py").read_text(encoding="utf-8"))
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+
+    assert {node.name for node in functions} == {
+        "run_vanilla",
+        "run_analogy_assisted",
+    }
+    assert len(functions) == 2
+    assert not any(isinstance(node, ast.ClassDef) for node in ast.walk(tree))
+
+    for function in functions:
+        assert any(
+            isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "problem"
+            for node in ast.walk(function)
+        )
+        assert any(
+            isinstance(node, ast.While)
+            and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Attribute)
+            and node.test.func.attr == "has_work"
+            for node in ast.walk(function)
+        )

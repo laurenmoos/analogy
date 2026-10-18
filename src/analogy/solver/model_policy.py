@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from ..config import AppConfig
 from ..model.model_provider import TextGenerator
 from ..model.parser import (
     candidate_rejection_reason,
@@ -31,6 +32,7 @@ from .analogy.state import (
 
 if TYPE_CHECKING:
     from .episode import SearchSession, TacticBatch
+    from .proof.adapter import LeanGymAdapter
 
 class TacticRankingError(RuntimeError):
     """Raised when the conventional model cannot produce a candidate pool."""
@@ -294,6 +296,26 @@ def generate_tactics_with_model_policy(search: SearchSession) -> TacticBatch:
     return search.next_tactic_batch()
 
 
+def initialize_model_policy(
+    config: AppConfig,
+    generator: TextGenerator,
+    proof: LeanGymAdapter,
+    model_events: list[dict[str, Any]],
+    *,
+    analogy_scratchpad: AnalogyScratchpad | None = None,
+) -> TacticRanker:
+    """Create the ordinary tactic policy used by one problem search."""
+
+    return TacticRanker(
+        generator,
+        top_k=config.search.top_k,
+        seed=config.run.seed,
+        failed_tactics_for=proof.failed_tactics_for,
+        trace_sink=model_events.append,
+        analogy_scratchpad=analogy_scratchpad,
+    )
+
+
 def _replacement_repair(
     messages, discarded: list[str], *, require_analogy: bool = False
 ):
@@ -319,4 +341,5 @@ __all__ = [
     "TacticRanker",
     "TacticRankingError",
     "generate_tactics_with_model_policy",
+    "initialize_model_policy",
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
 
 import pytest
 
@@ -15,6 +16,7 @@ from analogy.model.prompts import (
 )
 from analogy.utils.records import Message
 from analogy.solver.model_policy import _replacement_repair
+from analogy.solver.analogy.protocol import extract_analogy_block
 
 
 ROOT = Path(__file__).parents[1]
@@ -373,6 +375,27 @@ def test_analogy_initialization_requests_one_standalone_analogy_block():
         )
     )
 
-    assert "exactly one <analogy> block" in prompt
+    assert "Return exactly one block" in prompt
     assert "no text before or after" in prompt
     assert "- lock" in prompt
+
+
+def test_analogy_initialization_supplies_a_parser_compatible_template():
+    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
+    prompt = "\n".join(
+        message.content
+        for message in catalog.messages(
+            "analogy_initialize",
+            overall_target="⊢ P",
+            current_goals="h : P\n⊢ P",
+            excluded_domains="- lock",
+        )
+    )
+    blocks = re.findall(r"<analogy>.*?</analogy>", prompt, flags=re.DOTALL)
+
+    assert len(blocks) == 1
+    state, remainder = extract_analogy_block(blocks[0])
+    assert state.domain == "one-line domain"
+    assert state.mapping == ("one-line source corresponds to one-line target",)
+    assert state.steps == ("one-line proof action",)
+    assert remainder == ""

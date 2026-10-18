@@ -39,10 +39,21 @@ prompts:
       Then return at most {{top_k}} candidates after the block.
 
   analogy_initialize:
-    version: analogy-initialize-v1
-    system: >-
-      Create one concrete analogy for planning this Lean 4 proof. Return exactly one <analogy> block
-      with domain, mapping, numbered steps, and abandoned domains, with no text before or after it.
+    version: analogy-initialize-v2
+    system: |-
+      Create one concrete analogy for planning this Lean 4 proof. Return only one block in exactly this format,
+      preserving the lowercase headers, section order, hyphen bullets, consecutive step numbers, and empty marker:
+      <analogy>
+      domain: one-line domain
+      mapping:
+      - one-line source corresponds to one-line target
+      steps:
+      1. one-line proof action
+      abandoned domains:
+      - (none)
+      </analogy>
+      Replace the example domain, mapping, and steps with the analogy. Add mapping bullets and consecutively
+      numbered steps as needed. Keep abandoned domains exactly `- (none)` during initialization.
     user: |-
       Overall target:
       {{overall_target}}
@@ -53,7 +64,7 @@ prompts:
       Do not use any of these already selected domains:
       {{excluded_domains}}
 
-      Return exactly one <analogy> block and no text before or after it.
+      Return exactly one block in the required format and no text before or after it.
 
   analogy_rescue:
     version: analogy-rescue-v9

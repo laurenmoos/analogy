@@ -221,6 +221,73 @@ def test_both_run_recipes_name_general_search_scoring_explicitly() -> None:
         assert "update_search" not in calls
 
 
+def test_run_module_has_only_two_functions_and_exposes_the_assisted_lifecycle() -> None:
+    tree = ast.parse((PACKAGE / "solver" / "run.py").read_text(encoding="utf-8"))
+    recipes = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    assert list(recipes) == ["run_vanilla", "run_analogy_assisted"]
+
+    assisted_calls = [
+        node.func.id
+        for node in ast.walk(recipes["run_analogy_assisted"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    for expected in (
+        "initialize_analogy_harness",
+        "score_analogies",
+        "select_analogy",
+        "initialize_search",
+        "update_analogies",
+        "activate_analogy",
+        "generate_analogy_rescue",
+        "submit_analogy_rescue_to_lean",
+    ):
+        assert expected in assisted_calls
+
+    vanilla_calls = {
+        node.func.id
+        for node in ast.walk(recipes["run_vanilla"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert vanilla_calls.isdisjoint(
+        {
+            "initialize_analogy_harness",
+            "score_analogies",
+            "select_analogy",
+            "update_analogies",
+            "activate_analogy",
+            "generate_analogy_rescue",
+            "submit_analogy_rescue_to_lean",
+        }
+    )
+
+    stuck_if = next(
+        node
+        for node in ast.walk(recipes["run_analogy_assisted"])
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Call)
+        and isinstance(node.test.func, ast.Attribute)
+        and node.test.func.attr == "is_stuck"
+    )
+    stuck_calls = [
+        statement.value.func.id
+        for statement in stuck_if.body
+        if isinstance(statement, (ast.Assign, ast.Expr))
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+    ]
+    assert stuck_calls == [
+        "update_analogies",
+        "score_analogies",
+        "select_analogy",
+        "activate_analogy",
+        "generate_analogy_rescue",
+        "submit_analogy_rescue_to_lean",
+        "update_search_with_scored_proof_states",
+    ]
+
+
 def test_scoring_package_does_not_import_search_or_model_policy() -> None:
     forbidden = ("analogy.solver.search", "analogy.solver.model_policy")
     dependencies = []

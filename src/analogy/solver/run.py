@@ -9,12 +9,17 @@ from ..lean_gym.models import Problem
 from ..lean_gym.verifier import Verifier
 from ..model.model_provider import TextGenerator
 from ..utils.checkpoint import Checkpoint
+from .analogy.harness import (
+    activate_analogy,
+    initialize_analogy_harness,
+    score_analogies,
+    select_analogy,
+    update_analogies,
+)
 from .analogy.rescue import (
     generate_analogy_rescue,
-    initialize_analogy_fallback,
     submit_analogy_rescue_to_lean,
 )
-from .analogy.state import initialize_analogy_scratchpad, update_analogy
 from .model_policy import (
     generate_and_score_tactics_with_model_policy,
     initialize_model_policy,
@@ -96,23 +101,21 @@ def run_analogy_assisted(
         failure = None
         try:
             proof = initialize_proof(problem, verifier)
-            analogy = initialize_analogy_scratchpad()
-            model_policy = initialize_model_policy(
-                config,
-                generator,
-                proof,
-                model_events,
-                analogy_scratchpad=analogy,
+            initial_state = proof.initial_state()
+            goal_state = proof.goal_state()
+            analogies = initialize_analogy_harness(
+                config, generator, proof, model_events, initial_state, goal_state
             )
-            analogy_fallback = initialize_analogy_fallback(
-                config, generator, model_events, analogy
-            )
+            scored_analogies = score_analogies(None, analogies)
+            analogy = select_analogy(scored_analogies)
             search = initialize_search(
                 config,
                 generator,
                 proof,
-                model_policy,
-                analogy_fallback=analogy_fallback,
+                analogy.model_policy,
+                analogy_fallback=analogy.fallback,
+                initial_state=initial_state,
+                goal_state=goal_state,
             )
 
             while search.has_work():
@@ -121,8 +124,11 @@ def run_analogy_assisted(
                 update_search_with_scored_proof_states(search, results)
 
                 if search.is_stuck():
-                    analogy = update_analogy(search, analogy)
-                    rescue = generate_analogy_rescue(search, analogy)
+                    analogies = update_analogies(search, analogies)
+                    scored_analogies = score_analogies(search, analogies)
+                    analogy = select_analogy(scored_analogies)
+                    activate_analogy(search, analogy)
+                    rescue = generate_analogy_rescue(search, analogy.scratchpad)
                     result = submit_analogy_rescue_to_lean(proof, rescue)
                     update_search_with_scored_proof_states(search, result)
         except Exception as error:

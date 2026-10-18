@@ -100,10 +100,11 @@ def test_vanilla_run_has_no_analogy_state_or_fallback(
     assert fallbacks == [None]
 
 
-def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
+def test_analogy_assisted_run_initializes_and_selects_an_isolated_cohort_per_problem(
     tmp_path, monkeypatch
 ) -> None:
     pairs = []
+    harnesses = []
 
     class FakeLean:
         def __init__(self, problem, verifier):
@@ -115,6 +116,9 @@ def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
         def initial_state(self):
             return SymbolicState(f"{self.problem.id}:initial", "P : Prop\n⊢ P", "lean4")
 
+        def goal_state(self):
+            return SymbolicState(f"{self.problem.id}:goal", "⊢ P", "lean4")
+
     class FakeSearch:
         result = SearchResult(SearchStatus.EXHAUSTED, None)
 
@@ -122,20 +126,34 @@ def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
             return False
 
     monkeypatch.setattr(run_module, "initialize_proof", FakeLean)
+
+    def initialize_harness(*_args):
+        track = SimpleNamespace(
+            model_policy=object(), fallback=object(), scratchpad=object()
+        )
+        harness = SimpleNamespace(tracks=(track,))
+        harnesses.append(harness)
+        return harness
+
     monkeypatch.setattr(
-        run_module,
-        "initialize_model_policy",
-        lambda *args, **kwargs: kwargs["analogy_scratchpad"],
+        run_module, "initialize_analogy_harness", initialize_harness
     )
     monkeypatch.setattr(
-        run_module,
-        "initialize_analogy_fallback",
-        lambda *args: args[-1],
+        run_module, "score_analogies", lambda search, harness: harness.tracks
     )
+    monkeypatch.setattr(run_module, "select_analogy", lambda scored: scored[0])
     monkeypatch.setattr(
         run_module,
         "initialize_search",
-        lambda *args, **kwargs: pairs.append((args[-1], kwargs["analogy_fallback"])) or FakeSearch(),
+        lambda *args, **kwargs: pairs.append(
+            (
+                args[-1],
+                kwargs["analogy_fallback"],
+                kwargs["initial_state"],
+                kwargs["goal_state"],
+            )
+        )
+        or FakeSearch(),
     )
     config = load_config(ROOT / "config.yaml")
     config = replace(
@@ -157,10 +175,133 @@ def test_analogy_assisted_run_shares_one_scratchpad_and_isolates_problems(
 
     assert result.summary.run_id == "analogy-on"
     assert len(pairs) == 2
-    first_ranker, first_fallback = pairs[0]
-    second_ranker, _ = pairs[1]
-    assert first_ranker is first_fallback
+    first_ranker, first_fallback, first_initial, first_goal = pairs[0]
+    second_ranker, _, _, _ = pairs[1]
+    assert first_ranker is harnesses[0].tracks[0].model_policy
+    assert first_fallback is harnesses[0].tracks[0].fallback
     assert first_ranker is not second_ranker
+    assert first_initial.id == "p0:initial"
+    assert first_goal.id == "p0:goal"
+
+
+def test_assisted_stuck_loop_updates_scores_selects_and_submits_only_one_track(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+    first = SimpleNamespace(
+        id="first", scratchpad=object(), model_policy=object(), fallback=object()
+    )
+    selected = SimpleNamespace(
+        id="selected", scratchpad=object(), model_policy=object(), fallback=object()
+    )
+    harness = SimpleNamespace(tracks=(first, selected))
+
+    class FakeLean:
+        def __init__(self, problem, verifier):
+            pass
+
+        def initial_state(self):
+            return SymbolicState("initial", "P : Prop\n⊢ P", "lean4")
+
+        def goal_state(self):
+            return SymbolicState("goal", "⊢ P", "lean4")
+
+    class FakeSearch:
+        result = SearchResult(SearchStatus.EXHAUSTED, None)
+
+        def __init__(self):
+            self.cycles = 0
+
+        def has_work(self):
+            self.cycles += 1
+            return self.cycles == 1
+
+        def is_stuck(self):
+            return True
+
+    monkeypatch.setattr(run_module, "initialize_proof", FakeLean)
+    monkeypatch.setattr(
+        run_module, "initialize_analogy_harness", lambda *_args: harness
+    )
+    monkeypatch.setattr(
+        run_module,
+        "score_analogies",
+        lambda search, value: calls.append(("score", search, value)) or value.tracks,
+    )
+    selections = iter((first, selected))
+    monkeypatch.setattr(
+        run_module,
+        "select_analogy",
+        lambda scored: calls.append(("select", scored)) or next(selections),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "initialize_search",
+        lambda *_args, **_kwargs: FakeSearch(),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "generate_and_score_tactics_with_model_policy",
+        lambda search: object(),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "submit_tactics_to_lean",
+        lambda proof, tactics: object(),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "update_search_with_scored_proof_states",
+        lambda search, result: calls.append(("update_search", result)),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "update_analogies",
+        lambda search, value: calls.append(("update_analogies", value)) or value,
+    )
+    monkeypatch.setattr(
+        run_module,
+        "activate_analogy",
+        lambda search, track: calls.append(("activate", track)),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "generate_analogy_rescue",
+        lambda search, scratchpad: calls.append(("rescue", scratchpad))
+        or object(),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "submit_analogy_rescue_to_lean",
+        lambda proof, rescue: calls.append(("submit_rescue", rescue))
+        or "verified",
+    )
+    config = load_config(ROOT / "config.yaml")
+    config = replace(config, run=replace(config.run, output_dir=tmp_path))
+    problem = Problem("p", "demo", "", "P", "test", "test", "atom", 1)
+
+    run_analogy_assisted(config, (problem,), object(), object())
+
+    lifecycle = {
+        "update_analogies",
+        "score",
+        "select",
+        "activate",
+        "rescue",
+        "submit_rescue",
+    }
+    stuck_calls = [name for name, *_ in calls if name in lifecycle]
+    assert stuck_calls[-6:] == [
+        "update_analogies",
+        "score",
+        "select",
+        "activate",
+        "rescue",
+        "submit_rescue",
+    ]
+    assert ("activate", selected) in calls
+    assert ("rescue", selected.scratchpad) in calls
+    assert len([item for item in calls if item[0] == "submit_rescue"]) == 1
 
 
 def test_solve_artifact_uses_summary_key(tmp_path, monkeypatch) -> None:

@@ -96,7 +96,7 @@ class AnalogyGenerationAttempt(GenerationAttempt):
     prediction_label: PredictionLabel | None = None
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        GenerationAttempt.__post_init__(self)
         if self.prediction_label is not None and not isinstance(
             self.prediction_label, PredictionLabel
         ):

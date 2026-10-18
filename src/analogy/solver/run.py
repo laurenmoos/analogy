@@ -16,7 +16,11 @@ from .analogy.rescue import (
 )
 from .analogy.state import initialize_analogy_scratchpad, update_analogy
 from .episode import update_search
-from .model_policy import generate_tactics_with_model_policy, initialize_model_policy
+from .model_policy import (
+    generate_tactics_with_model_policy,
+    initialize_model_policy,
+    initialize_model_protocol,
+)
 from .proof.adapter import initialize_proof, submit_tactics_to_lean
 from .report import (
     SolveRunRecord,
@@ -39,6 +43,7 @@ def run_vanilla(
 ) -> SolveRunRecord:
     """Run the ordinary model-policy and Lean search recipe."""
 
+    initialize_model_protocol(config)
     run_state = start_run(config, checkpoint)
 
     for problem in problems:
@@ -79,6 +84,7 @@ def run_analogy_assisted(
 ) -> SolveRunRecord:
     """Run the ordinary recipe with analogy rescue at stuck states."""
 
+    initialize_model_protocol(config)
     run_state = start_run(config, checkpoint)
 
     for problem in problems:

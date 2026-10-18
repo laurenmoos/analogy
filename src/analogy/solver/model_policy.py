@@ -308,7 +308,6 @@ def initialize_model_policy(
 ) -> TacticRanker:
     """Create the ordinary tactic policy used by one problem search."""
 
-    configure_prompt_catalog(config.prompts.path)
     return TacticRanker(
         generator,
         top_k=config.search.top_k,
@@ -317,6 +316,12 @@ def initialize_model_policy(
         trace_sink=model_events.append,
         analogy_scratchpad=analogy_scratchpad,
     )
+
+
+def initialize_model_protocol(config: AppConfig) -> None:
+    """Validate and activate model-facing prompt templates for one run."""
+
+    configure_prompt_catalog(config.prompts.path)
 
 
 def _replacement_repair(

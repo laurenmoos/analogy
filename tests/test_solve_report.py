@@ -3,8 +3,11 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
+from analogy.model.prompts import PromptError
 from analogy.utils.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
 from analogy.solver import run as run_module
 from analogy.solver.report.build import _problem_result, _problem_route
@@ -23,6 +26,25 @@ ROOT = Path(__file__).parents[1]
 def test_run_module_exports_the_two_explicit_recipes() -> None:
     assert "run_vanilla" in run_module.__all__
     assert "run_analogy_assisted" in run_module.__all__
+
+
+@pytest.mark.parametrize("recipe", (run_vanilla, run_analogy_assisted))
+def test_run_recipe_rejects_invalid_prompts_before_creating_artifacts(
+    tmp_path, recipe
+) -> None:
+    config = load_config(ROOT / "config.yaml")
+    output_directory = tmp_path / "output"
+    config = replace(
+        config,
+        prompts=replace(config.prompts, path=tmp_path / "missing-prompts.yaml"),
+        run=replace(config.run, output_dir=output_directory),
+    )
+    problem = Problem("plain", "demo", "", "P", "test", "test", "atom", 1)
+
+    with pytest.raises(PromptError, match="could not be read"):
+        recipe(config, (problem,), object(), object())
+
+    assert not output_directory.exists()
 
 
 def test_vanilla_run_has_no_analogy_state_or_fallback(

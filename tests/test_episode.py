@@ -29,7 +29,7 @@ from analogy.solver.search import (
     WhitespaceTacticCanonicalizer,
     submit_tactics_to_lean,
 )
-from analogy.solver.proof.diversity import DiversityObservation
+from analogy.solver.scoring import DiversityObservation
 from analogy.solver.search import start_search, update_search
 from analogy.solver.model_policy import generate_tactics_with_model_policy
 from analogy.solver.proof.semantic import (

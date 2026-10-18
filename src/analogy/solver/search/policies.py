@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
-from ..proof.diversity import DiversityObservation
+from ..scoring import DiversityObservation
 from ...utils.records import (
     DiscardReason,
     ExpansionOutcome,

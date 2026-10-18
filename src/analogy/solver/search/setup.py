@@ -7,7 +7,7 @@ from ...model.model_provider import TextGenerator
 from ..analogy.rescue import AnalogyFallback
 from ..model_policy import TacticRanker
 from ..proof.adapter import LeanGymAdapter
-from ..proof.diversity import FrozenEmbeddingDiversity
+from ..scoring import FrozenEmbeddingDiversity
 from ..proof.semantic import ExhaustiveSemanticChecker
 from .policies import (
     AcceptNovelState,

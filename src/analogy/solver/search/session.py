@@ -43,6 +43,7 @@ from ..proof.semantic import (
     ForcedMoveEvent,
     forced_disjunction_tactic,
 )
+from ..scoring import search_priority
 from .policies import (
     ProgressPolicy,
     StateFingerprinter,
@@ -104,10 +105,8 @@ class _Frontier:
             observation = self._diversity.observe(node.state)
             novelty = observation.novelty
             self.observations.append(observation)
-        heappush(
-            self._items,
-            (-(node.score - 0.02 * node.depth), -novelty, next(self._order), node),
-        )
+        primary, secondary = search_priority(node, novelty)
+        heappush(self._items, (primary, secondary, next(self._order), node))
 
     def extend(self, nodes: Iterable[SearchNode]) -> None:
         for node in nodes:

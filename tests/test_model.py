@@ -7,8 +7,8 @@ from analogy.model.parser import (
     IncompleteCandidatePool,
     candidate_rejection_reason,
     normalize_lean4_tactic,
-    parse_tactic_candidates,
 )
+from analogy.solver.scoring import parse_scored_tactic_candidates
 from analogy.model.mlx_model import _mlx_import_diagnostic
 
 
@@ -39,7 +39,7 @@ def test_normalize_common_model_syntax_before_lean(source, expected):
 @pytest.mark.parametrize("source", ["tauto", "itauto", "modus_tollens h1 h2"])
 def test_banned_and_unknown_pseudo_tactics_are_filtered(source):
     with pytest.raises(FilteredCandidatePool):
-        parse_tactic_candidates(
+        parse_scored_tactic_candidates(
             json.dumps([{"tactic": source, "score": 1.0}]),
             1,
             proof_state="P : Prop\n⊢ P",
@@ -52,7 +52,7 @@ def test_banned_and_unknown_pseudo_tactics_are_filtered(source):
 )
 def test_compound_banned_incomplete_and_unknown_tactics_are_filtered(source):
     with pytest.raises((FilteredCandidatePool, IncompleteCandidatePool)):
-        parse_tactic_candidates(
+        parse_scored_tactic_candidates(
             json.dumps([{"tactic": source, "score": 1.0}]),
             1,
             proof_state="P Q : Prop\n⊢ P ∨ Q",
@@ -65,7 +65,7 @@ def test_compound_banned_incomplete_and_unknown_tactics_are_filtered(source):
 )
 def test_nested_or_shape_unsafe_continuation_tactics_are_filtered(source):
     with pytest.raises((FilteredCandidatePool, IncompleteCandidatePool)):
-        parse_tactic_candidates(
+        parse_scored_tactic_candidates(
             json.dumps([{"tactic": source, "score": 1.0}]),
             1,
             proof_state="P : Prop\n⊢ P",
@@ -92,7 +92,7 @@ def test_candidate_goal_shape_filter(state, tactic, expected):
 
 def test_candidates_already_tried_at_this_state_are_filtered():
     discarded = []
-    candidates = parse_tactic_candidates(
+    candidates = parse_scored_tactic_candidates(
         json.dumps([
             {"tactic": "rw h", "score": 3.0},
             {"tactic": "exact h", "score": 1.0},
@@ -108,7 +108,7 @@ def test_candidates_already_tried_at_this_state_are_filtered():
 
 
 def test_candidate_normalization_precedes_deduplication_and_weighting():
-    candidates = parse_tactic_candidates(json.dumps([
+    candidates = parse_scored_tactic_candidates(json.dumps([
         {"tactic": "cases h with hp hq", "score": 1.0},
         {"tactic": "cases h", "score": 3.0},
         {"tactic": "exact hp", "score": 1.0},
@@ -221,7 +221,7 @@ h : P ∧ P
 
 def test_state_aware_normalization_precedes_candidate_deduplication():
     state = "H U : Prop\nhB : H ∧ U\n⊢ H"
-    candidates = parse_tactic_candidates(json.dumps([
+    candidates = parse_scored_tactic_candidates(json.dumps([
         {"tactic": "rcases hB with ⟨x,y⟩", "score": 1.0},
         {"tactic": "rcases hB with ⟨hH,hU⟩", "score": 3.0},
     ]), 2, proof_state=state)
@@ -232,7 +232,7 @@ def test_state_aware_normalization_precedes_candidate_deduplication():
 
 
 def test_incomplete_candidates_are_removed_before_top_k_and_scores_are_renormalized():
-    candidates = parse_tactic_candidates(json.dumps([
+    candidates = parse_scored_tactic_candidates(json.dumps([
         {"tactic": "exact", "score": 100.0},
         {"tactic": "rw", "score": 90.0},
         {"tactic": "exact h2", "score": 3.0},
@@ -247,7 +247,7 @@ def test_incomplete_candidates_are_removed_before_top_k_and_scores_are_renormali
 
 def test_all_incomplete_candidates_raise_a_typed_repairable_error():
     with pytest.raises(IncompleteCandidatePool, match="exact, apply, rw"):
-        parse_tactic_candidates(json.dumps([
+        parse_scored_tactic_candidates(json.dumps([
             {"tactic": "exact", "score": 3.0},
             {"tactic": "apply", "score": 2.0},
             {"tactic": "rw", "score": 1.0},
@@ -259,7 +259,7 @@ def test_all_incomplete_candidates_raise_a_typed_repairable_error():
     "cases h",
 ])
 def test_complete_standalone_and_suggestion_tactics_remain_eligible(tactic):
-    candidates = parse_tactic_candidates(
+    candidates = parse_scored_tactic_candidates(
         json.dumps([{"tactic": tactic, "score": 1.0}]),
         1,
     )

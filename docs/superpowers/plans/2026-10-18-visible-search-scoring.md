@@ -54,14 +54,14 @@
 - Consumes: model-generated candidate JSON, `TacticCandidate`, `SymbolicState`, `Embedding`, and `SearchNode`.
 - Produces: `parse_scored_tactic_candidates(...)`, `normalize_tactic_scores(...)`, `DiversityObservation`, `FrozenEmbeddingDiversity.observe(...)`, and `search_priority(node, novelty)` through `analogy.solver.scoring`.
 
-- [ ] Add failing scoring tests that pin raw-weight validation and normalization, candidate ordering, cosine novelty caching, and the exact frontier priority tuple.
-- [ ] Run `uv run pytest tests/test_scoring.py tests/test_model.py tests/test_episode.py -q` and confirm the new imports or functions fail.
-- [ ] Move tactic candidate score parsing from `model/parser.py` to `scoring/tactics.py`; normalize once per generated response and again after retry pools merge, matching current values exactly.
-- [ ] Move proof-state diversity records and calculation to `scoring/proof_states.py` without changing rendering, caching, neighbor ordering, or cosine bounds.
-- [ ] Move the frontier score formula to `scoring/priority.py` and call it from the search frontier without changing heap ordering.
-- [ ] Update production and test imports, remove `proof/diversity.py` and `test_state_diversity.py`, and export the scoring facade.
-- [ ] Run the focused scoring, model, episode, rescue, reporting, and dependency tests and confirm they pass.
-- [ ] Commit the scoring package migration directly to `main`.
+- [x] Add failing scoring tests that pin raw-weight validation and normalization, candidate ordering, cosine novelty caching, and the exact frontier priority tuple.
+- [x] Run `uv run pytest tests/test_scoring.py tests/test_model.py tests/test_episode.py -q` and confirm the new imports or functions fail.
+- [x] Move tactic candidate score parsing from `model/parser.py` to `scoring/tactics.py`; normalize once per generated response and again after retry pools merge, matching current values exactly.
+- [x] Move proof-state diversity records and calculation to `scoring/proof_states.py` without changing rendering, caching, neighbor ordering, or cosine bounds.
+- [x] Move the frontier score formula to `scoring/priority.py` and call it from the search frontier without changing heap ordering.
+- [x] Update production and test imports, remove `proof/diversity.py` and `test_state_diversity.py`, and export the scoring facade.
+- [x] Run the focused scoring, model, episode, rescue, reporting, and dependency tests and confirm they pass.
+- [x] Commit the scoring package migration directly to `main`.
 
 ### Task 2: Make scored operations visible in both run recipes
 

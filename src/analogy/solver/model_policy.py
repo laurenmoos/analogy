@@ -13,7 +13,6 @@ from ..model.parser import (
     IncompleteCandidatePool,
     ModelOutputError,
     normalize_lean4_tactic,
-    parse_tactic_candidates,
 )
 from ..model.prompt_runner import PromptRunner
 from ..model.prompts import (
@@ -34,6 +33,7 @@ from .analogy.state import (
     AnalogyState,
     AnalogyStateError,
 )
+from .scoring import normalize_tactic_scores, parse_scored_tactic_candidates
 
 if TYPE_CHECKING:
     from .search import SearchSession, TacticBatch
@@ -143,11 +143,7 @@ class TacticRanker:
 
         candidates = tuple(accepted.values())[: self._top_k]
         if candidates:
-            total = sum(item.score for item in candidates)
-            value = tuple(
-                TacticCandidate(item.source, item.score / total, CandidateOrigin.ORDINARY)
-                for item in candidates
-            )
+            value = normalize_tactic_scores(candidates)
             error = None
         else:
             value = None
@@ -231,7 +227,7 @@ class TacticRanker:
                 raise ModelOutputError(
                     "analogy block must remain unchanged during ordinary search"
                 )
-        candidates = parse_tactic_candidates(
+        candidates = parse_scored_tactic_candidates(
             payload,
             self._top_k,
             discarded_candidates=discarded_candidates,

@@ -1,4 +1,4 @@
-"""Semantic novelty for Lean proof states using the frozen base model."""
+"""Embedding-based novelty scoring for accepted Lean proof states."""
 
 from __future__ import annotations
 
@@ -24,7 +24,11 @@ class FrozenEmbeddingDiversity:
     def __init__(self, generator: Any, *, layer: int, neighbors: int = 3) -> None:
         if isinstance(layer, bool) or not isinstance(layer, int):
             raise ValueError("layer must be an integer")
-        if isinstance(neighbors, bool) or not isinstance(neighbors, int) or neighbors <= 0:
+        if (
+            isinstance(neighbors, bool)
+            or not isinstance(neighbors, int)
+            or neighbors <= 0
+        ):
             raise ValueError("neighbors must be a positive integer")
         self._generator = generator
         self._layer = layer

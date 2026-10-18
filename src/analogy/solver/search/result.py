@@ -12,7 +12,7 @@ from ...utils.records import (
     _typed_tuple,
 )
 from ..analogy.rescue import RescueRollout
-from ..proof.diversity import DiversityObservation
+from ..scoring import DiversityObservation
 from ..proof.semantic import ForcedMoveEvent, SemanticPrune, SemanticRecoveryEvent
 
 

@@ -15,7 +15,6 @@ from .analogy.rescue import (
     submit_analogy_rescue_to_lean,
 )
 from .analogy.state import initialize_analogy_scratchpad, update_analogy
-from .episode import update_search
 from .model_policy import (
     generate_tactics_with_model_policy,
     initialize_model_policy,
@@ -30,7 +29,7 @@ from .report import (
     write_problem_record,
     write_run_record,
 )
-from .search_setup import initialize_search
+from .search import initialize_search, update_search
 
 
 def run_vanilla(

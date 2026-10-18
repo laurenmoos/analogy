@@ -1,4 +1,4 @@
-"""Incremental state transitions for one proof-search episode."""
+"""Incremental state transitions for one proof-search session."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from heapq import heappop, heappush
 from itertools import count
 from typing import Iterable
 
-from ..utils.records import (
+from ...utils.records import (
     CancellationToken,
     CandidateOrigin,
     DiscardReason,
@@ -23,7 +23,7 @@ from ..utils.records import (
     TacticResult,
     TacticStatus,
 )
-from .analogy.rescue import (
+from ..analogy.rescue import (
     AnalogyRescueResult,
     AnalogyRescueOutcome,
     AnalogyRescueRunner,
@@ -31,7 +31,7 @@ from .analogy.rescue import (
     RescueTermination,
     TacticEvaluation,
 )
-from .proof.semantic import (
+from ..proof.semantic import (
     SemanticAssessment,
     SemanticCheckError,
     SemanticChecker,
@@ -42,14 +42,14 @@ from .proof.semantic import (
     ForcedMoveEvent,
     forced_disjunction_tactic,
 )
-from .search import (
+from .policies import (
     ProgressPolicy,
-    SearchResult,
     StateFingerprinter,
     StateDiversity,
     StucknessPolicy,
     TacticRanker,
 )
+from .result import SearchResult
 
 
 @dataclass(frozen=True, slots=True)

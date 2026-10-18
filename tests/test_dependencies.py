@@ -37,6 +37,13 @@ def test_retired_execution_packages_are_absent():
     assert report_spec is not None
     assert report_spec.submodule_search_locations is not None
     assert _find_spec_or_none("analogy.solver.run_records") is None
+    search_spec = _find_spec_or_none("analogy.solver.search")
+    assert search_spec is not None
+    assert search_spec.submodule_search_locations is not None
+    for module in ("policies", "result", "session", "setup"):
+        assert _find_spec_or_none(f"analogy.solver.search.{module}") is not None
+    assert _find_spec_or_none("analogy.solver.episode") is None
+    assert _find_spec_or_none("analogy.solver.search_setup") is None
 
 
 def test_no_secondary_runtime_entry_points_exist():
@@ -82,7 +89,7 @@ def test_run_module_contains_only_two_visible_recipes():
 def test_live_solver_types_do_not_expose_retired_hooks() -> None:
     from analogy.solver.analogy import rescue
     from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
-    from analogy.solver.episode import EpisodeContext
+    from analogy.solver.search import EpisodeContext
     from analogy.solver.model_policy import TacticRanker
     from analogy.solver.proof.adapter import LeanGymAdapter
 

@@ -54,7 +54,7 @@ from .state import (
 )
 
 if TYPE_CHECKING:
-    from ..episode import SearchSession
+    from ..search import SearchSession
     from ..proof.adapter import TacticSubmitter
 
 

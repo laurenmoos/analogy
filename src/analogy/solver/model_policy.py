@@ -36,7 +36,7 @@ from .analogy.state import (
 )
 
 if TYPE_CHECKING:
-    from .episode import SearchSession, TacticBatch
+    from .search import SearchSession, TacticBatch
     from .proof.adapter import LeanGymAdapter
 
 class TacticRankingError(RuntimeError):

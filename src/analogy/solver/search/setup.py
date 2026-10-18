@@ -1,22 +1,22 @@
-"""Construction of one configured solver search session."""
+"""Construction of one configured proof-search session."""
 
 from __future__ import annotations
 
-from ..config import AppConfig
-from ..model.model_provider import TextGenerator
-from .analogy.rescue import AnalogyFallback
-from .episode import EpisodeContext, SearchSession, start_search
-from .model_policy import TacticRanker
-from .proof.adapter import LeanGymAdapter
-from .proof.diversity import FrozenEmbeddingDiversity
-from .proof.semantic import ExhaustiveSemanticChecker
-from .search import (
+from ...config import AppConfig
+from ...model.model_provider import TextGenerator
+from ..analogy.rescue import AnalogyFallback
+from ..model_policy import TacticRanker
+from ..proof.adapter import LeanGymAdapter
+from ..proof.diversity import FrozenEmbeddingDiversity
+from ..proof.semantic import ExhaustiveSemanticChecker
+from .policies import (
     AcceptNovelState,
     CanonicalStateFingerprinter,
     NeverCancelled,
     ObservableStucknessPolicy,
     WhitespaceTacticCanonicalizer,
 )
+from .session import EpisodeContext, SearchSession, start_search
 
 
 def initialize_search(

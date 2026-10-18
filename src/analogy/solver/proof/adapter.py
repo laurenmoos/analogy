@@ -15,7 +15,7 @@ from ...lean_gym.verifier import Verifier
 from ...utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
 
 if TYPE_CHECKING:
-    from ..episode import TacticBatch, TacticBatchResult
+    from ..search import TacticBatch, TacticBatchResult
 
 
 _MAX_FAILURE_FEEDBACK = 8
@@ -191,7 +191,7 @@ def submit_tactics_to_lean(
 ) -> TacticBatchResult:
     """Submit one generated batch to Lean without mutating search state."""
 
-    from ..episode import TacticBatchResult
+    from ..search import TacticBatchResult
 
     results = tuple(
         proof.run_tactic(tactics.node.state, candidate)

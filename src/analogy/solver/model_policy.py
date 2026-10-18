@@ -23,11 +23,15 @@ from ..model.prompts import (
     render_lean_goal_for_model,
 )
 from ..utils.records import CandidateOrigin, Message, TacticCandidate
+from .analogy.protocol import (
+    extract_analogy_block,
+    record_model_history,
+    render_analogy_state,
+)
 from .analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,
-    extract_analogy_block,
 )
 
 if TYPE_CHECKING:
@@ -201,7 +205,9 @@ class TacticRanker:
             )
         if scratchpad.current is None:
             return messages[0], user
-        return messages[0], Message("system", scratchpad.current.render()), user
+        return messages[0], Message(
+            "system", render_analogy_state(scratchpad.current)
+        ), user
 
     def _parse_output(
         self,
@@ -238,9 +244,9 @@ class TacticRanker:
                     scratchpad.initialize(analogy)
                 except AnalogyStateError as error:
                     raise ModelOutputError(str(error)) from error
-            scratchpad.record_history(payload)
+            record_model_history(scratchpad, payload)
         elif scratchpad is not None:
-            scratchpad.record_history(payload)
+            record_model_history(scratchpad, payload)
         return candidates
 
 

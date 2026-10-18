@@ -39,13 +39,18 @@ from ..proof.semantic import (
     render_countermodel_table,
     render_semantic_guidance,
 )
+from .protocol import (
+    extract_analogy_block,
+    record_model_history,
+    remove_analogy_blocks,
+    render_analogy_state,
+    render_scratchpad_context,
+)
 from .state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,
     AnalogyUpdateAction,
-    extract_analogy_block,
-    remove_analogy_blocks,
 )
 
 if TYPE_CHECKING:
@@ -442,7 +447,7 @@ class AnalogyFallback:
             )
         messages = (
             messages[0],
-            Message("system", scratchpad.context_block()),
+            Message("system", render_scratchpad_context(scratchpad)),
             user,
         )
         active_messages = messages
@@ -468,7 +473,7 @@ class AnalogyFallback:
                     scratchpad.validate_transition(update_action, update_state)
                 except AnalogyStateError as error:
                     raise RescueOutputError(str(error)) from error
-                analogy = update_state.render()
+                analogy = render_analogy_state(update_state)
                 if proposal.candidate.source in attempted_tactics:
                     diagnostic = (
                         f"tactic {proposal.candidate.source!r} was already attempted "
@@ -607,7 +612,9 @@ class AnalogyFallback:
                 else RescueTermination.EXHAUSTED
             )
             rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, (proposal,), (attempt,), termination, generations=(generation,), analogy_trace=analogy))
-            scratchpad.record_history(_result_feedback(evaluation.result))
+            record_model_history(
+                scratchpad, _result_feedback(evaluation.result)
+            )
             if (
                 evaluation.completed_proof is not None
                 or evaluation.successor is not None

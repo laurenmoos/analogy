@@ -22,6 +22,10 @@ from analogy.solver.analogy.rescue import (
     TacticEvaluation,
     _analogy_correction_feedback,
 )
+from analogy.solver.analogy.protocol import (
+    render_analogy_state,
+    render_scratchpad_context,
+)
 from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
 from analogy.solver.search import NeverCancelled
 from analogy.solver.proof.semantic import (
@@ -59,11 +63,13 @@ def _search(
                 return raw
             if set(payload) != {"analogy", "predicted_state", "tactic"}:
                 return raw
-            analogy = AnalogyState(
-                payload["analogy"],
-                ("proof state -> analogous situation",),
-                ("Apply the analogous step.",),
-            ).render()
+            analogy = render_analogy_state(
+                AnalogyState(
+                    payload["analogy"],
+                    ("proof state -> analogous situation",),
+                    ("Apply the analogous step.",),
+                )
+            )
             return analogy + "\n" + json.dumps(
                 {
                     "action": "change_domain",
@@ -91,7 +97,9 @@ def _search(
 
 
 def _block(domain, mapping, steps, abandoned=()):
-    return AnalogyState(domain, tuple(mapping), tuple(steps), tuple(abandoned)).render()
+    return render_analogy_state(
+        AnalogyState(domain, tuple(mapping), tuple(steps), tuple(abandoned))
+    )
 
 
 def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():
@@ -101,7 +109,7 @@ def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():
 
     class Generator:
         def generate(self, messages, *, seed):
-            assert messages[1].content == initial.render()
+            assert messages[1].content == render_analogy_state(initial)
             return _block(
                 "locksmithing", ("P -> lock",), ("Turn the matching key.",)
             ) + '\n{"action":"revise_steps","predicted_state":"h : P\\n⊢ P","tactic":"intro h"}'
@@ -159,7 +167,10 @@ def test_countermodel_forces_destruction_and_rejects_step_revision():
 
     class Generator:
         def generate(self, messages, *, seed):
-            assert all(initial.render() not in message.content for message in messages)
+            assert all(
+                render_analogy_state(initial) not in message.content
+                for message in messages
+            )
             assert any("locksmithing" in message.content for message in messages)
             return """<analogy>
 domain: locksmithing
@@ -182,7 +193,7 @@ abandoned domains:
 
     assert outcome.completed_proof is None
     assert scratchpad.current is None
-    assert "- locksmithing" in scratchpad.context_block()
+    assert "- locksmithing" in render_scratchpad_context(scratchpad)
     assert outcome.rollouts[0].termination is RescueTermination.INVALID_OUTPUT
 
 
@@ -270,9 +281,9 @@ def test_update_repair_prompt_strips_previous_block_and_uses_action_schema():
         def generate(self, messages, *, seed):
             calls.append(messages)
             if len(calls) == 1:
-                return current.render() + "\nnot json"
+                return render_analogy_state(current) + "\nnot json"
             feedback = messages[-1].content
-            assert current.render() not in feedback
+            assert render_analogy_state(current) not in feedback
             assert feedback.count("<analogy>") == 1
             assert '"action", "predicted_state", and "tactic"' in feedback
             assert '"analogy", "predicted_state"' not in feedback

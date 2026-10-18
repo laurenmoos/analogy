@@ -7,6 +7,7 @@ import pytest
 from analogy.config import load_config
 from analogy.model import model_provider
 from analogy.solver.model_policy import TacticRanker, TacticRankingError
+from analogy.solver.analogy.protocol import render_analogy_state
 from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
 from analogy.model.prompts import configure_prompt_catalog
 
@@ -206,7 +207,7 @@ def test_enabled_ranker_injects_current_block_and_rejects_ordinary_mutation():
             calls.append(messages)
             assert messages[0].role == "system"
             assert messages[1].role == "system"
-            assert messages[1].content == current.render()
+            assert messages[1].content == render_analogy_state(current)
             assert messages[2].role == "user"
             if len(calls) == 1:
                 return """<analogy>
@@ -219,7 +220,7 @@ abandoned domains:
 - (none)
 </analogy>
 [{"tactic":"exact h","score":1}]"""
-            return current.render() + '\n[{"tactic":"exact h","score":1}]'
+            return render_analogy_state(current) + '\n[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
     ranker = _ranker(
@@ -286,13 +287,13 @@ def test_enabled_partial_candidate_repair_refreshes_current_block_and_contract()
         def generate(self, messages, *, seed):
             calls.append(messages)
             if len(calls) == 1:
-                return state.render() + (
+                return render_analogy_state(state) + (
                     '\n[{"tactic":"exact h","score":2},'
                     '{"tactic":"left","score":1}]'
                 )
-            assert messages[1].content == state.render()
+            assert messages[1].content == render_analogy_state(state)
             assert "<analogy> block" in messages[-1].content
-            return state.render() + '\n[{"tactic":"assumption","score":1}]'
+            return render_analogy_state(state) + '\n[{"tactic":"assumption","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
     candidates = _ranker(

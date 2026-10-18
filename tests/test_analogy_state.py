@@ -4,12 +4,17 @@ import pytest
 
 from analogy.model import prompts as prompts_module
 from analogy.model.prompts import PromptCatalog
+from analogy.solver.analogy.protocol import (
+    extract_analogy_block,
+    record_model_history,
+    render_analogy_state,
+    render_scratchpad_context,
+)
 from analogy.solver.analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,
     AnalogyUpdateAction,
-    extract_analogy_block,
 )
 
 
@@ -20,8 +25,8 @@ LOCK = AnalogyState(
 )
 
 
-def test_state_renders_one_canonical_tagged_block() -> None:
-    assert LOCK.render() == """<analogy>
+def test_protocol_renders_one_canonical_tagged_block() -> None:
+    assert render_analogy_state(LOCK) == """<analogy>
 domain: locksmithing
 mapping:
 - P -> locked door
@@ -35,7 +40,7 @@ abandoned domains:
 
 
 def test_extract_removes_exactly_one_block_and_leaves_tactic_payload() -> None:
-    text = f"preface\n{LOCK.render()}\n[{{\"tactic\": \"exact h\", \"score\": 1}}]"
+    text = f"preface\n{render_analogy_state(LOCK)}\n[{{\"tactic\": \"exact h\", \"score\": 1}}]"
 
     state, payload = extract_analogy_block(text)
 
@@ -48,7 +53,10 @@ def test_extract_removes_exactly_one_block_and_leaves_tactic_payload() -> None:
     "text, message",
     [
         ("no block", "exactly one"),
-        (f"{LOCK.render()}\n{LOCK.render()}", "exactly one"),
+        (
+            f"{render_analogy_state(LOCK)}\n{render_analogy_state(LOCK)}",
+            "exactly one",
+        ),
         ("<analogy>\ndomain: x\n</analogy>", "mapping"),
         (
             """<analogy>
@@ -121,7 +129,7 @@ def test_forced_abandonment_destroys_active_state_but_keeps_domain_ledger() -> N
     scratchpad.abandon_current()
 
     assert scratchpad.current is None
-    assert "- locksmithing" in scratchpad.context_block()
+    assert "- locksmithing" in render_scratchpad_context(scratchpad)
     assert scratchpad.pending_rebuild is True
     with pytest.raises(AnalogyStateError, match="active analogy"):
         scratchpad.apply(
@@ -163,9 +171,9 @@ def test_pending_rebuild_blocks_initialization_until_change_domain_is_applied() 
 
 def test_history_is_bounded_and_never_contains_analogy_blocks() -> None:
     scratchpad = AnalogyScratchpad(LOCK, history_limit=2)
-    scratchpad.record_history(f"first\n{LOCK.render()}")
-    scratchpad.record_history("second: Lean rejected")
-    scratchpad.record_history("third: Lean accepted")
+    record_model_history(scratchpad, f"first\n{render_analogy_state(LOCK)}")
+    record_model_history(scratchpad, "second: Lean rejected")
+    record_model_history(scratchpad, "third: Lean accepted")
 
     assert scratchpad.history == (
         "second: Lean rejected",
@@ -190,4 +198,4 @@ def test_pending_context_wording_comes_from_prompt_catalog(tmp_path, monkeypatch
         PromptCatalog.load(path),
     )
 
-    assert AnalogyScratchpad().context_block() == "CUSTOM - (none)"
+    assert render_scratchpad_context(AnalogyScratchpad()) == "CUSTOM - (none)"

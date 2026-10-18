@@ -32,6 +32,7 @@ def test_retired_execution_packages_are_absent():
     assert _find_spec_or_none("analogy.solver.proof.inventory") is None
     assert _find_spec_or_none("analogy.solver.proof.syntax") is not None
     assert _find_spec_or_none("analogy.solver.proof.state") is not None
+    assert _find_spec_or_none("analogy.solver.analogy.protocol") is not None
 
 
 def test_no_secondary_runtime_entry_points_exist():
@@ -76,7 +77,7 @@ def test_run_module_contains_only_two_visible_recipes():
 
 def test_live_solver_types_do_not_expose_retired_hooks() -> None:
     from analogy.solver.analogy import rescue
-    from analogy.solver.analogy.state import AnalogyScratchpad
+    from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
     from analogy.solver.episode import EpisodeContext
     from analogy.solver.model_policy import TacticRanker
     from analogy.solver.proof.adapter import LeanGymAdapter
@@ -90,6 +91,7 @@ def test_live_solver_types_do_not_expose_retired_hooks() -> None:
     assert "tolerate_failure" not in ranker_parameters
     assert ranker_parameters["failed_tactics_for"].default is inspect.Parameter.empty
     assert ranker_parameters["trace_sink"].default is inspect.Parameter.empty
-    assert not hasattr(AnalogyScratchpad, "abandoned_domains")
+    assert not hasattr(AnalogyScratchpad, "context_block")
+    assert not hasattr(AnalogyState, "render")
     assert not hasattr(rescue, "parse_analogy_tactic")
     assert not hasattr(rescue, "PolicyActionRecord")

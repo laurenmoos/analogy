@@ -99,3 +99,33 @@ def test_live_solver_types_do_not_expose_retired_hooks() -> None:
     assert not hasattr(AnalogyState, "render")
     assert not hasattr(rescue, "parse_analogy_tactic")
     assert not hasattr(rescue, "PolicyActionRecord")
+
+
+def test_computational_state_is_separate_from_report_presentation() -> None:
+    from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
+    from analogy.solver.report.records import (
+        ProblemRunRecord,
+        RunState,
+        SolveRunRecord,
+    )
+
+    tree = ast.parse(
+        (PACKAGE / "solver" / "analogy" / "state.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    imported_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert "model.prompts" not in imported_modules
+    assert not any(module.endswith("model.prompts") for module in imported_modules)
+    assert not hasattr(AnalogyState, "render")
+    assert not hasattr(AnalogyScratchpad, "context_block")
+    for record_type in (ProblemRunRecord, RunState, SolveRunRecord):
+        assert not any(
+            name.startswith(("render", "write"))
+            for name in vars(record_type)
+        )

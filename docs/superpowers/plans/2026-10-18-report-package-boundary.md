@@ -43,11 +43,11 @@
 - Consumes: `AnalogyState` and `AnalogyScratchpad` from `analogy.state`.
 - Produces: `render_analogy_state(state) -> str`, `extract_analogy_block(text) -> tuple[AnalogyState, str]`, `remove_analogy_blocks(text) -> str`, `render_scratchpad_context(scratchpad) -> str`, and `record_model_history(scratchpad, text) -> None`.
 
-- [ ] Add dependency assertions that `AnalogyState` has no `render` method, `AnalogyScratchpad` has no `context_block` method, and `analogy.protocol` is importable.
-- [ ] Run the new assertion and confirm it fails against the current state classes.
-- [ ] Move block regexes, parsing, rendering, prompt context, and history sanitization into `analogy/protocol.py`; leave validation and lifecycle mutation in `state.py`.
-- [ ] Update model-policy, rescue, and tests to use the protocol functions.
-- [ ] Run analogy state, model-policy, rescue, prompt, and dependency tests and confirm they pass.
+- [x] Add dependency assertions that `AnalogyState` has no `render` method, `AnalogyScratchpad` has no `context_block` method, and `analogy.protocol` is importable.
+- [x] Run the new assertion and confirm it fails against the current state classes.
+- [x] Move block regexes, parsing, rendering, prompt context, and history sanitization into `analogy/protocol.py`; leave validation and lifecycle mutation in `state.py`.
+- [x] Update model-policy, rescue, and tests to use the protocol functions.
+- [x] Run analogy state, model-policy, rescue, prompt, and dependency tests and confirm they pass.
 
 ### Task 2: Create the report package
 
@@ -70,14 +70,14 @@
 - Consumes: `SearchResult`, `Problem`, `AppConfig`, `Checkpoint`, and structured model events.
 - Produces: the five-function public facade used by `run.py`, report record classes, `render_problem_trace(...) -> str`, `render_run_report(run, traces) -> str`, and `render_cli_report(run) -> str`.
 
-- [ ] Add dependency tests asserting `analogy.solver.report` is a package and the retired `analogy.solver.run_records` module is absent.
-- [ ] Run those assertions and confirm they fail against the current module layout.
-- [ ] Move record data classes without adding rendering or filesystem methods.
-- [ ] Move search-to-record conversion into `build.py`, pure string rendering into `render.py`, and output/checkpoint effects into `storage.py`.
-- [ ] Move prompt-catalog configuration from run storage into model-policy initialization so report storage has no model-protocol side effect.
-- [ ] Update the two recipes and CLI to import the report facade; move CLI summary rendering into `report.render`.
-- [ ] Update report and CLI tests while preserving exact output assertions.
-- [ ] Run report, CLI, run-recipe, runtime, and dependency tests and confirm they pass.
+- [x] Add dependency tests asserting `analogy.solver.report` is a package and the retired `analogy.solver.run_records` module is absent.
+- [x] Run those assertions and confirm they fail against the current module layout.
+- [x] Move record data classes without adding rendering or filesystem methods.
+- [x] Move search-to-record conversion into `build.py`, pure string rendering into `render.py`, and output/checkpoint effects into `storage.py`.
+- [x] Move prompt-catalog configuration from run storage into model-policy initialization so report storage has no model-protocol side effect.
+- [x] Update the two recipes and CLI to import the report facade; move CLI summary rendering into `report.render`.
+- [x] Update report and CLI tests while preserving exact output assertions.
+- [x] Run report, CLI, run-recipe, runtime, and dependency tests and confirm they pass.
 
 ### Task 3: Verify the boundary and behavior
 
@@ -88,8 +88,8 @@
 - Consumes: the completed analogy protocol and report package.
 - Produces: architecture assertions preventing presentation logic from returning to computational state modules.
 
-- [ ] Add an AST/import assertion that `analogy/state.py` does not import prompt templates and report record classes expose no rendering or writing methods.
-- [ ] Run the architecture test and confirm it passes.
-- [ ] Run the full test suite and confirm all tests pass.
-- [ ] Run `git diff --check` and inspect the complete diff against both run recipes.
-- [ ] Commit the refactor directly to `main`, excluding `docs/paper/`.
+- [x] Add an AST/import assertion that `analogy/state.py` does not import prompt templates and report record classes expose no rendering or writing methods.
+- [x] Run the architecture test and confirm it passes.
+- [x] Run the full test suite and confirm all tests pass.
+- [x] Run `git diff --check` and inspect the complete diff against both run recipes.
+- [x] Commit the refactor directly to `main`, excluding `docs/paper/`.

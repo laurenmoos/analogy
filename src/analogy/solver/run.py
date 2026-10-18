@@ -42,7 +42,9 @@ from .search import (
 
 
 @dataclass(frozen=True, slots=True)
-class SolveRun:
+class SolveRunRecord:
+    """Stored metadata and results from one completed solve invocation."""
+
     run_id: str
     analogy_enabled: bool
     summary: SolveSummary
@@ -461,7 +463,7 @@ def solve_problems(
     verifier: Verifier,
     *,
     checkpoint: Checkpoint | None = None,
-) -> SolveRun:
+) -> SolveRunRecord:
     configure_prompt_catalog(config.prompts.path)
     started = time.monotonic()
     run_id = uuid.uuid4().hex
@@ -475,7 +477,7 @@ def solve_problems(
         run_directory=run_directory,
         checkpoint=checkpoint,
     )
-    run = SolveRun(
+    run = SolveRunRecord(
         run_id,
         config.analogy.enabled,
         summary,
@@ -516,4 +518,4 @@ def solve_problems(
     return run
 
 
-__all__ = ["SolveRun", "render_problem_trace", "solve_problems"]
+__all__ = ["SolveRunRecord", "render_problem_trace", "solve_problems"]

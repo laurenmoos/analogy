@@ -10,10 +10,10 @@ from pathlib import Path
 from .config import ConfigError
 from .model.model_provider import ModelConfigurationError
 from .runtime import get_runtime
-from .solver.run import SolveRun, solve_problems
+from .solver.run import SolveRunRecord, solve_problems
 
 
-def render_report(run: SolveRun) -> str:
+def render_report(run: SolveRunRecord) -> str:
     """Render one runtime invocation."""
 
     lines: list[str] = []

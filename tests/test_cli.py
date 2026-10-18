@@ -8,7 +8,7 @@ from analogy.config import load_config
 from analogy.utils.records import ProblemResult, SolveSummary, SolveStatus
 from analogy.runtime import with_analogy_enabled
 from analogy.solver import run as run_module
-from analogy.solver.run import SolveRun
+from analogy.solver.run import SolveRunRecord
 
 
 ROOT = Path(__file__).parents[1]
@@ -73,7 +73,7 @@ def test_report_describes_one_runtime_run():
         ),
         1.5,
     )
-    run = SolveRun("run-1", True, summary, 1.5, Path("/tmp/run-1"))
+    run = SolveRunRecord("run-1", True, summary, 1.5, Path("/tmp/run-1"))
 
     assert render_report(run) == (
         "COMPLETE easy: lean_calls=1, analogy_fallbacks=0\n"
@@ -88,7 +88,7 @@ def test_report_names_semantic_failure_distinctly():
         (_result("false-root", SolveStatus.SEMANTIC_FAILURE),),
         0.2,
     )
-    run = SolveRun("run-2", True, summary, 0.2, Path("/tmp/run-2"))
+    run = SolveRunRecord("run-2", True, summary, 0.2, Path("/tmp/run-2"))
 
     assert render_report(run).startswith(
         "SEMANTIC_FAILURE false-root: lean_calls=1, analogy_fallbacks=0"

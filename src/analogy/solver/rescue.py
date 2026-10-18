@@ -19,7 +19,7 @@ from ..model.prompts import (
     prompt_catalog,
     render_lean_goal_for_model,
 )
-from ..records import (
+from ..utils.records import (
     CancellationToken,
     CandidateOrigin,
     DiscardedSuccessor,

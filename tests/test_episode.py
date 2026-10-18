@@ -1,4 +1,4 @@
-from analogy.records import (
+from analogy.utils.records import (
     CandidateOrigin,
     SearchStatus,
     SymbolicState,

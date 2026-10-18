@@ -1,6 +1,6 @@
 import pytest
 
-from analogy.records import Embedding, SymbolicState
+from analogy.utils.records import Embedding, SymbolicState
 from analogy.solver.diversity import FrozenEmbeddingDiversity
 
 

@@ -7,7 +7,7 @@ import pytest
 
 from analogy.solver.proof_inventory import InventoryError, InventoryKind, build_local_inventory
 from analogy.solver.proof_views import ProofStructure
-from analogy.records import SymbolicState
+from analogy.utils.records import SymbolicState
 from analogy.solver.replay import proof_state_fingerprint
 
 

@@ -16,7 +16,7 @@ from ..model.prompts import configure_prompt_catalog
 from ..lean_gym.models import Problem
 from ..lean_gym.verifier import Verifier
 from ..problem_index import ProblemIndex
-from ..records import (
+from ..utils.records import (
     DiscardReason,
     ProblemResult,
     SolveSummary,

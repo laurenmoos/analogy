@@ -11,7 +11,7 @@ from importlib import import_module
 from typing import Any, Protocol
 
 from ..config import ModelConfig
-from ..records import Embedding, Message
+from ..utils.records import Embedding, Message
 
 
 class ModelConfigurationError(ValueError):

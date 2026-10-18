@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .proof_views import ProofStructure
-from ..records import SymbolicState
+from ..utils.records import SymbolicState
 from .replay import proof_state_fingerprint
 
 

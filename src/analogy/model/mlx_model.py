@@ -15,7 +15,7 @@ from .model_provider import (
     _encode_completion, _finite_delta_values, _render_completion_prompt,
     _resolve_decoder_layers, _validate_capture_layers,
 )
-from ..records import Embedding, Message
+from ..utils.records import Embedding, Message
 
 
 class _DeltaLayer:

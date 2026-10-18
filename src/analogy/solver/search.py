@@ -8,7 +8,7 @@ from typing import Protocol, Sequence
 from .diversity import DiversityObservation
 from .rescue import RescueRollout
 from .semantic import ForcedMoveEvent, SemanticPrune, SemanticRecoveryEvent
-from ..records import (
+from ..utils.records import (
     CancellationToken,
     DiscardReason,
     ExpansionOutcome,

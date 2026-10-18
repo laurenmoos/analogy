@@ -13,7 +13,7 @@ from analogy.model.prompts import (
     focused_lean_goal,
     render_lean_goal_for_model,
 )
-from analogy.records import Message
+from analogy.utils.records import Message
 from analogy.solver.model_policy import _replacement_repair
 
 

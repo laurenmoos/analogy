@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from ..records import Embedding, SymbolicState
+from ..utils.records import Embedding, SymbolicState
 
 
 @dataclass(frozen=True, slots=True)

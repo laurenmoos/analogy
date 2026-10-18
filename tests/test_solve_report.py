@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
-from analogy.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
+from analogy.utils.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
 from analogy.solver import run as run_module
 from analogy.solver.run import (
     _problem_result,
@@ -401,7 +401,7 @@ def test_problem_trace_labels_pruned_ordinary_attempt_and_model_filters() -> Non
 
 
 def test_forced_moves_count_as_verifier_calls_and_invalid_tactics() -> None:
-    from analogy.records import CandidateOrigin, SymbolicState, TacticCandidate, TacticResult, TacticStatus
+    from analogy.utils.records import CandidateOrigin, SymbolicState, TacticCandidate, TacticResult, TacticStatus
     from analogy.solver.semantic import ForcedMoveEvent
 
     candidate = TacticCandidate("rcases h with hP | hQ", 1.0, CandidateOrigin.ORDINARY)

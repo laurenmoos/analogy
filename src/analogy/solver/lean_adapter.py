@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from ..lean_gym.models import Problem, VerificationStatus
 from ..lean_gym.verifier import Verifier
-from ..records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
+from ..utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
 from .proof_views import ProofStructure, ProofViewError
 
 if TYPE_CHECKING:

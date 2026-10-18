@@ -9,7 +9,7 @@ import re
 from typing import Protocol, TypeAlias
 
 from ..model.prompts import prompt_catalog
-from ..records import SymbolicState, TacticResult
+from ..utils.records import SymbolicState, TacticResult
 from .proof_inventory import InventoryError, ProofGoal, proof_goals, proposition_root
 
 

@@ -5,7 +5,7 @@ from analogy.lean_gym.models import (
     VerificationResult,
     VerificationStatus,
 )
-from analogy.records import CandidateOrigin, TacticCandidate, TacticStatus
+from analogy.utils.records import CandidateOrigin, TacticCandidate, TacticStatus
 from analogy.solver.lean_adapter import LeanGymAdapter
 
 

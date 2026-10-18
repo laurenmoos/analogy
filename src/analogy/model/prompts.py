@@ -13,7 +13,7 @@ from typing import Mapping
 import yaml
 
 from .parser import normalize_lean4_tactic
-from ..records import Message
+from ..utils.records import Message
 
 
 class PromptError(ValueError):

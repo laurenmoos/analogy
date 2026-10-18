@@ -1,6 +1,6 @@
 from analogy.model import prompts as prompts_module
 from analogy.model.prompts import PromptCatalog
-from analogy.records import (
+from analogy.utils.records import (
     CandidateOrigin,
     DiscardReason,
     DiscardedSuccessor,
@@ -83,7 +83,7 @@ def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():
             ) + '\n{"action":"revise_steps","predicted_state":"h : P\\n⊢ P","tactic":"intro h"}'
 
     def evaluate(candidate):
-        from analogy.records import SearchNode
+        from analogy.utils.records import SearchNode
         result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
         return TacticEvaluation(result, successor=SearchNode(successor, 1.0))
 
@@ -691,7 +691,7 @@ def test_changed_prediction_is_labeled_mismatched_when_lean_disagrees():
 
     def evaluate(candidate):
         result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
-        from analogy.records import SearchNode
+        from analogy.utils.records import SearchNode
         return TacticEvaluation(result, successor=SearchNode(successor, 1.0))
 
     outcome = _search(Generator(), evaluate, calls=1)
@@ -708,7 +708,7 @@ def test_prediction_matching_preserves_lean_identifier_case():
 
     def evaluate(candidate):
         result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
-        from analogy.records import SearchNode
+        from analogy.utils.records import SearchNode
         return TacticEvaluation(result, successor=SearchNode(successor, 1.0))
 
     outcome = _search(Generator(), evaluate, calls=1)

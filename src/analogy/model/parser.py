@@ -6,7 +6,7 @@ import json
 import math
 import re
 
-from ..records import CandidateOrigin, TacticCandidate
+from ..utils.records import CandidateOrigin, TacticCandidate
 
 
 class ModelOutputError(ValueError):

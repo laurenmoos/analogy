@@ -5,7 +5,7 @@ import pytest
 
 from analogy.__main__ import build_parser, main, render_report, run_solve
 from analogy.config import load_config
-from analogy.records import ProblemResult, SolveSummary, SolveStatus
+from analogy.utils.records import ProblemResult, SolveSummary, SolveStatus
 from analogy.runtime import with_analogy_enabled
 from analogy.solver import run as run_module
 from analogy.solver.run import SolveRun

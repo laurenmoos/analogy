@@ -9,7 +9,7 @@ from itertools import count
 from typing import Iterable
 
 from ..model.parser import candidate_rejection_reason, normalize_lean4_tactic
-from ..records import (
+from ..utils.records import (
     CancellationToken,
     CandidateOrigin,
     DiscardReason,

@@ -4,7 +4,7 @@ import pytest
 
 from analogy.model import prompts as prompts_module
 from analogy.model.prompts import PromptCatalog
-from analogy.records import SymbolicState
+from analogy.utils.records import SymbolicState
 from analogy.solver.semantic import (
     SemanticPrune,
     ExhaustiveSemanticChecker,

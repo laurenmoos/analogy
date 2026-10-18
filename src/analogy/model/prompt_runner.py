@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar
 
-from ..records import Message
+from ..utils.records import Message
 from ..solver.rescue import GenerationAttempt, GenerationStatus
 
 

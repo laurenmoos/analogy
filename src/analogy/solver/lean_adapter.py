@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..lean_gym.models import Problem, VerificationStatus
+from ..lean_gym.models import (
+    Problem,
+    ProofStructure,
+    ProofStructureError,
+    VerificationStatus,
+    has_unresolved_metavariable,
+)
 from ..lean_gym.verifier import Verifier
 from ..utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
-from .proof_views import ProofStructure, ProofViewError
 
 if TYPE_CHECKING:
     from .proof_inventory import LocalProofInventory
 
 
-_UNRESOLVED_METAVARIABLE = re.compile(r"\?[A-Za-z_][A-Za-z0-9_.✝]*")
-_LEAN_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
-_LEAN_CHARACTER = re.compile(r"'(?:\\.|[^'\\])'")
-_LEAN_QUOTED_IDENTIFIER = re.compile(r"«[^»]*»")
 _MAX_FAILURE_FEEDBACK = 8
 _MAX_FAILURE_ENTRY_CHARS = 120
 
@@ -29,13 +29,6 @@ class _FailureFeedback:
     state_id: str
     prefix: tuple[str, ...]
     text: str
-
-
-def _has_unresolved_metavariable(proof_state: str) -> bool:
-    unquoted = _LEAN_STRING.sub("", proof_state)
-    unquoted = _LEAN_CHARACTER.sub("", unquoted)
-    unquoted = _LEAN_QUOTED_IDENTIFIER.sub("", unquoted)
-    return _UNRESOLVED_METAVARIABLE.search(unquoted) is not None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -103,7 +96,9 @@ class LeanGymAdapter:
             raise ValueError(f"unknown Lean search state: {state.id}") from error
         extractor = getattr(self.verifier, "proof_structure_after", None)
         if extractor is None:
-            raise ProofViewError("configured verifier cannot extract proof structure")
+            raise ProofStructureError(
+                "configured verifier cannot extract proof structure"
+            )
         return extractor(self.problem, prefix)
 
     def local_inventory_for(self, state: SymbolicState) -> LocalProofInventory:
@@ -145,7 +140,7 @@ class LeanGymAdapter:
             and result.accepted
             and result.proof_state is not None
         ):
-            if _has_unresolved_metavariable(result.proof_state.normalized):
+            if has_unresolved_metavariable(result.proof_state.normalized):
                 diagnostic = "unresolved metavariables"
                 self._record_failure(state, candidate.source, diagnostic)
                 return TacticResult(

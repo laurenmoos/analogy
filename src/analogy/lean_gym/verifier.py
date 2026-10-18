@@ -8,9 +8,16 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
-from ..solver.proof_views import ProofStructure, ProofViewError
 
-from .models import Diagnostic, Problem, ProofState, VerificationResult, VerificationStatus
+from .models import (
+    Diagnostic,
+    Problem,
+    ProofState,
+    ProofStructure,
+    ProofStructureError,
+    VerificationResult,
+    VerificationStatus,
+)
 
 
 _LEAN_STRUCTURE_PRELUDE = r'''import Lean
@@ -119,19 +126,23 @@ class LeanSubprocessVerifier:
     ) -> ProofStructure:
         invalid = self._validate_prefix(accepted_tactics)
         if invalid is not None:
-            raise ProofViewError("cannot extract structure from an invalid tactic prefix")
+            raise ProofStructureError(
+                "cannot extract structure from an invalid tactic prefix"
+            )
         source = self._render_structure_probe(problem, accepted_tactics)
         run = self._run_lean(source)
         if run.timed_out or run.internal_error or run.exit_code != 0:
             detail = "; ".join(item.message for item in run.diagnostics)
-            raise ProofViewError(f"Lean structure extraction failed: {detail}")
+            raise ProofStructureError(f"Lean structure extraction failed: {detail}")
         payloads = []
         for diagnostic in run.diagnostics:
             marker = "ANALOGY_PROOF_STRUCTURE:"
             if marker in diagnostic.message:
                 payloads.append(diagnostic.message.split(marker, 1)[1].strip())
         if len(payloads) != 1:
-            raise ProofViewError("Lean emitted an invalid number of proof structures")
+            raise ProofStructureError(
+                "Lean emitted an invalid number of proof structures"
+            )
         try:
             payload = json.loads(payloads[0])
             return ProofStructure(
@@ -143,7 +154,9 @@ class LeanSubprocessVerifier:
                 ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise ProofViewError("Lean proof structure payload is malformed") from error
+            raise ProofStructureError(
+                "Lean proof structure payload is malformed"
+            ) from error
 
     def try_tactic(
         self,

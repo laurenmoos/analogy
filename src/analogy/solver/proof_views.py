@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..utils.records import Embedding
+from ..lean_gym.models import ProofStructure, normalize_proof_state_text
 from ..model.prompts import prompt_catalog
+from ..utils.records import Embedding
 from .rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
 
 if TYPE_CHECKING:
@@ -19,33 +19,6 @@ if TYPE_CHECKING:
 
 class ProofViewError(ValueError):
     pass
-
-
-_TEMP_PATH = re.compile(r"(?:/[^\s:]+/)?lean-gym-[^/\s:]+/[^\s:]+\.lean(?::\d+:\d+)?")
-
-
-def _normalize_proof_state_text(value: str) -> str:
-    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    normalized = "\n".join(line.rstrip() for line in lines).strip("\n")
-    return _TEMP_PATH.sub("<temp>", normalized)
-
-
-@dataclass(frozen=True, slots=True)
-class ProofStructure:
-    goal_count: int
-    target_shape: str
-    hypothesis_shapes: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        if isinstance(self.goal_count, bool) or not isinstance(self.goal_count, int) or self.goal_count <= 0:
-            raise ProofViewError("goal_count must be a positive integer")
-        for value in (self.target_shape, *self.hypothesis_shapes):
-            if not isinstance(value, str) or not value.strip():
-                raise ProofViewError("proof shapes must be nonblank JSON text")
-            try:
-                json.loads(value)
-            except json.JSONDecodeError as error:
-                raise ProofViewError("proof shapes must be valid JSON") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +88,8 @@ def render_proof_relevance_view(context: ProofRescueContext, structure: ProofStr
 def render_transition(before: str, after: str) -> str:
     messages = prompt_catalog().messages(
         "transition_embedding",
-        before=_normalize_proof_state_text(before),
-        after=_normalize_proof_state_text(after),
+        before=normalize_proof_state_text(before),
+        after=normalize_proof_state_text(after),
     )
     return "\n".join(item.content for item in messages)
 
@@ -124,9 +97,9 @@ def render_transition(before: str, after: str) -> str:
 def render_observed_transition(previous: str, tactic: str | None, current: str) -> str:
     messages = prompt_catalog().messages(
         "observed_transition_embedding",
-        before=_normalize_proof_state_text(previous),
+        before=normalize_proof_state_text(previous),
         tactic=tactic if tactic is not None else "(none)",
-        after=_normalize_proof_state_text(current),
+        after=normalize_proof_state_text(current),
     )
     return "\n".join(item.content for item in messages)
 
@@ -248,7 +221,7 @@ def _lines(values: tuple[str, ...]) -> str:
 
 
 __all__ = [
-    "EmbeddedText", "EmbeddingProvenance", "ProofStructure", "ProofViewError",
+    "EmbeddedText", "EmbeddingProvenance", "ProofViewError",
     "ProofViews", "TransitionComparison", "build_proof_views",
     "compare_transitions", "render_language_view", "render_structure_view",
     "render_transition",

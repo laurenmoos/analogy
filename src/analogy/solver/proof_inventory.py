@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
-from .proof_views import ProofStructure
+from ..lean_gym.models import ProofStructure
 from ..utils.records import SymbolicState
 from .replay import proof_state_fingerprint
 

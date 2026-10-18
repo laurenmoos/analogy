@@ -16,7 +16,7 @@ from analogy.model.prompts import (
 )
 from analogy.utils.records import Message
 from analogy.solver.model_policy import _replacement_repair
-from analogy.solver.analogy.protocol import extract_analogy_block
+from analogy.solver.analogy.protocol import extract_mental_model_block
 
 
 ROOT = Path(__file__).parents[1]
@@ -146,7 +146,7 @@ def test_analogy_fallback_requests_exactly_one_tactic():
     assert "countermodel-side dependency" not in prompt
 
 
-def test_conventional_ranker_explains_initial_and_immutable_analogy_blocks():
+def test_conventional_ranker_explains_immutable_mental_model_blocks():
     catalog = PromptCatalog.load(ROOT / "prompts.yaml")
     values = {
         "overall_target": "P",
@@ -161,9 +161,9 @@ def test_conventional_ranker_explains_initial_and_immutable_analogy_blocks():
         message.content for message in catalog.messages("analogy_conventional_ranker", **values)
     )
 
-    assert "<analogy>" in prompt
-    assert "create one" in prompt
-    assert "repeat it unchanged" in prompt
+    assert "<mental_model>" in prompt
+    assert "working mental model" in prompt
+    assert "supplied mental-model block unchanged" in prompt
 
 
 def test_tactic_card_is_generic_and_bans_automation():
@@ -391,11 +391,44 @@ def test_analogy_initialization_supplies_a_parser_compatible_template():
             excluded_domains="- lock",
         )
     )
-    blocks = re.findall(r"<analogy>.*?</analogy>", prompt, flags=re.DOTALL)
+    blocks = re.findall(
+        r"<mental_model>.*?</mental_model>", prompt, flags=re.DOTALL
+    )
 
     assert len(blocks) == 1
-    state, remainder = extract_analogy_block(blocks[0])
+    state, remainder = extract_mental_model_block(blocks[0])
     assert state.domain == "one-line domain"
-    assert state.mapping == ("one-line source corresponds to one-line target",)
-    assert state.steps == ("one-line proof action",)
+    assert state.correspondences[0].domain_transition == "one-line domain action"
     assert remainder == ""
+
+
+def test_live_analogy_prompts_request_mental_model_correspondences():
+    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
+    initialization = "\n".join(
+        item.content
+        for item in catalog.messages(
+            "analogy_initialize",
+            overall_target="⊢ P",
+            current_goals="⊢ P",
+            excluded_domains="- (none)",
+        )
+    )
+    update = "\n".join(
+        item.content
+        for item in catalog.messages(
+            "analogy_update",
+            overall_target="⊢ P",
+            current_goals="⊢ P",
+            semantic_guidance="valid",
+            dependency_table="(none)",
+            accepted="(none)",
+            open_tactics="(none)",
+            rejected_tactics="(none)",
+            tactic_card="card",
+        )
+    )
+
+    for prompt in (initialization, update):
+        assert "<mental_model>" in prompt
+        assert '"correspondences"' in prompt
+        assert '"domain_transition"' in prompt

@@ -38,15 +38,22 @@ ROOT = Path(__file__).parents[1]
 
 
 def _analogy(domain: str) -> str:
-    return f"""<analogy>
-domain: {domain}
-mapping:
-- hypothesis is a resource
-steps:
-1. use the resource
-abandoned domains:
-- (none)
-</analogy>"""
+    return f'''<mental_model>
+{{
+  "domain": "{domain}",
+  "correspondences": [
+    {{
+      "domain_before": "resource is available",
+      "domain_transition": "use the resource",
+      "domain_after": "goal is reached",
+      "proof_before": null,
+      "proof_transition": null,
+      "proof_after": null
+    }}
+  ],
+  "abandoned_domains": []
+}}
+</mental_model>'''
 
 
 class _Proof:

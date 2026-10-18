@@ -24,9 +24,9 @@ from ..model.prompts import (
 )
 from ..utils.records import CandidateOrigin, Message, TacticCandidate
 from .analogy.protocol import (
-    extract_analogy_block,
+    extract_working_model_block,
     record_model_history,
-    render_analogy_state,
+    render_working_model,
 )
 from .analogy.state import (
     AnalogyScratchpad,
@@ -209,7 +209,7 @@ class TacticRanker:
         if scratchpad.current is None:
             return messages[0], user
         return messages[0], Message(
-            "system", render_analogy_state(scratchpad.current)
+            "system", render_working_model(scratchpad.current)
         ), user
 
     def _parse_output(
@@ -226,7 +226,7 @@ class TacticRanker:
         payload = raw
         if scratchpad is not None and use_analogy_protocol:
             try:
-                analogy, payload = extract_analogy_block(raw)
+                analogy, payload = extract_working_model_block(raw)
             except AnalogyStateError as error:
                 raise ModelOutputError(str(error)) from error
             if scratchpad.current is not None and analogy != scratchpad.current:

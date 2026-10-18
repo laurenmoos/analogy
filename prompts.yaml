@@ -18,10 +18,10 @@ prompts:
       Return at most {{top_k}} candidates.
 
   analogy_conventional_ranker:
-    version: analogy-conventional-ranker-v1
+    version: analogy-conventional-ranker-v2
     system: >-
-      Rank next Lean 4 tactics while maintaining the external analogy scratchpad. Return exactly one
-      <analogy> block followed by a nonempty JSON array of objects with exactly `tactic` and `score`.
+      Rank next Lean 4 tactics while maintaining the external working mental model. Return exactly one
+      <mental_model> JSON block followed by a nonempty JSON array of objects with exactly `tactic` and `score`.
       Tactics are one-line strings; scores are nonnegative numbers. Use visible identifiers only. Never repeat
       a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.
     user: |-
@@ -34,26 +34,32 @@ prompts:
       Recent path failure feedback:
       {{failed}}
       {{tactic_card}}
-      If no current analogy block was supplied, create one with domain, mapping, numbered steps, and abandoned domains.
-      If a current analogy block was supplied, repeat it unchanged; ordinary search must not revise it.
+      If no current mental model was supplied, create one using the initialization schema. Otherwise repeat the
+      supplied mental-model block unchanged; ordinary search must not revise its ordered correspondences.
       Then return at most {{top_k}} candidates after the block.
 
   analogy_initialize:
-    version: analogy-initialize-v2
+    version: analogy-initialize-v3
     system: |-
-      Create one concrete analogy for planning this Lean 4 proof. Return only one block in exactly this format,
-      preserving the lowercase headers, section order, hyphen bullets, consecutive step numbers, and empty marker:
-      <analogy>
-      domain: one-line domain
-      mapping:
-      - one-line source corresponds to one-line target
-      steps:
-      1. one-line proof action
-      abandoned domains:
-      - (none)
-      </analogy>
-      Replace the example domain, mapping, and steps with the analogy. Add mapping bullets and consecutively
-      numbered steps as needed. Keep abandoned domains exactly `- (none)` during initialization.
+      Create one concrete working mental model for planning this Lean 4 proof. Return only one block containing
+      strict JSON in exactly this shape:
+      <mental_model>
+      {
+        "domain": "one-line domain",
+        "correspondences": [
+          {
+            "domain_before": "one-line domain state",
+            "domain_transition": "one-line domain action",
+            "domain_after": "one-line resulting domain state",
+            "proof_before": "known proof state or null",
+            "proof_transition": "known or predicted tactic or null",
+            "proof_after": "known or predicted proof state or null"
+          }
+        ],
+        "abandoned_domains": []
+      }
+      </mental_model>
+      Keep correspondences ordered. Use JSON null for unknown proof fields. Partial future correspondences are allowed.
     user: |-
       Overall target:
       {{overall_target}}
@@ -102,10 +108,10 @@ prompts:
       use ; or <;> to sequence.
 
   analogy_update:
-    version: analogy-update-v2
+    version: analogy-update-v3
     system: >-
-      Update the external analogy scratchpad to escape this stuck Lean 4 proof state, then return the first tactic
-      from the updated story. Lean is the judge. Return exactly one <analogy> block followed by JSON only.
+      Revise the external working mental model to escape this stuck Lean 4 proof state, then return the first tactic
+      implied by the revision. Lean is the judge. Return exactly one <mental_model> JSON block followed by JSON only.
     user: |-
       Overall target:
       {{overall_target}}
@@ -130,10 +136,13 @@ prompts:
 
       {{tactic_card}}
 
-      Choose action revise_steps or change_domain. revise_steps must keep the supplied domain and mapping exactly
-      and change only the numbered steps. change_domain must choose a new domain not listed under abandoned domains,
-      with a new mapping and numbered story. A SAT restart/countermodel requires change_domain.
-      Return the updated <analogy> block, then JSON with exactly "action", "predicted_state", and "tactic".
+      Choose action revise_model or change_domain. revise_model must preserve the supplied domain while revising
+      its ordered transition correspondences. change_domain must choose a new domain not listed under abandoned_domains
+      and supply a new ordered correspondence list. A SAT restart/countermodel requires change_domain.
+      The mental-model JSON must contain exactly "domain", "correspondences", and "abandoned_domains". Every
+      correspondence must contain "domain_before", "domain_transition", "domain_after", "proof_before",
+      "proof_transition", and "proof_after"; use null for unknown proof fields.
+      Return the updated <mental_model> block, then JSON with exactly "action", "predicted_state", and "tactic".
       predicted_state is literal SOLVED or the exact full focused Lean state expected immediately after the first tactic.
 
   lean_tactic_card:
@@ -157,8 +166,8 @@ prompts:
     text: 'Return only the requested JSON array.'
 
   ranker_analogy_output_contract:
-    version: ranker-analogy-output-contract-v1
-    text: 'Return the current <analogy> block unchanged, followed by the requested JSON array.'
+    version: ranker-analogy-output-contract-v2
+    text: 'Return the current <mental_model> block unchanged, followed by the requested JSON array.'
 
   ranker_replacement_repair:
     version: ranker-replacement-repair-v1
@@ -173,9 +182,9 @@ prompts:
     text: 'Return only strict JSON with exactly "analogy", "predicted_state", and singular "tactic".'
 
   analogy_update_output_contract:
-    version: analogy-update-output-contract-v1
+    version: analogy-update-output-contract-v2
     text: >-
-      Return one updated <analogy> block followed by strict JSON with exactly "action", "predicted_state", and "tactic".
+      Return one updated <mental_model> JSON block followed by strict JSON with exactly "action", "predicted_state", and "tactic".
 
   analogy_duplicate_repair:
     version: analogy-duplicate-repair-v1
@@ -237,13 +246,13 @@ prompts:
     text: 'Lean rejected the tactic'
 
   analogy_pending_context:
-    version: analogy-pending-context-v1
+    version: analogy-pending-context-v2
     text: |-
-      <analogy>
-      active: (none; change_domain required)
-      abandoned domains:
+      <mental_model_pending>
+      active: none; change_domain required
+      abandoned_domains:
       {{abandoned_domains}}
-      </analogy>
+      </mental_model_pending>
 
   negation_definition:
     version: negation-definition-v1

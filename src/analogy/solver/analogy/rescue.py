@@ -40,10 +40,10 @@ from ..proof.semantic import (
     render_semantic_guidance,
 )
 from .protocol import (
-    extract_analogy_block,
+    extract_working_model_block,
     record_model_history,
     remove_analogy_blocks,
-    render_analogy_state,
+    render_working_model,
     render_scratchpad_context,
 )
 from .state import (
@@ -51,6 +51,7 @@ from .state import (
     AnalogyState,
     AnalogyStateError,
     AnalogyUpdateAction,
+    WorkingMentalModel,
 )
 
 if TYPE_CHECKING:
@@ -311,13 +312,13 @@ def parse_analogy_update(
     text: str,
     *,
     proof_state: str | None = None,
-    current: AnalogyState | None,
+    current: WorkingMentalModel | None,
     force_domain_change: bool = False,
-) -> tuple[AnalogyUpdateAction, AnalogyState, RescueProposal]:
+) -> tuple[AnalogyUpdateAction, WorkingMentalModel, RescueProposal]:
     """Parse one scratchpad update and its first tactic without mutating state."""
 
     try:
-        analogy, payload_text = extract_analogy_block(text)
+        analogy, payload_text = extract_working_model_block(text)
     except AnalogyStateError as error:
         raise RescueOutputError(str(error)) from error
     try:
@@ -334,13 +335,17 @@ def parse_analogy_update(
         action = AnalogyUpdateAction(payload["action"])
     except (TypeError, ValueError) as error:
         raise RescueOutputError(
-            'action must be "revise_steps" or "change_domain"'
+            'action must be "revise_model", "revise_steps", or "change_domain"'
         ) from error
     if force_domain_change and action is not AnalogyUpdateAction.CHANGE_DOMAIN:
         raise RescueOutputError("countermodel forces action change_domain")
     if current is None and action is not AnalogyUpdateAction.CHANGE_DOMAIN:
         raise RescueOutputError("missing active analogy requires action change_domain")
-    if action is AnalogyUpdateAction.REVISE_STEPS and current is not None:
+    if (
+        action is AnalogyUpdateAction.REVISE_STEPS
+        and isinstance(analogy, AnalogyState)
+        and isinstance(current, AnalogyState)
+    ):
         if (analogy.domain, analogy.mapping) != (current.domain, current.mapping):
             raise RescueOutputError(
                 "revise_steps must preserve the current domain and mapping"
@@ -452,7 +457,7 @@ class AnalogyFallback:
         )
         active_messages = messages
         rollouts: list[RescueRollout] = []
-        calibrated_update: tuple[AnalogyUpdateAction, AnalogyState] | None = None
+        calibrated_update: tuple[AnalogyUpdateAction, WorkingMentalModel] | None = None
         for index in range(self._max_model_calls):
             if cancellation.is_cancelled():
                 return AnalogyRescueOutcome(
@@ -473,7 +478,7 @@ class AnalogyFallback:
                     scratchpad.validate_transition(update_action, update_state)
                 except AnalogyStateError as error:
                     raise RescueOutputError(str(error)) from error
-                analogy = render_analogy_state(update_state)
+                analogy = render_working_model(update_state)
                 if proposal.candidate.source in attempted_tactics:
                     diagnostic = (
                         f"tactic {proposal.candidate.source!r} was already attempted "

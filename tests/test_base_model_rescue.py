@@ -284,7 +284,7 @@ def test_update_repair_prompt_strips_previous_block_and_uses_action_schema():
                 return render_analogy_state(current) + "\nnot json"
             feedback = messages[-1].content
             assert render_analogy_state(current) not in feedback
-            assert feedback.count("<analogy>") == 1
+            assert feedback.count("<mental_model>") == 1
             assert '"action", "predicted_state", and "tactic"' in feedback
             assert '"analogy", "predicted_state"' not in feedback
             return _block(

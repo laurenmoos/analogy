@@ -17,7 +17,7 @@ from ...model.prompts import (
 from ...utils.records import SymbolicState
 from ..model_policy import TacticRanker, initialize_model_policy
 from ..proof.semantic import SemanticResult
-from .protocol import extract_analogy_block
+from .protocol import extract_mental_model_block
 from .rescue import AnalogyFallback, initialize_analogy_fallback
 from .state import AnalogyScratchpad
 
@@ -120,7 +120,7 @@ def initialize_analogy_harness(
         raw_text: str | None = None
         try:
             raw_text = generator.generate(messages, seed=seed)
-            state, remainder = extract_analogy_block(raw_text)
+            state, remainder = extract_mental_model_block(raw_text)
             if remainder.strip():
                 raise ValueError("initialization output must contain only the analogy block")
             if state.domain in accepted_domains:

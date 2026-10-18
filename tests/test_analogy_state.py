@@ -5,9 +5,11 @@ import pytest
 from analogy.model import prompts as prompts_module
 from analogy.model.prompts import PromptCatalog
 from analogy.solver.analogy.protocol import (
+    extract_mental_model_block,
     extract_analogy_block,
     record_model_history,
     render_analogy_state,
+    render_mental_model,
     render_scratchpad_context,
 )
 from analogy.solver.analogy.state import (
@@ -15,6 +17,8 @@ from analogy.solver.analogy.state import (
     AnalogyState,
     AnalogyStateError,
     AnalogyUpdateAction,
+    MentalModel,
+    MentalModelCorrespondence,
 )
 
 
@@ -23,6 +27,79 @@ LOCK = AnalogyState(
     mapping=("P -> locked door", "Q -> matching key"),
     steps=("Inspect the lock.", "Use the matching key."),
 )
+
+
+MENTAL_MODEL = MentalModel(
+    domain="island treasure hunt",
+    correspondences=(
+        MentalModelCorrespondence(
+            domain_before="standing on the shore",
+            domain_transition="sail to the island",
+            domain_after="arrive at the island",
+            proof_before="h : P\n⊢ P",
+            proof_transition="exact h",
+            proof_after="SOLVED",
+        ),
+        MentalModelCorrespondence(
+            domain_before="arrive at the island",
+            domain_transition="follow the map",
+            domain_after="find the treasure",
+        ),
+    ),
+)
+
+
+def test_mental_model_round_trips_ordered_complete_and_partial_correspondences():
+    rendered = render_mental_model(MENTAL_MODEL)
+    restored, remainder = extract_mental_model_block(rendered)
+
+    assert rendered.startswith("<mental_model>\n{")
+    assert restored == MENTAL_MODEL
+    assert [item.domain_transition for item in restored.correspondences] == [
+        "sail to the island",
+        "follow the map",
+    ]
+    assert restored.correspondences[1].proof_transition is None
+    assert remainder == ""
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        ('{"domain":"x","correspondences":[],"abandoned_domains":[]}', "nonempty"),
+        ('{"domain":"x","correspondences":[{"domain_before":"a"}],"abandoned_domains":[]}', "exactly"),
+        ('{"domain":"x","correspondences":[{"domain_before":"a","domain_transition":"go","domain_after":"b","proof_before":null,"proof_transition":null,"proof_after":null}],"abandoned_domains":[],"extra":1}', "exactly"),
+    ],
+)
+def test_mental_model_json_shape_is_strict(payload, message):
+    with pytest.raises(AnalogyStateError, match=message):
+        extract_mental_model_block(
+            f"<mental_model>\n{payload}\n</mental_model>"
+        )
+
+
+def test_mental_model_revision_can_change_correspondences_but_not_domain():
+    scratchpad = AnalogyScratchpad(MENTAL_MODEL)
+    revised = MentalModel(
+        MENTAL_MODEL.domain,
+        (
+            MentalModelCorrespondence(
+                "shore", "build a raft", "open water", proof_transition="apply h"
+            ),
+        ),
+    )
+
+    scratchpad.apply(AnalogyUpdateAction.REVISE_MODEL, revised)
+    assert scratchpad.current == revised
+
+    with pytest.raises(AnalogyStateError, match="preserve domain"):
+        scratchpad.apply(
+            AnalogyUpdateAction.REVISE_MODEL,
+            MentalModel(
+                "naive physics",
+                (MentalModelCorrespondence("rest", "push", "motion"),),
+            ),
+        )
 
 
 def test_protocol_renders_one_canonical_tagged_block() -> None:

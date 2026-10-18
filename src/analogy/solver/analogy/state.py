@@ -12,6 +12,7 @@ class AnalogyStateError(ValueError):
 
 class AnalogyUpdateAction(str, Enum):
     REVISE_STEPS = "revise_steps"
+    REVISE_MODEL = "revise_model"
     CHANGE_DOMAIN = "change_domain"
 
 
@@ -36,6 +37,71 @@ def _clean_lines(values: object, field: str) -> tuple[str, ...]:
     return normalized
 
 
+def _clean_optional_line(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    return _clean_line(value, field)
+
+
+def _clean_optional_text(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise AnalogyStateError(f"{field} must be nonblank text or null")
+    return value.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class MentalModelCorrespondence:
+    domain_before: str
+    domain_transition: str
+    domain_after: str
+    proof_before: str | None = None
+    proof_transition: str | None = None
+    proof_after: str | None = None
+
+    def __post_init__(self) -> None:
+        for field in ("domain_before", "domain_transition", "domain_after"):
+            object.__setattr__(self, field, _clean_line(getattr(self, field), field))
+        for field in ("proof_before", "proof_transition", "proof_after"):
+            object.__setattr__(
+                self, field, _clean_optional_text(getattr(self, field), field)
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class MentalModel:
+    domain: str
+    correspondences: tuple[MentalModelCorrespondence, ...]
+    abandoned_domains: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "domain", _clean_line(self.domain, "domain"))
+        try:
+            correspondences = tuple(self.correspondences)
+        except TypeError as error:
+            raise AnalogyStateError("correspondences must be a nonempty sequence") from error
+        if not correspondences:
+            raise AnalogyStateError("correspondences must be nonempty")
+        if any(
+            not isinstance(item, MentalModelCorrespondence)
+            for item in correspondences
+        ):
+            raise AnalogyStateError(
+                "correspondences must contain MentalModelCorrespondence values"
+            )
+        object.__setattr__(self, "correspondences", correspondences)
+        abandoned = tuple(
+            dict.fromkeys(
+                _clean_line(value, "abandoned domain")
+                for value in self.abandoned_domains
+            )
+        )
+        if self.domain in abandoned:
+            raise AnalogyStateError("active domain must not be an abandoned domain")
+        object.__setattr__(self, "abandoned_domains", abandoned)
+
+
 @dataclass(frozen=True, slots=True)
 class AnalogyState:
     domain: str
@@ -54,12 +120,15 @@ class AnalogyState:
             raise AnalogyStateError("active domain must not be an abandoned domain")
         object.__setattr__(self, "abandoned_domains", abandoned)
 
+WorkingMentalModel = AnalogyState | MentalModel
+
+
 class AnalogyScratchpad:
     """Own one analogy and block-free bounded history for a proof episode."""
 
     def __init__(
         self,
-        initial: AnalogyState | None = None,
+        initial: WorkingMentalModel | None = None,
         *,
         abandoned_limit: int = 8,
         history_limit: int = 12,
@@ -74,7 +143,7 @@ class AnalogyScratchpad:
         self._pending_rebuild = False
 
     @property
-    def current(self) -> AnalogyState | None:
+    def current(self) -> WorkingMentalModel | None:
         return self._current
 
     @property
@@ -89,7 +158,7 @@ class AnalogyScratchpad:
     def pending_rebuild(self) -> bool:
         return self._pending_rebuild
 
-    def initialize(self, state: AnalogyState) -> None:
+    def initialize(self, state: WorkingMentalModel) -> None:
         if self._current is not None:
             raise AnalogyStateError("active analogy is already initialized")
         if self._pending_rebuild:
@@ -101,20 +170,28 @@ class AnalogyScratchpad:
         self._current = replace(state, abandoned_domains=tuple(self._abandoned))
 
     def validate_transition(
-        self, action: AnalogyUpdateAction, state: AnalogyState
+        self, action: AnalogyUpdateAction, state: WorkingMentalModel
     ) -> None:
         if not isinstance(action, AnalogyUpdateAction):
             raise AnalogyStateError("unknown analogy update action")
-        if action is AnalogyUpdateAction.REVISE_STEPS:
+        if action in (
+            AnalogyUpdateAction.REVISE_STEPS,
+            AnalogyUpdateAction.REVISE_MODEL,
+        ):
             if self._current is None:
-                raise AnalogyStateError("step revision requires an active analogy")
+                raise AnalogyStateError("model revision requires an active analogy")
             if self._pending_rebuild:
-                raise AnalogyStateError("step revision cannot satisfy a pending rebuild")
-            if (state.domain, state.mapping) != (
-                self._current.domain,
-                self._current.mapping,
+                raise AnalogyStateError("model revision cannot satisfy a pending rebuild")
+            if (
+                action is AnalogyUpdateAction.REVISE_STEPS
+                and isinstance(state, AnalogyState)
+                and isinstance(self._current, AnalogyState)
+                and (state.domain, state.mapping)
+                != (self._current.domain, self._current.mapping)
             ):
                 raise AnalogyStateError("step revision must preserve domain and mapping")
+            if state.domain != self._current.domain:
+                raise AnalogyStateError("model revision must preserve domain")
             return
         if self._current is not None and state.domain == self._current.domain:
             raise AnalogyStateError(
@@ -123,9 +200,12 @@ class AnalogyScratchpad:
         if state.domain in self._abandoned:
             raise AnalogyStateError("new domain must not reuse an abandoned domain")
 
-    def apply(self, action: AnalogyUpdateAction, state: AnalogyState) -> None:
+    def apply(self, action: AnalogyUpdateAction, state: WorkingMentalModel) -> None:
         self.validate_transition(action, state)
-        if action is AnalogyUpdateAction.REVISE_STEPS:
+        if action in (
+            AnalogyUpdateAction.REVISE_STEPS,
+            AnalogyUpdateAction.REVISE_MODEL,
+        ):
             self._current = replace(
                 state,
                 abandoned_domains=tuple(self._abandoned),
@@ -181,6 +261,9 @@ __all__ = [
     "AnalogyState",
     "AnalogyStateError",
     "AnalogyUpdateAction",
+    "MentalModel",
+    "MentalModelCorrespondence",
+    "WorkingMentalModel",
     "initialize_analogy_scratchpad",
     "update_analogy",
 ]

@@ -292,7 +292,7 @@ def test_enabled_partial_candidate_repair_refreshes_current_block_and_contract()
                     '{"tactic":"left","score":1}]'
                 )
             assert messages[1].content == render_analogy_state(state)
-            assert "<analogy> block" in messages[-1].content
+            assert "<mental_model> block" in messages[-1].content
             return render_analogy_state(state) + '\n[{"tactic":"assumption","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")

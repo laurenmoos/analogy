@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from analogy.utils.records import (
     CandidateOrigin,
     SearchStatus,
@@ -22,6 +24,9 @@ from analogy.solver.search import (
     WhitespaceTacticCanonicalizer,
 )
 from analogy.solver.proof.diversity import DiversityObservation
+from analogy.solver.episode import start_search, update_search
+from analogy.solver.model_policy import generate_tactics_with_model_policy
+from analogy.solver.proof.adapter import submit_tactics_to_lean
 from analogy.solver.proof.semantic import (
     ExhaustiveSemanticChecker,
     SemanticAssessment,
@@ -36,6 +41,15 @@ CANDIDATE = TacticCandidate("exact h", 1.0, CandidateOrigin.ORDINARY)
 RESCUE_CANDIDATE = TacticCandidate(
     "exact rescued", 1.0, CandidateOrigin.ANALOGICAL
 )
+
+
+def _run_incremental(context, initial=START, goal=GOAL):
+    search = start_search(context, initial, goal)
+    while search.has_work():
+        tactics = generate_tactics_with_model_policy(search)
+        results = submit_tactics_to_lean(context.verifier, tactics)
+        update_search(search, results)
+    return search.result
 
 
 class _Ranker:
@@ -78,8 +92,6 @@ def _context(
 
 
 def test_episode_returns_immediately_after_ordinary_completion():
-    from analogy.solver.episode import run_episode
-
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(candidate, TacticStatus.COMPLETE, proof="exact h")
@@ -88,8 +100,8 @@ def test_episode_returns_immediately_after_ordinary_completion():
         def assess(self, _state):
             raise AssertionError("semantic checking must wait for stuckness")
 
-    result = run_episode(
-        _context(Verifier(), semantic_checker=SemanticMustNotRun()), START, GOAL
+    result = _run_incremental(
+        _context(Verifier(), semantic_checker=SemanticMustNotRun())
     )
 
     assert result.status is SearchStatus.COMPLETE
@@ -145,13 +157,11 @@ def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
 
 
 def test_disabled_analogy_never_calls_fallback_when_conventional_tactic_is_stuck():
-    from analogy.solver.episode import run_episode
-
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(candidate, TacticStatus.ERROR)
 
-    result = run_episode(_context(Verifier(), analogy_enabled=False), START, GOAL)
+    result = _run_incremental(_context(Verifier(), analogy_enabled=False))
 
     assert result.status is SearchStatus.EXHAUSTED
     assert result.rescue_rollouts == ()
@@ -346,8 +356,6 @@ def test_frontier_uses_latest_step_score_before_novelty():
 
 
 def test_episode_discards_same_proof_state_even_when_generated_id_differs():
-    from analogy.solver.episode import run_episode
-
     class Verifier:
         def run_tactic(self, _state, candidate):
             return TacticResult(
@@ -356,7 +364,7 @@ def test_episode_discards_same_proof_state_even_when_generated_id_differs():
                 state=SymbolicState("different-id", START.expression, "lean4"),
             )
 
-    result = run_episode(_context(Verifier()), START, GOAL)
+    result = _run_incremental(_context(Verifier()))
 
     first = result.ordinary_expansions[0]
     assert first.successors == ()
@@ -573,8 +581,6 @@ def test_semantic_assessments_are_cached_while_resolving_sibling_paths():
 
 
 def test_countermodel_refuted_open_successor_is_pruned_before_frontier_expansion():
-    from analogy.solver.episode import run_episode
-
     calls = []
     false_state = SymbolicState("false", "P Q : Prop\nh : P\n⊢ Q", "lean4")
 
@@ -585,7 +591,7 @@ def test_countermodel_refuted_open_successor_is_pruned_before_frontier_expansion
                 return TacticResult(candidate, TacticStatus.ACCEPTED, state=false_state)
             raise AssertionError("a refuted successor must never be expanded")
 
-    result = run_episode(_context(Verifier()), START, GOAL)
+    result = _run_incremental(_context(Verifier()))
 
     assert calls == [("start", "exact h")]
     assert result.status is SearchStatus.EXHAUSTED
@@ -616,8 +622,6 @@ def test_unknown_open_successor_remains_on_frontier():
 
 
 def test_cross_countermodels_force_disjunction_destructuring_before_analogy():
-    from analogy.solver.episode import run_episode
-
     root = SymbolicState(
         "root",
         "P Q R : Prop\nhPQ : P ∨ Q\n⊢ R",
@@ -668,7 +672,7 @@ def test_cross_countermodels_force_disjunction_destructuring_before_analogy():
                 )
             return SemanticAssessment(state.id, SemanticResult.VALID)
 
-    result = run_episode(
+    result = _run_incremental(
         _context(
             Verifier(),
             ranker=Ranker(),
@@ -676,13 +680,70 @@ def test_cross_countermodels_force_disjunction_destructuring_before_analogy():
             semantic_checker=Checker(),
         ),
         root,
-        GOAL,
     )
 
     assert result.status is SearchStatus.COMPLETE
     assert ("root", "rcases hPQ with hP | hQ") in attempted
     assert len(result.forced_moves) == 1
     assert result.forced_moves[0].hypothesis == "hPQ"
+
+
+def test_incremental_search_honors_cancellation_before_generation():
+    class Cancelled:
+        def is_cancelled(self):
+            return True
+
+    context = replace(_context(object()), cancellation=Cancelled())
+
+    result = _run_incremental(context)
+
+    assert result.status is SearchStatus.CANCELLED
+    assert result.ordinary_expansions == ()
+
+
+def test_incremental_search_honors_expansion_budget_before_next_generation():
+    successor = SymbolicState("next", "P : Prop\nh : P\n⊢ P", "lean4")
+
+    class Verifier:
+        def run_tactic(self, state, candidate):
+            assert state.id == "start"
+            return TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
+
+    result = _run_incremental(_context(Verifier(), max_expansions=1))
+
+    assert result.status is SearchStatus.BUDGET_EXHAUSTED
+    assert len(result.ordinary_expansions) == 1
+
+
+def test_incremental_search_records_no_progress_discard():
+    successor = SymbolicState("next", "P Q : Prop\nh : P\n⊢ P", "lean4")
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            return TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
+
+    class RejectProgress:
+        def accepts(self, _before, _after, _goal):
+            return False
+
+    context = replace(_context(Verifier()), progress_policy=RejectProgress())
+
+    result = _run_incremental(context)
+
+    assert result.status is SearchStatus.EXHAUSTED
+    assert result.ordinary_expansions[0].discarded[0].reason.value == "no_progress"
+
+
+def test_incremental_search_records_an_empty_candidate_pool_as_exhausted():
+    class EmptyRanker:
+        def rank(self, _state, _goal, **_kwargs):
+            return ()
+
+    result = _run_incremental(_context(object(), ranker=EmptyRanker()))
+
+    assert result.status is SearchStatus.EXHAUSTED
+    assert len(result.ordinary_expansions) == 1
+    assert result.ordinary_expansions[0].candidate_pool == ()
 
 
 def test_all_refuted_disjunct_choices_skip_trailing_candidates():

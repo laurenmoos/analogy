@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 from ..model.model_provider import TextGenerator
 from ..model.parser import (
+    candidate_rejection_reason,
     FilteredCandidatePool,
     IncompleteCandidatePool,
     ModelOutputError,
+    normalize_lean4_tactic,
     parse_tactic_candidates,
 )
 from ..model.prompt_runner import PromptRunner
@@ -25,6 +28,9 @@ from .analogy.state import (
     AnalogyStateError,
     extract_analogy_block,
 )
+
+if TYPE_CHECKING:
+    from .episode import SearchSession, TacticBatch
 
 class TacticRankingError(RuntimeError):
     """Raised when the conventional model cannot produce a candidate pool."""
@@ -241,6 +247,53 @@ class TacticRanker:
         return candidates
 
 
+def generate_tactics_with_model_policy(search: SearchSession) -> TacticBatch:
+    """Generate the next ordinary batch for the active search node."""
+
+    if search.pending_batch is not None:
+        return search.next_tactic_batch()
+    if search.node is None:
+        raise RuntimeError("search has no active node")
+    if search.candidate_pool is None:
+        tried = frozenset(search.tried_tactics)
+        try:
+            ranked = search.context.tactic_ranker.rank(
+                search.node.state,
+                search.goal,
+                excluded_tactics=tried,
+            )
+        except TypeError as error:
+            if "excluded_tactics" not in str(error):
+                raise
+            ranked = search.context.tactic_ranker.rank(
+                search.node.state,
+                search.goal,
+            )
+        seen = set(tried)
+        candidates = []
+        for candidate in ranked:
+            if candidate.origin is not CandidateOrigin.ORDINARY:
+                raise ValueError(
+                    "conventional tactic policy must return ordinary candidates"
+                )
+            normalized = normalize_lean4_tactic(
+                candidate.source, search.node.state.expression
+            )
+            if candidate_rejection_reason(
+                normalized,
+                search.node.state.expression,
+                excluded_tactics=tried,
+            ) is not None:
+                continue
+            candidate = replace(candidate, source=normalized)
+            key = search.context.tactic_canonicalizer.canonicalize(normalized)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
+        search.begin_candidate_pool(tuple(candidates))
+    return search.next_tactic_batch()
+
+
 def _replacement_repair(
     messages, discarded: list[str], *, require_analogy: bool = False
 ):
@@ -262,4 +315,8 @@ def _replacement_repair(
     )
 
 
-__all__ = ["TacticRanker", "TacticRankingError"]
+__all__ = [
+    "TacticRanker",
+    "TacticRankingError",
+    "generate_tactics_with_model_policy",
+]

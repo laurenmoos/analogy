@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from analogy.inference import prompts as prompts_module
 from analogy.inference.prompts import (
     PromptCatalog,
     PromptError,
@@ -12,6 +13,8 @@ from analogy.inference.prompts import (
     focused_lean_goal,
     render_lean_goal_for_model,
 )
+from analogy.records import Message
+from analogy.solver.model_policy import _replacement_repair
 
 
 ROOT = Path(__file__).parents[1]
@@ -35,6 +38,33 @@ def test_prompt_catalog_renders_named_values_and_preserves_literal_json(tmp_path
     assert messages[1].content == "Need: one item"
     assert catalog.version("story") == "story-v1"
     assert catalog.content_hash == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_prompt_catalog_renders_versioned_text_fragments(tmp_path):
+    path = write_catalog(tmp_path / "prompts.yaml", """prompts:
+  card:
+    version: card-v1
+    text: 'Use {{operator}} on {{operand}}.'
+""")
+
+    catalog = PromptCatalog.load(path)
+
+    assert catalog.text("card", operator="exact", operand="h") == "Use exact on h."
+    assert catalog.version("card") == "card-v1"
+    with pytest.raises(PromptError, match="text fragment"):
+        catalog.messages("card", operator="exact", operand="h")
+
+
+def test_prompt_catalog_rejects_text_rendering_for_chat_prompt(tmp_path):
+    path = write_catalog(tmp_path / "prompts.yaml", """prompts:
+  story:
+    version: story-v1
+    system: system
+    user: user
+""")
+
+    with pytest.raises(PromptError, match="chat prompt"):
+        PromptCatalog.load(path).text("story")
 
 
 @pytest.mark.parametrize("text, diagnostic", [
@@ -74,6 +104,21 @@ def test_prompt_catalog_rejects_missing_extra_and_unknown_prompt_values(tmp_path
 )
 def test_negation_goals_are_also_shown_as_implications(source, expected):
     assert render_lean_goal_for_model(source) == expected
+
+
+def test_negation_explanation_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
+    path = write_catalog(tmp_path / "prompts.yaml", """prompts:
+  negation_definition:
+    version: negation-definition-test-v1
+    text: '{{prefix}}¬{{body}} CUSTOM {{body}}'
+""")
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+
+    assert render_lean_goal_for_model("⊢ ¬P") == "⊢ ¬P CUSTOM P"
 
 
 def test_analogy_fallback_requests_exactly_one_tactic():
@@ -247,6 +292,54 @@ def test_tactic_card_requires_operand_tactics_to_be_complete():
     assert "apply <hyp>" in card
     assert "rw [<hyp>]" in card
     assert len(card) <= 240
+
+
+def test_tactic_card_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
+    path = write_catalog(tmp_path / "prompts.yaml", """prompts:
+  lean_tactic_card:
+    version: lean-tactic-card-test-v1
+    text: 'CUSTOM {{recipes}}TAIL'
+  lean_tactic_card_recipes:
+    version: lean-tactic-card-recipes-test-v1
+    text: 'RECIPES={{recipes}}; '
+""")
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+
+    assert lean_tactic_card("P : Prop\n⊢ P") == "CUSTOM TAIL"
+    assert lean_tactic_card("H U : Prop\nh : H ∧ U\n⊢ H") == (
+        "CUSTOM RECIPES=obtain ⟨hH,hU⟩ := h; TAIL"
+    )
+
+
+def test_ranker_repair_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
+    path = write_catalog(tmp_path / "prompts.yaml", """prompts:
+  ranker_replacement_repair:
+    version: ranker-replacement-repair-test-v1
+    text: 'CUSTOM REMOVED={{discarded}} CONTRACT={{contract}}'
+  ranker_analogy_output_contract:
+    version: ranker-analogy-output-contract-test-v1
+    text: 'CUSTOM CONTRACT'
+""")
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+
+    repaired = _replacement_repair(
+        (Message("system", "base"),),
+        ["exact h: already tried"],
+        require_analogy=True,
+    )
+
+    assert repaired[-1].content == (
+        "CUSTOM REMOVED=exact h: already tried "
+        "CONTRACT=CUSTOM CONTRACT"
+    )
 
 
 def test_focused_lean_goal_drops_later_cases_but_keeps_first_context():

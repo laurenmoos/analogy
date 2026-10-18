@@ -95,8 +95,9 @@ def _fresh_identifier(base: str, occupied: set[str]) -> str:
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     version: str
-    system: str
-    user: str
+    system: str | None = None
+    user: str | None = None
+    text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,15 +120,16 @@ class PromptCatalog:
             raise PromptError("prompts must be a nonempty mapping")
         templates: dict[str, PromptTemplate] = {}
         for name, value in prompts.items():
-            if (
-                not isinstance(name, str)
-                or not name.strip()
-                or not isinstance(value, dict)
-                or set(value) != {"version", "system", "user"}
-                or any(
-                    not isinstance(value[key], str) or not value[key].strip()
-                    for key in ("version", "system", "user")
-                )
+            valid_shape = isinstance(value, dict) and set(value) in (
+                {"version", "system", "user"},
+                {"version", "text"},
+            )
+            if not isinstance(name, str) or not name.strip() or not valid_shape:
+                raise PromptError(f"invalid prompt template: {name!r}")
+            assert isinstance(value, dict)
+            if any(
+                not isinstance(item, str) or not item.strip()
+                for item in value.values()
             ):
                 raise PromptError(f"invalid prompt template: {name!r}")
             templates[name] = PromptTemplate(**value)
@@ -137,30 +139,44 @@ class PromptCatalog:
         )
 
     def messages(self, name: str, **values: object) -> tuple[Message, ...]:
+        template = self._template(name)
+        if template.system is None or template.user is None:
+            raise PromptError(f"prompt {name!r} is a text fragment, not a chat prompt")
+        supplied = self._values(template.system + template.user, values)
+        return Message("system", self._render(template.system, supplied)), Message(
+            "user", self._render(template.user, supplied)
+        )
+
+    def text(self, name: str, **values: object) -> str:
+        template = self._template(name)
+        if template.text is None:
+            raise PromptError(f"prompt {name!r} is a chat prompt, not a text fragment")
+        supplied = self._values(template.text, values)
+        return self._render(template.text, supplied)
+
+    def _template(self, name: str) -> PromptTemplate:
         try:
-            template = self.templates[name]
+            return self.templates[name]
         except KeyError as error:
             raise PromptError(f"unknown prompt: {name}") from error
+
+    @staticmethod
+    def _values(source: str, values: Mapping[str, object]) -> dict[str, str]:
         supplied = {key: str(value) for key, value in values.items()}
-        required = set(_VARIABLE.findall(template.system + template.user))
+        required = set(_VARIABLE.findall(source))
         if required != set(supplied):
             raise PromptError(
                 "prompt variables differ: "
                 f"required={sorted(required)} supplied={sorted(supplied)}"
             )
+        return supplied
 
-        def render(text: str) -> str:
-            return _VARIABLE.sub(lambda match: supplied[match.group(1)], text)
-
-        return Message("system", render(template.system)), Message(
-            "user", render(template.user)
-        )
+    @staticmethod
+    def _render(source: str, values: Mapping[str, str]) -> str:
+        return _VARIABLE.sub(lambda match: values[match.group(1)], source)
 
     def version(self, name: str) -> str:
-        try:
-            return self.templates[name].version
-        except KeyError as error:
-            raise PromptError(f"unknown prompt: {name}") from error
+        return self._template(name).version
 
 
 @lru_cache(maxsize=None)
@@ -193,7 +209,11 @@ def render_lean_goal_for_model(text: str) -> str:
     def expand(match: re.Match[str]) -> str:
         prefix = match.group("prefix") or ""
         body = match.group("body").strip()
-        return f"{prefix}¬{body}  [definitionally: {body} → False]"
+        return prompt_catalog().text(
+            "negation_definition",
+            prefix=prefix,
+            body=body,
+        )
 
     return _NEGATION_GOAL.sub(expand, text)
 
@@ -250,10 +270,13 @@ def lean_tactic_card(proof_state: str) -> str:
             match = re.match(r"(?:∀|forall)\s+([A-Za-z_][\w']*)", target)
             recipes.append(f"intro {match.group(1) if match else 'x'}")
 
-    card = "Lean card: complete line; no tauto/itauto. "
-    if recipes:
-        card += "Destruct/introduce: " + "; ".join(recipes) + ". "
-    card += "Build goals: Or.inl _, Or.inr _, ⟨_,_⟩. Use exact <hyp>, apply <hyp>, assumption, rw [<hyp>]."
+    catalog = prompt_catalog()
+    recipe_text = (
+        catalog.text("lean_tactic_card_recipes", recipes="; ".join(recipes))
+        if recipes
+        else ""
+    )
+    card = catalog.text("lean_tactic_card", recipes=recipe_text)
     return card if len(card) <= 240 else card[:239] + "…"
 
 

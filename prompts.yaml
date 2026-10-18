@@ -107,3 +107,170 @@ prompts:
       with a new mapping and numbered story. A SAT restart/countermodel requires change_domain.
       Return the updated <analogy> block, then JSON with exactly "action", "predicted_state", and "tactic".
       predicted_state is literal SOLVED or the exact full focused Lean state expected immediately after the first tactic.
+
+  lean_tactic_card:
+    version: lean-tactic-card-v1
+    text: >-
+      Lean card: complete line; no tauto/itauto. {{recipes}}Build goals: Or.inl _, Or.inr _, ⟨_,_⟩.
+      Use exact <hyp>, apply <hyp>, assumption, rw [<hyp>].
+
+  lean_tactic_card_recipes:
+    version: lean-tactic-card-recipes-v1
+    text: 'Destruct/introduce: {{recipes}}. '
+
+  proof_search_history:
+    version: proof-search-history-v1
+    text: |-
+      Proof search history (analogy blocks removed):
+      {{history}}
+
+  ranker_json_output_contract:
+    version: ranker-json-output-contract-v1
+    text: 'Return only the requested JSON array.'
+
+  ranker_analogy_output_contract:
+    version: ranker-analogy-output-contract-v1
+    text: 'Return the current <analogy> block unchanged, followed by the requested JSON array.'
+
+  ranker_replacement_repair:
+    version: ranker-replacement-repair-v1
+    text: |-
+      These proposals were removed before Lean:
+      - {{discarded}}
+      Return replacement candidates only. Do not repeat any removed or already tried tactic. Supply every operand,
+      for example `exact h2`, `apply h1`, `rw [h1]`, or `rcases h with ⟨hH,hU⟩`. {{contract}}
+
+  analogy_rescue_output_contract:
+    version: analogy-rescue-output-contract-v1
+    text: 'Return only strict JSON with exactly "analogy", "predicted_state", and singular "tactic".'
+
+  analogy_update_output_contract:
+    version: analogy-update-output-contract-v1
+    text: >-
+      Return one updated <analogy> block followed by strict JSON with exactly "action", "predicted_state", and "tactic".
+
+  analogy_duplicate_repair:
+    version: analogy-duplicate-repair-v1
+    text: |-
+      The previous tactic was valid but already tried at this proof state. Return a different tactic.
+
+      Tactics already tried here: {{tried_tactics}}
+
+      Duplicate diagnostic:
+      {{diagnostic}}
+
+      Previous response (analogy block removed):
+      {{previous_response}}
+
+      {{contract}}
+
+  analogy_invalid_repair:
+    version: analogy-invalid-repair-v1
+    text: |-
+      The previous response was invalid.
+
+      Parser diagnostic:
+      {{diagnostic}}
+
+      Previous response (analogy block removed):
+      {{previous_response}}
+
+      {{contract}}
+
+  analogy_no_change_repair:
+    version: analogy-no-change-repair-v1
+    text: |-
+      The previous response predicted no state change, so it was not sent to Lean. Return a tactic with a different immediate state prediction.
+
+      Tactics already tried here: {{tried_tactics}}
+
+      {{contract}}
+
+  analogy_lean_correction_repair:
+    version: analogy-lean-correction-repair-v1
+    text: |-
+      The previous tactic did not make usable progress.
+      Tactic: {{tactic}}
+      Lean diagnostic: {{diagnostic}}
+      Return a different complete tactic as the required strict JSON object.
+      {{contract}}
+
+  analogy_search_correction_repair:
+    version: analogy-search-correction-repair-v1
+    text: |-
+      The previous tactic did not make usable progress.
+      Tactic: {{tactic}}
+      Search diagnostic: accepted but discarded: {{reason}}
+      Return a different complete tactic as the required strict JSON object.
+      {{contract}}
+
+  analogy_missing_lean_diagnostic:
+    version: analogy-missing-lean-diagnostic-v1
+    text: 'Lean rejected the tactic'
+
+  analogy_pending_context:
+    version: analogy-pending-context-v1
+    text: |-
+      <analogy>
+      active: (none; change_domain required)
+      abandoned domains:
+      {{abandoned_domains}}
+      </analogy>
+
+  negation_definition:
+    version: negation-definition-v1
+    text: '{{prefix}}¬{{body}}  [definitionally: {{body}} → False]'
+
+  semantic_valid_guidance:
+    version: semantic-valid-guidance-v1
+    text: 'SAT: no countermodel; continue from this state.'
+
+  semantic_countermodel_guidance:
+    version: semantic-countermodel-guidance-v1
+    text: 'SAT restart: {{edge}} led to a countermodel ({{assignments}}); choose a different plan from this last valid state.'
+
+  proof_language_view:
+    version: proof-language-view-v1
+    system: Represent this proof-search state for a frozen embedding model.
+    user: |-
+      Overall target:
+      {{overall_target}}
+      Current proof state:
+      {{current_state}}
+      Accepted tactics:
+      {{accepted}}
+      Failed tactics:
+      {{failed}}
+
+  policy_target_embedding:
+    version: policy-target-embedding-v1
+    system: Represent the fixed theorem target.
+    user: '{{target}}'
+
+  policy_current_embedding:
+    version: policy-current-embedding-v1
+    system: Represent the current proof need and structural signature.
+    user: |-
+      {{language_view}}
+      Structure:
+      {{structure}}
+
+  transition_embedding:
+    version: transition-embedding-v1
+    system: Represent the change between two proof states.
+    user: |-
+      Before proof state:
+      {{before}}
+      After proof state:
+      {{after}}
+
+  observed_transition_embedding:
+    version: observed-transition-embedding-v1
+    system: Represent one verified proof-state transition.
+    user: |-
+      Before proof state:
+      {{before}}
+      Verified tactic:
+      {{tactic}}
+      After proof state:
+      {{after}}

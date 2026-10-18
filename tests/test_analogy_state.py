@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from analogy.inference import prompts as prompts_module
+from analogy.inference.prompts import PromptCatalog
 from analogy.solver.analogy_state import (
     AnalogyScratchpad,
     AnalogyState,
@@ -172,3 +174,22 @@ def test_history_is_bounded_and_never_contains_analogy_blocks() -> None:
         "third: Lean accepted",
     )
     assert all("<analogy>" not in item for item in scratchpad.history)
+
+
+def test_pending_context_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
+    path = tmp_path / "prompts.yaml"
+    path.write_text(
+        """prompts:
+  analogy_pending_context:
+    version: analogy-pending-context-test-v1
+    text: 'CUSTOM {{abandoned_domains}}'
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+
+    assert AnalogyScratchpad().context_block() == "CUSTOM - (none)"

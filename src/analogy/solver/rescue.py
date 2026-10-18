@@ -462,9 +462,10 @@ class AnalogyFallback:
             if scratchpad.history:
                 user = Message(
                     user.role,
-                    user.content
-                    + "\n\nProof search history (analogy blocks removed):\n"
-                    + "\n".join(scratchpad.history),
+                    user.content + "\n\n" + prompt_catalog().text(
+                        "proof_search_history",
+                        history="\n".join(scratchpad.history),
+                    ),
                 )
             messages = (
                 messages[0],
@@ -504,7 +505,7 @@ class AnalogyFallback:
                 if proposal.candidate.source in attempted_tactics:
                     diagnostic = (
                         f"tactic {proposal.candidate.source!r} was already attempted "
-                        "at this proof state; return a different tactic"
+                        "at this proof state"
                     )
                     generation = GenerationAttempt(
                         seed,
@@ -529,13 +530,13 @@ class AnalogyFallback:
                     active_messages = messages + (
                         Message(
                             "user",
-                            "The previous tactic was valid but already tried at this "
-                            "proof state. Return a different tactic.\n\n"
-                            f"Tactics already tried here: {_bounded_tactic_ledger(attempted_order)}\n\n"
-                            f"Duplicate diagnostic:\n{diagnostic}\n\n"
-                            f"Previous response (analogy block removed):\n"
-                            f"{remove_analogy_blocks(raw)}\n\n"
-                            f"{_rescue_output_contract(scratchpad)}",
+                            prompt_catalog().text(
+                                "analogy_duplicate_repair",
+                                tried_tactics=_bounded_tactic_ledger(attempted_order),
+                                diagnostic=diagnostic,
+                                previous_response=remove_analogy_blocks(raw),
+                                contract=_rescue_output_contract(scratchpad),
+                            ),
                         ),
                     )
                     continue
@@ -550,11 +551,12 @@ class AnalogyFallback:
                 active_messages = messages + (
                     Message(
                         "user",
-                        "The previous response was invalid.\n\n"
-                        f"Parser diagnostic:\n{error}\n\n"
-                        f"Previous response (analogy block removed):\n"
-                        f"{remove_analogy_blocks(raw)}\n\n"
-                        f"{_rescue_output_contract(scratchpad)}",
+                        prompt_catalog().text(
+                            "analogy_invalid_repair",
+                            diagnostic=error,
+                            previous_response=remove_analogy_blocks(raw),
+                            contract=_rescue_output_contract(scratchpad),
+                        ),
                     ),
                 )
                 continue
@@ -601,10 +603,11 @@ class AnalogyFallback:
                 active_messages = messages + (
                     Message(
                         "user",
-                        "The previous response predicted no state change, so it was not sent to Lean. "
-                        "Return a tactic with a different immediate state prediction.\n\n"
-                        f"Tactics already tried here: {_bounded_tactic_ledger(attempted_order)}\n\n"
-                        + _rescue_output_contract(scratchpad),
+                        prompt_catalog().text(
+                            "analogy_no_change_repair",
+                            tried_tactics=_bounded_tactic_ledger(attempted_order),
+                            contract=_rescue_output_contract(scratchpad),
+                        ),
                     ),
                 )
                 continue
@@ -650,9 +653,11 @@ class AnalogyFallback:
             active_messages = messages + (
                 Message(
                     "user",
-                    _analogy_correction_feedback(proposal, evaluation)
-                    + "\n"
-                    + _rescue_output_contract(scratchpad),
+                    _analogy_correction_feedback(
+                        proposal,
+                        evaluation,
+                        contract=_rescue_output_contract(scratchpad),
+                    ),
                 ),
             )
         if scratchpad is not None and calibrated_update is not None:
@@ -690,14 +695,10 @@ def _bounded_tactic_ledger(tactics: list[str], *, count: int = 8, limit: int = 2
 
 
 def _rescue_output_contract(scratchpad: AnalogyScratchpad | None) -> str:
-    if scratchpad is None:
-        return (
-            'Return only strict JSON with exactly "analogy", '
-            '"predicted_state", and singular "tactic".'
-        )
-    return (
-        "Return one updated <analogy> block followed by strict JSON with exactly "
-        '"action", "predicted_state", and "tactic".'
+    return prompt_catalog().text(
+        "analogy_rescue_output_contract"
+        if scratchpad is None
+        else "analogy_update_output_contract"
     )
 
 
@@ -724,26 +725,33 @@ def _prediction_matches(predicted_state: str, evaluation: TacticEvaluation) -> b
 def _analogy_correction_feedback(
     proposal: RescueProposal,
     evaluation: TacticEvaluation,
+    *,
+    contract: str,
 ) -> str:
+    catalog = prompt_catalog()
     if evaluation.result.status is TacticStatus.ERROR:
         raw = next(
             (item for item in evaluation.result.diagnostics if item.strip()),
-            "Lean rejected the tactic",
+            None,
         )
-        label = "Lean diagnostic"
-    else:
-        reason = (
-            evaluation.discarded.reason.value
-            if evaluation.discarded is not None
-            else "no_progress"
+        if raw is None:
+            raw = catalog.text("analogy_missing_lean_diagnostic")
+        return catalog.text(
+            "analogy_lean_correction_repair",
+            tactic=proposal.candidate.source,
+            diagnostic=_bounded_diagnostic(raw),
+            contract=contract,
         )
-        raw = f"accepted but discarded: {reason}"
-        label = "Search diagnostic"
-    return (
-        "The previous tactic did not make usable progress.\n"
-        f"Tactic: {proposal.candidate.source}\n"
-        f"{label}: {_bounded_diagnostic(raw)}\n"
-        "Return a different complete tactic as the required strict JSON object."
+    reason = (
+        evaluation.discarded.reason.value
+        if evaluation.discarded is not None
+        else "no_progress"
+    )
+    return catalog.text(
+        "analogy_search_correction_repair",
+        tactic=proposal.candidate.source,
+        reason=reason,
+        contract=contract,
     )
 
 

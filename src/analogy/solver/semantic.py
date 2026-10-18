@@ -8,6 +8,7 @@ from itertools import product
 import re
 from typing import Protocol, TypeAlias
 
+from ..inference.prompts import prompt_catalog
 from ..records import SymbolicState, TacticResult
 from .proof_inventory import InventoryError, ProofGoal, proof_goals, proposition_root
 
@@ -118,15 +119,19 @@ class SemanticChecker(Protocol):
 def render_semantic_guidance(event: SemanticRecoveryEvent) -> str:
     """Render deterministic SAT guidance in at most 240 characters."""
     if event.result is SemanticResult.VALID:
-        return "SAT: no countermodel; continue from this state."
+        return _bounded_guidance(prompt_catalog().text("semantic_valid_guidance"))
     if event.result is not SemanticResult.COUNTERMODEL or event.rescue_state_id is None:
         raise SemanticCheckError("semantic guidance requires a validated rescue state")
     edge = " ".join(event.abandoned_tactics[0].split())
     if len(edge) > 72:
         edge = edge[:71] + "…"
-    prefix = f"SAT restart: {edge} led to a countermodel ("
-    suffix = "); choose a different plan from this last valid state."
-    available = 240 - len(prefix) - len(suffix)
+    catalog = prompt_catalog()
+    empty = catalog.text(
+        "semantic_countermodel_guidance",
+        edge=edge,
+        assignments="",
+    )
+    available = max(0, 240 - len(empty))
     assignments: list[str] = []
     for atom, value in event.countermodel:
         item = f"{atom}={'true' if value else 'false'}"
@@ -141,7 +146,17 @@ def render_semantic_guidance(event: SemanticRecoveryEvent) -> str:
     body = ", ".join(assignments) if assignments else "no variable assignments"
     if len(body) > available:
         body = body[: max(0, available - 1)] + "…"
-    return prefix + body + suffix
+    return _bounded_guidance(
+        catalog.text(
+            "semantic_countermodel_guidance",
+            edge=edge,
+            assignments=body,
+        )
+    )
+
+
+def _bounded_guidance(text: str) -> str:
+    return text if len(text) <= 240 else text[:239] + "…"
 
 
 Expr: TypeAlias = tuple

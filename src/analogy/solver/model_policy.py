@@ -191,9 +191,10 @@ class TacticRanker:
         if scratchpad.history:
             user = Message(
                 user.role,
-                user.content
-                + "\n\nProof search history (analogy blocks removed):\n"
-                + "\n".join(scratchpad.history),
+                user.content + "\n\n" + prompt_catalog().text(
+                    "proof_search_history",
+                    history="\n".join(scratchpad.history),
+                ),
             )
         if scratchpad.current is None:
             return messages[0], user
@@ -240,36 +241,23 @@ class TacticRanker:
         return candidates
 
 
-def _incomplete_pool_repair(messages, raw: str, error: Exception):
-    return messages + (
-        Message(
-            "user",
-            "Every proposed tactic was incomplete. "
-            f"Parser diagnostic: {error}\n"
-            "Supply required operands, for example `exact h2`, `apply h1`, "
-            "`rw [h1]`, or `rcases h with ⟨hH,hU⟩`. "
-            "Return only the requested JSON array.",
-        ),
-    )
-
-
 def _replacement_repair(
     messages, discarded: list[str], *, require_analogy: bool = False
 ):
-    contract = (
-        "Return the current <analogy> block unchanged, followed by the requested JSON array."
+    catalog = prompt_catalog()
+    contract = catalog.text(
+        "ranker_analogy_output_contract"
         if require_analogy
-        else "Return only the requested JSON array."
+        else "ranker_json_output_contract"
     )
     return messages + (
         Message(
             "user",
-            "These proposals were removed before Lean:\n- "
-            + "\n- ".join(discarded)
-            + "\nReturn replacement candidates only. Do not repeat any removed or "
-            "already tried tactic. Supply every operand, for example `exact h2`, "
-            "`apply h1`, `rw [h1]`, or `rcases h with ⟨hH,hU⟩`. "
-            + contract,
+            catalog.text(
+                "ranker_replacement_repair",
+                discarded="\n- ".join(discarded),
+                contract=contract,
+            ),
         ),
     )
 

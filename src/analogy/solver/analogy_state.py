@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, replace
 from enum import Enum
 
+from ..inference.prompts import prompt_catalog
+
 
 _BLOCK = re.compile(r"<analogy>\s*\n(?P<body>.*?)\n\s*</analogy>", re.DOTALL)
 _STEP = re.compile(r"(?P<number>[1-9][0-9]*)\.\s+(?P<text>.+)")
@@ -186,12 +188,9 @@ class AnalogyScratchpad:
         abandoned = (
             "\n".join(f"- {item}" for item in self._abandoned) or "- (none)"
         )
-        return (
-            "<analogy>\n"
-            "active: (none; change_domain required)\n"
-            "abandoned domains:\n"
-            f"{abandoned}\n"
-            "</analogy>"
+        return prompt_catalog().text(
+            "analogy_pending_context",
+            abandoned_domains=abandoned,
         )
 
     def initialize(self, state: AnalogyState) -> None:

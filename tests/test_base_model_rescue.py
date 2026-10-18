@@ -1,3 +1,5 @@
+from analogy.inference import prompts as prompts_module
+from analogy.inference.prompts import PromptCatalog
 from analogy.records import (
     CandidateOrigin,
     DiscardReason,
@@ -16,6 +18,7 @@ from analogy.solver.rescue import (
     RescueOutputError,
     RescueTermination,
     TacticEvaluation,
+    _analogy_correction_feedback,
     parse_analogy_tactic,
 )
 from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
@@ -614,7 +617,43 @@ def test_duplicate_ordinary_tactic_is_logged_as_duplicate_and_resampled_without_
     assert outcome.rollouts[0].termination is RescueTermination.DUPLICATE
     assert outcome.rollouts[0].generations[0].status is GenerationStatus.DUPLICATE
     assert outcome.rollouts[0].generations[0].error_kind == "duplicate_tactic"
+    assert "return a different tactic" not in (
+        outcome.rollouts[0].generations[0].diagnostic or ""
+    )
     assert outcome.rollouts[1].generations[0].repair is True
+
+
+def test_correction_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
+    path = tmp_path / "prompts.yaml"
+    path.write_text(
+        """prompts:
+  analogy_lean_correction_repair:
+    version: analogy-lean-correction-repair-test-v1
+    text: 'CUSTOM {{tactic}} {{diagnostic}} {{contract}}'
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+    proposal = parse_analogy_tactic(
+        '{"analogy":"lock","predicted_state":"SOLVED","tactic":"exact h"}'
+    )[1]
+    evaluation = TacticEvaluation(
+        TacticResult(
+            proposal.candidate,
+            TacticStatus.ERROR,
+            diagnostics=("unknown h",),
+        )
+    )
+
+    assert _analogy_correction_feedback(
+        proposal,
+        evaluation,
+        contract="CONTRACT",
+    ) == "CUSTOM exact h unknown h CONTRACT"
 
 
 def test_predicted_no_change_is_labeled_and_never_sent_to_lean():

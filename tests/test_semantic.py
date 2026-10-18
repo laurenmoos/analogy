@@ -2,20 +2,79 @@ from __future__ import annotations
 
 import pytest
 
+from analogy.inference import prompts as prompts_module
+from analogy.inference.prompts import PromptCatalog
 from analogy.records import SymbolicState
 from analogy.solver.semantic import (
     SemanticPrune,
     ExhaustiveSemanticChecker,
     SemanticCheckError,
+    SemanticRecoveryEvent,
     SemanticResult,
     build_countermodel_table,
     forced_disjunction_tactic,
     render_countermodel_table,
+    render_semantic_guidance,
 )
 
 
 def _state(expression: str) -> SymbolicState:
     return SymbolicState("state", expression, "lean4")
+
+
+def test_semantic_guidance_wording_comes_from_prompt_catalog(tmp_path, monkeypatch):
+    path = tmp_path / "prompts.yaml"
+    path.write_text(
+        """prompts:
+  semantic_valid_guidance:
+    version: semantic-valid-guidance-test-v1
+    text: CUSTOM VALID
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+    event = SemanticRecoveryEvent("event", "state", SemanticResult.VALID)
+
+    assert render_semantic_guidance(event) == "CUSTOM VALID"
+
+
+def test_semantic_guidance_bounds_oversized_catalog_templates(tmp_path, monkeypatch):
+    path = tmp_path / "prompts.yaml"
+    path.write_text(
+        "prompts:\n"
+        "  semantic_valid_guidance:\n"
+        "    version: semantic-valid-guidance-test-v1\n"
+        f"    text: '{'V' * 300}'\n"
+        "  semantic_countermodel_guidance:\n"
+        "    version: semantic-countermodel-guidance-test-v1\n"
+        f"    text: '{'C' * 260} {{{{edge}}}} {{{{assignments}}}}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prompts_module,
+        "_ACTIVE_CATALOG",
+        PromptCatalog.load(path),
+    )
+    valid = SemanticRecoveryEvent("valid", "state", SemanticResult.VALID)
+    countermodel = SemanticRecoveryEvent(
+        "countermodel",
+        "state",
+        SemanticResult.COUNTERMODEL,
+        countermodel=(("P", False),),
+        rescue_state_id="state",
+        abandoned_tactics=("left",),
+    )
+
+    for rendered in (
+        render_semantic_guidance(valid),
+        render_semantic_guidance(countermodel),
+    ):
+        assert len(rendered) == 240
+        assert rendered.endswith("…")
 
 
 def test_assesses_a_valid_goal_from_its_local_hypotheses() -> None:

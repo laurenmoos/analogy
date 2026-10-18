@@ -8,34 +8,32 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Protocol
 
-from ..model.parser import (
+from ...model.parser import (
     candidate_rejection_reason,
     normalize_lean4_tactic,
     tactic_is_incomplete,
 )
-from ..model.prompts import (
+from ...model.prompt_runner import GenerationAttempt, GenerationStatus
+from ...model.prompts import (
     focused_lean_goal,
     lean_tactic_card,
     prompt_catalog,
     render_lean_goal_for_model,
 )
-from ..utils.records import (
+from ...utils.records import (
     CancellationToken,
     CandidateOrigin,
     DiscardedSuccessor,
-    Embedding,
     Message,
     SearchNode,
     SymbolicState,
     TacticCandidate,
     TacticResult,
     TacticStatus,
-    _finite_float,
     _require_text,
-    _text_tuple,
     _typed_tuple,
 )
-from .analogy_state import (
+from .state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,
@@ -87,13 +85,6 @@ class RescueTermination(str, Enum):
     PREDICTED_NO_CHANGE = "predicted_no_change"
 
 
-class GenerationStatus(str, Enum):
-    VALID = "valid"
-    INVALID = "invalid"
-    RUNTIME_ERROR = "runtime_error"
-    DUPLICATE = "duplicate"
-
-
 class PredictionLabel(str, Enum):
     PREDICTED_NO_CHANGE = "predicted_no_change"
     PREDICTION_MATCHED = "prediction_matched"
@@ -101,85 +92,15 @@ class PredictionLabel(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationAttempt:
-    seed: int
-    raw_text: str
-    status: GenerationStatus
-    repair: bool = False
-    error_kind: str | None = None
-    diagnostic: str | None = None
+class AnalogyGenerationAttempt(GenerationAttempt):
     prediction_label: PredictionLabel | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
-            raise ValueError("seed must be a non-negative integer")
-        _require_text(self.raw_text, "raw_text", allow_empty=True)
-        if not isinstance(self.status, GenerationStatus):
-            raise ValueError("status must be a GenerationStatus")
+        super().__post_init__()
         if self.prediction_label is not None and not isinstance(
             self.prediction_label, PredictionLabel
         ):
             raise ValueError("prediction_label must be a PredictionLabel or None")
-        if self.status is GenerationStatus.VALID:
-            if self.error_kind is not None or self.diagnostic is not None:
-                raise ValueError("valid generation attempts must not include errors")
-        else:
-            _require_text(self.error_kind, "error_kind")
-            _require_text(self.diagnostic, "diagnostic")
-
-
-@dataclass(frozen=True, slots=True)
-class ProofRescueContext:
-    state: SymbolicState
-    goal: SymbolicState
-    accepted_tactics: tuple[str, ...]
-    failed_tactics: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.state, SymbolicState) or not isinstance(self.goal, SymbolicState):
-            raise ValueError("state and goal must be SymbolicState values")
-        object.__setattr__(self, "accepted_tactics", _text_tuple(self.accepted_tactics, "accepted_tactics"))
-        object.__setattr__(self, "failed_tactics", _text_tuple(self.failed_tactics, "failed_tactics"))
-
-
-def zero_embedding_like(embedding: Embedding, *, rendering: str = "(none)") -> Embedding:
-    return replace(
-        embedding,
-        values=(0.0,) * embedding.dimension,
-        text_hash=hashlib.sha256(rendering.encode("utf-8")).hexdigest(),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class ProofRepresentation:
-    context: ProofRescueContext
-    language_prompt_hash: str
-    structure_prompt_hash: str
-    language_embedding: Embedding
-    structure_embedding: Embedding
-    transition_embedding: Embedding | None = None
-    analogy_embedding: Embedding | None = None
-    scalar_features: tuple[float, ...] = (0.0, 1.0, 1.0, 0.0)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.context, ProofRescueContext):
-            raise ValueError("context must be a ProofRescueContext")
-        _require_text(self.language_prompt_hash, "language_prompt_hash")
-        _require_text(self.structure_prompt_hash, "structure_prompt_hash")
-        if self.language_embedding.dimension != self.structure_embedding.dimension:
-            raise ValueError("proof-view embedding dimensions must match")
-        for name in ("transition_embedding", "analogy_embedding"):
-            value = getattr(self, name)
-            if value is None:
-                value = zero_embedding_like(self.language_embedding)
-                object.__setattr__(self, name, value)
-            if value.dimension != self.language_embedding.dimension:
-                raise ValueError("proof-view embedding dimensions must match")
-        object.__setattr__(self, "scalar_features", tuple(_finite_float(value, "scalar_features") for value in self.scalar_features))
-
-    @property
-    def dimension(self) -> int:
-        return self.language_embedding.dimension
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +148,7 @@ class RescueRollout:
     attempts: tuple[RescueAttempt, ...]
     termination: RescueTermination
     reward: float | None = None
-    generations: tuple[GenerationAttempt, ...] = ()
+    generations: tuple[AnalogyGenerationAttempt, ...] = ()
     analogy_stream: Any | None = None
     analogy_trace: Any | None = None
     semantic_event_id: str | None = None
@@ -237,7 +158,13 @@ class RescueRollout:
         _require_text(self.state_id, "state_id")
         object.__setattr__(self, "proposals", _typed_tuple(self.proposals, RescueProposal, "proposals"))
         object.__setattr__(self, "attempts", _typed_tuple(self.attempts, RescueAttempt, "attempts"))
-        object.__setattr__(self, "generations", _typed_tuple(self.generations, GenerationAttempt, "generations"))
+        object.__setattr__(
+            self,
+            "generations",
+            _typed_tuple(
+                self.generations, AnalogyGenerationAttempt, "generations"
+            ),
+        )
         if not isinstance(self.termination, RescueTermination):
             raise ValueError("termination must be a RescueTermination")
         if self.semantic_event_id is not None:
@@ -247,7 +174,7 @@ class RescueRollout:
 
 
 @dataclass(frozen=True, slots=True)
-class GenericRescueOutcome:
+class AnalogyRescueOutcome:
     completed_proof: str | None = None
     successor: SearchNode | None = None
     rollouts: tuple[RescueRollout, ...] = ()
@@ -259,7 +186,7 @@ class GenericRescueOutcome:
             raise ValueError("fallback outcome must have at most one terminal result")
 
 
-class GenericRescueRunner(Protocol):
+class AnalogyRescueRunner(Protocol):
     def search(
         self,
         state: SymbolicState,
@@ -272,7 +199,7 @@ class GenericRescueRunner(Protocol):
         dependency_table: str = "(none)",
         *,
         force_domain_change: bool = False,
-    ) -> GenericRescueOutcome: ...
+    ) -> AnalogyRescueOutcome: ...
 
 
 class RescueOutputError(ValueError):
@@ -422,13 +349,13 @@ class AnalogyFallback:
         dependency_table="(none)",
         *,
         force_domain_change=False,
-    ) -> GenericRescueOutcome:
+    ) -> AnalogyRescueOutcome:
         del tactic_pool
         scratchpad = self._analogy_scratchpad
         if force_domain_change and scratchpad is not None:
             scratchpad.abandon_current()
         if cancellation.is_cancelled():
-            return GenericRescueOutcome(cancelled=True)
+            return AnalogyRescueOutcome(cancelled=True)
         attempted_order: list[str] = []
         attempted_tactics: set[str] = set()
         for attempt in ordinary_attempts:
@@ -477,7 +404,9 @@ class AnalogyFallback:
         calibrated_update: tuple[AnalogyUpdateAction, AnalogyState] | None = None
         for index in range(self._max_model_calls):
             if cancellation.is_cancelled():
-                return GenericRescueOutcome(rollouts=tuple(rollouts), cancelled=True)
+                return AnalogyRescueOutcome(
+                    rollouts=tuple(rollouts), cancelled=True
+                )
             seed = _fallback_seed(self._seed, state, index)
             raw = ""
             try:
@@ -507,7 +436,7 @@ class AnalogyFallback:
                         f"tactic {proposal.candidate.source!r} was already attempted "
                         "at this proof state"
                     )
-                    generation = GenerationAttempt(
+                    generation = AnalogyGenerationAttempt(
                         seed,
                         raw,
                         GenerationStatus.DUPLICATE,
@@ -542,11 +471,18 @@ class AnalogyFallback:
                     continue
                 attempted_tactics.add(proposal.candidate.source)
                 attempted_order.append(proposal.candidate.source)
-                generation = GenerationAttempt(
+                generation = AnalogyGenerationAttempt(
                     seed, raw, GenerationStatus.VALID, repair=index > 0
                 )
             except RescueOutputError as error:
-                generation = GenerationAttempt(seed, raw, GenerationStatus.INVALID, index > 0, "schema", str(error))
+                generation = AnalogyGenerationAttempt(
+                    seed,
+                    raw,
+                    GenerationStatus.INVALID,
+                    index > 0,
+                    "schema",
+                    str(error),
+                )
                 rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, None, (), (), RescueTermination.INVALID_OUTPUT, generations=(generation,)))
                 active_messages = messages + (
                     Message(
@@ -562,7 +498,14 @@ class AnalogyFallback:
                 continue
             except Exception as error:
                 self._trace(state.id, active_messages, seed, raw, error=error)
-                generation = GenerationAttempt(seed, raw, GenerationStatus.RUNTIME_ERROR, index > 0, type(error).__name__, str(error) or type(error).__name__)
+                generation = AnalogyGenerationAttempt(
+                    seed,
+                    raw,
+                    GenerationStatus.RUNTIME_ERROR,
+                    index > 0,
+                    type(error).__name__,
+                    str(error) or type(error).__name__,
+                )
                 rollouts.append(RescueRollout(f"{state.id}:analogy:{index}", state.id, None, (), (), RescueTermination.GENERATION_ERROR, generations=(generation,)))
                 continue
             if cancellation.is_cancelled():
@@ -578,7 +521,7 @@ class AnalogyFallback:
                         analogy_trace=analogy,
                     )
                 )
-                return GenericRescueOutcome(
+                return AnalogyRescueOutcome(
                     rollouts=tuple(rollouts), cancelled=True
                 )
             current_state = _normalized_prediction_state(state.expression)
@@ -641,15 +584,20 @@ class AnalogyFallback:
                     except AnalogyStateError as error:
                         raise RescueOutputError(str(error)) from error
             if evaluation.completed_proof is not None:
-                return GenericRescueOutcome(completed_proof=evaluation.completed_proof, rollouts=tuple(rollouts))
+                return AnalogyRescueOutcome(
+                    completed_proof=evaluation.completed_proof,
+                    rollouts=tuple(rollouts),
+                )
             if evaluation.successor is not None:
-                return GenericRescueOutcome(successor=evaluation.successor, rollouts=tuple(rollouts))
+                return AnalogyRescueOutcome(
+                    successor=evaluation.successor, rollouts=tuple(rollouts)
+                )
             if scratchpad is not None and matched:
                 if calibrated_update is None:
                     assert update_action is not None and update_state is not None
                     calibrated_update = update_action, update_state
             if getattr(evaluation.result, "infrastructure_failure", None) is not None:
-                return GenericRescueOutcome(rollouts=tuple(rollouts))
+                return AnalogyRescueOutcome(rollouts=tuple(rollouts))
             active_messages = messages + (
                 Message(
                     "user",
@@ -662,7 +610,7 @@ class AnalogyFallback:
             )
         if scratchpad is not None and calibrated_update is not None:
             scratchpad.apply(*calibrated_update)
-        return GenericRescueOutcome(rollouts=tuple(rollouts))
+        return AnalogyRescueOutcome(rollouts=tuple(rollouts))
 
     def _trace(self, state_id: str, messages: tuple[Message, ...], seed: int, response: str, *, error: Exception | None = None) -> None:
         if self._trace_sink is not None:
@@ -766,10 +714,8 @@ def _fallback_seed(base_seed: int, state: SymbolicState, attempt: int) -> int:
 
 
 __all__ = [
-    "AnalogyFallback", "GenerationAttempt", "GenerationStatus", "PredictionLabel",
-    "GenericRescueOutcome", "GenericRescueRunner", "PolicyActionRecord",
-    "ProofRepresentation", "ProofRescueContext", "RescueAttempt",
+    "AnalogyFallback", "AnalogyGenerationAttempt", "AnalogyRescueOutcome",
+    "AnalogyRescueRunner", "PolicyActionRecord", "PredictionLabel", "RescueAttempt",
     "RescueOutputError", "RescueProposal", "RescueRollout", "RescueTermination",
     "TacticEvaluation", "parse_analogy_tactic", "parse_analogy_update",
-    "zero_embedding_like",
 ]

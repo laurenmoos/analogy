@@ -7,7 +7,7 @@ import pytest
 from analogy.config import load_config
 from analogy.model import model_provider
 from analogy.solver.model_policy import TacticRanker, TacticRankingError
-from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
+from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
 from analogy.model.prompts import configure_prompt_catalog
 
 

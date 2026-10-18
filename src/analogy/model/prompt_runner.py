@@ -3,13 +3,43 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Generic, TypeVar
 
-from ..utils.records import Message
-from ..solver.rescue import GenerationAttempt, GenerationStatus
+from ..utils.records import Message, _require_text
 
 
 T = TypeVar("T")
+
+
+class GenerationStatus(str, Enum):
+    VALID = "valid"
+    INVALID = "invalid"
+    RUNTIME_ERROR = "runtime_error"
+    DUPLICATE = "duplicate"
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationAttempt:
+    seed: int
+    raw_text: str
+    status: GenerationStatus
+    repair: bool = False
+    error_kind: str | None = None
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+            raise ValueError("seed must be a non-negative integer")
+        _require_text(self.raw_text, "raw_text", allow_empty=True)
+        if not isinstance(self.status, GenerationStatus):
+            raise ValueError("status must be a GenerationStatus")
+        if self.status is GenerationStatus.VALID:
+            if self.error_kind is not None or self.diagnostic is not None:
+                raise ValueError("valid generation attempts must not include errors")
+        else:
+            _require_text(self.error_kind, "error_kind")
+            _require_text(self.diagnostic, "diagnostic")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,4 +118,4 @@ class PromptRunner:
         raise AssertionError("positive prompt attempt loop did not return")
 
 
-__all__ = ["PromptRun", "PromptRunner"]
+__all__ = ["GenerationAttempt", "GenerationStatus", "PromptRun", "PromptRunner"]

@@ -6,8 +6,8 @@ from analogy.utils.records import (
     TacticResult,
     TacticStatus,
 )
-from analogy.solver.rescue import (
-    GenericRescueOutcome,
+from analogy.solver.analogy.rescue import (
+    AnalogyRescueOutcome,
     PolicyActionRecord,
     RescueAttempt,
     RescueProposal,
@@ -128,7 +128,7 @@ def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
                 (attempt,),
                 RescueTermination.COMPLETE,
             )
-            return GenericRescueOutcome(
+            return AnalogyRescueOutcome(
                 completed_proof=evaluation.completed_proof,
                 rollouts=(rollout,),
             )
@@ -206,7 +206,7 @@ def test_analogy_successor_returns_to_the_shared_frontier():
                 (attempt,),
                 RescueTermination.PROGRESS,
             )
-            return GenericRescueOutcome(
+            return AnalogyRescueOutcome(
                 successor=evaluation.successor, rollouts=(rollout,)
             )
 
@@ -397,7 +397,7 @@ def test_false_stuck_state_restarts_analogy_at_nearest_valid_ancestor():
             )
             proposal = RescueProposal(RESCUE_CANDIDATE, "done")
             evaluation = evaluator(RESCUE_CANDIDATE)
-            return GenericRescueOutcome(
+            return AnalogyRescueOutcome(
                 completed_proof=evaluation.completed_proof,
                 rollouts=(
                     RescueRollout(
@@ -460,7 +460,7 @@ def test_false_path_walks_multiple_levels_and_orders_abandoned_tactics():
             assert semantic_guidance.startswith("SAT restart: apply h led")
             proposal = RescueProposal(RESCUE_CANDIDATE, "done")
             evaluation = evaluator(RESCUE_CANDIDATE)
-            return GenericRescueOutcome(
+            return AnalogyRescueOutcome(
                 completed_proof=evaluation.completed_proof,
                 rollouts=(
                     RescueRollout(
@@ -767,7 +767,7 @@ def test_accepted_forced_move_does_not_suppress_stuck_only_analogy():
     class Rescue:
         def search(self, state, *_args, **_kwargs):
             rescue_calls.append(state.id)
-            return GenericRescueOutcome()
+            return AnalogyRescueOutcome()
 
     result = run_episode(
         _context(Verifier(), analogy_enabled=True, rescue=Rescue(), ranker=Ranker(),
@@ -819,7 +819,7 @@ def test_failed_forced_move_is_shared_with_analogy_duplicate_ledger():
                 "rfl",
                 "rcases hPQ with hP | hQ",
             ]
-            return GenericRescueOutcome()
+            return AnalogyRescueOutcome()
 
     result = run_episode(
         _context(

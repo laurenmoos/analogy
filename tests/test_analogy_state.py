@@ -4,7 +4,7 @@ import pytest
 
 from analogy.model import prompts as prompts_module
 from analogy.model.prompts import PromptCatalog
-from analogy.solver.analogy_state import (
+from analogy.solver.analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,

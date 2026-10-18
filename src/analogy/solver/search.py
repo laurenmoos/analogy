@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from .analogy.rescue import RescueRollout
 from .proof.diversity import DiversityObservation
 from .proof.semantic import ForcedMoveEvent, SemanticPrune, SemanticRecoveryEvent
-from .rescue import RescueRollout
 from ..utils.records import (
     CancellationToken,
     DiscardReason,

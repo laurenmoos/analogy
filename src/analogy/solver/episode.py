@@ -25,9 +25,9 @@ from ..utils.records import (
     TacticResult,
     TacticStatus,
 )
-from .rescue import (
-    GenericRescueOutcome,
-    GenericRescueRunner,
+from .analogy.rescue import (
+    AnalogyRescueOutcome,
+    AnalogyRescueRunner,
     RescueRollout,
     RescueTermination,
     TacticEvaluation,
@@ -67,7 +67,7 @@ class EpisodeContext:
     progress_policy: ProgressPolicy
     cancellation: CancellationToken
     analogy_enabled: bool
-    analogy_fallback: GenericRescueRunner
+    analogy_fallback: AnalogyRescueRunner
     ordinary_width: int = 1
     max_expansions: int | None = None
     stuck_state_sink: StuckStateSink | None = None
@@ -704,7 +704,7 @@ def _classify(
     )
 
 
-def _validate_rescue(node: SearchNode, outcome: GenericRescueOutcome) -> None:
+def _validate_rescue(node: SearchNode, outcome: AnalogyRescueOutcome) -> None:
     if any(rollout.state_id != node.state.id for rollout in outcome.rollouts):
         raise ValueError("generic rescue rollouts must belong to the rescued state")
     if outcome.completed_proof is not None:

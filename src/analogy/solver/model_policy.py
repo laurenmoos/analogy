@@ -19,7 +19,7 @@ from ..model.prompts import (
     render_lean_goal_for_model,
 )
 from ..utils.records import CandidateOrigin, Message, TacticCandidate
-from .analogy_state import (
+from .analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,

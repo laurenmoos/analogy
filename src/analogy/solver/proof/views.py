@@ -5,13 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from ...lean_gym.models import ProofStructure, normalize_proof_state_text
 from ...model.prompts import prompt_catalog
-from ...utils.records import Embedding
-from ..rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
+from ...utils.records import (
+    Embedding,
+    SymbolicState,
+    _finite_float,
+    _require_text,
+    _text_tuple,
+)
 
 if TYPE_CHECKING:
     from ...transfer.domain import AnalogyAlignment, ProofReasoningTransfer, SourceAnalogy
@@ -19,6 +24,76 @@ if TYPE_CHECKING:
 
 class ProofViewError(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ProofRescueContext:
+    state: SymbolicState
+    goal: SymbolicState
+    accepted_tactics: tuple[str, ...]
+    failed_tactics: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, SymbolicState) or not isinstance(
+            self.goal, SymbolicState
+        ):
+            raise ValueError("state and goal must be SymbolicState values")
+        object.__setattr__(
+            self,
+            "accepted_tactics",
+            _text_tuple(self.accepted_tactics, "accepted_tactics"),
+        )
+        object.__setattr__(
+            self,
+            "failed_tactics",
+            _text_tuple(self.failed_tactics, "failed_tactics"),
+        )
+
+
+def zero_embedding_like(
+    embedding: Embedding, *, rendering: str = "(none)"
+) -> Embedding:
+    return replace(
+        embedding,
+        values=(0.0,) * embedding.dimension,
+        text_hash=hashlib.sha256(rendering.encode("utf-8")).hexdigest(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProofRepresentation:
+    context: ProofRescueContext
+    language_prompt_hash: str
+    structure_prompt_hash: str
+    language_embedding: Embedding
+    structure_embedding: Embedding
+    transition_embedding: Embedding | None = None
+    analogy_embedding: Embedding | None = None
+    scalar_features: tuple[float, ...] = (0.0, 1.0, 1.0, 0.0)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.context, ProofRescueContext):
+            raise ValueError("context must be a ProofRescueContext")
+        _require_text(self.language_prompt_hash, "language_prompt_hash")
+        _require_text(self.structure_prompt_hash, "structure_prompt_hash")
+        if self.language_embedding.dimension != self.structure_embedding.dimension:
+            raise ValueError("proof-view embedding dimensions must match")
+        for name in ("transition_embedding", "analogy_embedding"):
+            value = getattr(self, name)
+            if value is None:
+                value = zero_embedding_like(self.language_embedding)
+                object.__setattr__(self, name, value)
+            if value.dimension != self.language_embedding.dimension:
+                raise ValueError("proof-view embedding dimensions must match")
+        object.__setattr__(
+            self,
+            "scalar_features",
+            tuple(_finite_float(value, "scalar_features") for value in self.scalar_features),
+        )
+
+    @property
+    def dimension(self) -> int:
+        return self.language_embedding.dimension
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,8 +296,9 @@ def _lines(values: tuple[str, ...]) -> str:
 
 
 __all__ = [
-    "EmbeddedText", "EmbeddingProvenance", "ProofViewError",
-    "ProofViews", "TransitionComparison", "build_proof_views",
+    "EmbeddedText", "EmbeddingProvenance", "ProofRepresentation",
+    "ProofRescueContext", "ProofViewError", "ProofViews", "TransitionComparison",
+    "build_proof_views",
     "compare_transitions", "render_language_view", "render_structure_view",
     "render_transition",
     "render_observed_transition", "render_transfer_observation",

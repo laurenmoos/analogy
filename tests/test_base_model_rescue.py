@@ -1,4 +1,5 @@
 from analogy.model import prompts as prompts_module
+from analogy.model.prompt_runner import GenerationStatus
 from analogy.model.prompts import PromptCatalog
 from analogy.utils.records import (
     CandidateOrigin,
@@ -11,9 +12,8 @@ from analogy.utils.records import (
 )
 from analogy.lean_gym.models import VerificationStatus
 from analogy.solver.proof.adapter import LeanInfrastructureResult
-from analogy.solver.rescue import (
+from analogy.solver.analogy.rescue import (
     AnalogyFallback,
-    GenerationStatus,
     PredictionLabel,
     RescueOutputError,
     RescueTermination,
@@ -21,7 +21,7 @@ from analogy.solver.rescue import (
     _analogy_correction_feedback,
     parse_analogy_tactic,
 )
-from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
+from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
 from analogy.solver.search import NeverCancelled
 from analogy.solver.proof.semantic import (
     SemanticRecoveryEvent,

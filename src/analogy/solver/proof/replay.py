@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
 
-from ..lean_gym.models import Problem, VerificationStatus, normalize_proof_state_text
-from ..utils.records import SymbolicState
+from ...lean_gym.models import Problem, VerificationStatus, normalize_proof_state_text
+from ...utils.records import SymbolicState
 
 
 class ReplayMismatchError(ValueError):

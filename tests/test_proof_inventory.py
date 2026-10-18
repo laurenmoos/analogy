@@ -6,9 +6,9 @@ from dataclasses import FrozenInstanceError, asdict
 import pytest
 
 from analogy.lean_gym.models import ProofStructure
-from analogy.solver.proof_inventory import InventoryError, InventoryKind, build_local_inventory
+from analogy.solver.proof.inventory import InventoryError, InventoryKind, build_local_inventory
 from analogy.utils.records import SymbolicState
-from analogy.solver.replay import proof_state_fingerprint
+from analogy.solver.proof.replay import proof_state_fingerprint
 
 
 def shape(root: str, *children: str) -> str:

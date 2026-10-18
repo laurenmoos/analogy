@@ -8,13 +8,13 @@ import math
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..lean_gym.models import ProofStructure, normalize_proof_state_text
-from ..model.prompts import prompt_catalog
-from ..utils.records import Embedding
-from .rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
+from ...lean_gym.models import ProofStructure, normalize_proof_state_text
+from ...model.prompts import prompt_catalog
+from ...utils.records import Embedding
+from ..rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
 
 if TYPE_CHECKING:
-    from ..transfer.domain import AnalogyAlignment, ProofReasoningTransfer, SourceAnalogy
+    from ...transfer.domain import AnalogyAlignment, ProofReasoningTransfer, SourceAnalogy
 
 
 class ProofViewError(ValueError):

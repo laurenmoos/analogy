@@ -7,8 +7,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
-from ..lean_gym.models import ProofStructure
-from ..utils.records import SymbolicState
+from ...lean_gym.models import ProofStructure
+from ...utils.records import SymbolicState
 from .replay import proof_state_fingerprint
 
 

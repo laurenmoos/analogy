@@ -10,7 +10,7 @@ from analogy.utils.records import (
     TacticStatus,
 )
 from analogy.lean_gym.models import VerificationStatus
-from analogy.solver.lean_adapter import LeanInfrastructureResult
+from analogy.solver.proof.adapter import LeanInfrastructureResult
 from analogy.solver.rescue import (
     AnalogyFallback,
     GenerationStatus,
@@ -23,7 +23,7 @@ from analogy.solver.rescue import (
 )
 from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
 from analogy.solver.search import NeverCancelled
-from analogy.solver.semantic import (
+from analogy.solver.proof.semantic import (
     SemanticRecoveryEvent,
     SemanticResult,
     render_semantic_guidance,

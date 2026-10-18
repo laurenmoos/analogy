@@ -6,7 +6,7 @@ from analogy.lean_gym.models import (
     VerificationStatus,
 )
 from analogy.utils.records import CandidateOrigin, TacticCandidate, TacticStatus
-from analogy.solver.lean_adapter import LeanGymAdapter
+from analogy.solver.proof.adapter import LeanGymAdapter
 
 
 PROBLEM = Problem("demo", "Demo", "(P : Prop)", "P", "Demo.lean", "Demo/1", "atom", 1)

@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from .diversity import DiversityObservation
+from .proof.diversity import DiversityObservation
+from .proof.semantic import ForcedMoveEvent, SemanticPrune, SemanticRecoveryEvent
 from .rescue import RescueRollout
-from .semantic import ForcedMoveEvent, SemanticPrune, SemanticRecoveryEvent
 from ..utils.records import (
     CancellationToken,
     DiscardReason,
@@ -138,7 +138,7 @@ class ObservableStucknessPolicy:
 
 class CanonicalStateFingerprinter:
     def fingerprint(self, state: SymbolicState) -> str:
-        from .replay import proof_state_fingerprint
+        from .proof.replay import proof_state_fingerprint
 
         return proof_state_fingerprint(state.expression)
 

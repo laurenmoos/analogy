@@ -21,8 +21,8 @@ from analogy.solver.search import (
     CanonicalStateFingerprinter,
     WhitespaceTacticCanonicalizer,
 )
-from analogy.solver.diversity import DiversityObservation
-from analogy.solver.semantic import (
+from analogy.solver.proof.diversity import DiversityObservation
+from analogy.solver.proof.semantic import (
     ExhaustiveSemanticChecker,
     SemanticAssessment,
     SemanticCheckError,

@@ -32,7 +32,7 @@ from .rescue import (
     RescueTermination,
     TacticEvaluation,
 )
-from .semantic import (
+from .proof.semantic import (
     SemanticAssessment,
     SemanticCheckError,
     SemanticChecker,

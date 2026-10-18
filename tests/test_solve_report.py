@@ -14,7 +14,7 @@ from analogy.solver.run import (
     render_problem_trace,
 )
 from analogy.solver.search import SearchResult
-from analogy.solver.semantic import (
+from analogy.solver.proof.semantic import (
     SemanticRecoveryEvent,
     SemanticResult,
 )
@@ -402,7 +402,7 @@ def test_problem_trace_labels_pruned_ordinary_attempt_and_model_filters() -> Non
 
 def test_forced_moves_count_as_verifier_calls_and_invalid_tactics() -> None:
     from analogy.utils.records import CandidateOrigin, SymbolicState, TacticCandidate, TacticResult, TacticStatus
-    from analogy.solver.semantic import ForcedMoveEvent
+    from analogy.solver.proof.semantic import ForcedMoveEvent
 
     candidate = TacticCandidate("rcases h with hP | hQ", 1.0, CandidateOrigin.ORDINARY)
     forced = ForcedMoveEvent(

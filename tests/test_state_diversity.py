@@ -1,7 +1,7 @@
 import pytest
 
 from analogy.utils.records import Embedding, SymbolicState
-from analogy.solver.diversity import FrozenEmbeddingDiversity
+from analogy.solver.proof.diversity import FrozenEmbeddingDiversity
 
 
 class _Encoder:

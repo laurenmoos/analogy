@@ -6,18 +6,18 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..lean_gym.models import (
+from ...lean_gym.models import (
     Problem,
     ProofStructure,
     ProofStructureError,
     VerificationStatus,
     has_unresolved_metavariable,
 )
-from ..lean_gym.verifier import Verifier
-from ..utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
+from ...lean_gym.verifier import Verifier
+from ...utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
 
 if TYPE_CHECKING:
-    from .proof_inventory import LocalProofInventory
+    from .inventory import LocalProofInventory
 
 
 _MAX_FAILURE_FEEDBACK = 8
@@ -102,7 +102,7 @@ class LeanGymAdapter:
         return extractor(self.problem, prefix)
 
     def local_inventory_for(self, state: SymbolicState) -> LocalProofInventory:
-        from .proof_inventory import build_local_inventory
+        from .inventory import build_local_inventory
 
         return build_local_inventory(
             state, self.proof_structure_for(state), fixed_target=self.problem.target

@@ -25,13 +25,13 @@ from ..utils.records import (
     SymbolicState,
     TacticStatus,
 )
-from .diversity import FrozenEmbeddingDiversity
 from .analogy_state import AnalogyScratchpad
 from .episode import EpisodeContext, run_episode
-from .lean_adapter import LeanGymAdapter
 from .model_policy import TacticRanker, TacticRankingError
+from .proof.adapter import LeanGymAdapter
+from .proof.diversity import FrozenEmbeddingDiversity
+from .proof.semantic import ExhaustiveSemanticChecker
 from .rescue import AnalogyFallback
-from .semantic import ExhaustiveSemanticChecker
 from .search import (
     AcceptNovelState,
     CanonicalStateFingerprinter,

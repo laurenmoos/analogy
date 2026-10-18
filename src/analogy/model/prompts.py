@@ -224,7 +224,7 @@ def lean_tactic_card(proof_state: str) -> str:
     if not isinstance(proof_state, str):
         raise ValueError("Lean tactic card requires proof-state text")
     try:
-        from ..solver.proof_inventory import proof_goals, proposition_root
+        from ..solver.proof.inventory import proof_goals, proposition_root
 
         goal = proof_goals(focused_lean_goal(proof_state))[0]
     except (ValueError, IndexError):

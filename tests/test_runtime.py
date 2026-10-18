@@ -4,6 +4,7 @@ from pathlib import Path
 from analogy.model.prompts import configure_prompt_catalog
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
+from analogy.utils.checkpoint import record_status
 
 
 ROOT = Path(__file__).parents[1]
@@ -61,8 +62,8 @@ def test_runtime_skips_mlx_and_lean_when_previous_failures_are_resolved(
         run=replace(configured.run, output_dir=tmp_path / "runs"),
     )
     problem = Problem("done", "Done", "", "P", "done.lean", "done", "test", 1)
-    index = runtime.ProblemIndex.load(configured, (problem,))
-    index.record("done", "complete")
+    checkpoint = runtime.load_checkpoint(configured, (problem,))
+    record_status(checkpoint, "done", "complete")
     monkeypatch.setattr(runtime, "load_config", lambda _path: configured)
     monkeypatch.setattr(runtime, "load_problems", lambda _path: (problem,))
     monkeypatch.setattr(
@@ -86,3 +87,4 @@ def test_runtime_skips_mlx_and_lean_when_previous_failures_are_resolved(
     assert result.problems == ()
     assert result.model is None
     assert result.verifier is None
+    assert result.checkpoint.statuses == {"done": "complete"}

@@ -101,9 +101,9 @@ def test_solve_runs_shared_runtime_once(tmp_path, monkeypatch):
     calls = []
 
     def fake_runtime(
-        config, problems, generator, verifier, *, run_directory, problem_index=None
+        config, problems, generator, verifier, *, run_directory, checkpoint=None
     ):
-        calls.append((config, problems, generator, verifier, run_directory, problem_index))
+        calls.append((config, problems, generator, verifier, run_directory, checkpoint))
         return SolveSummary("analogy-on", (), 0.0), [], {}
 
     monkeypatch.setattr(run_module, "_run_runtime", fake_runtime)

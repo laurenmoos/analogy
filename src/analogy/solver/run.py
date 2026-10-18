@@ -15,7 +15,7 @@ from ..model.model_provider import TextGenerator
 from ..model.prompts import configure_prompt_catalog
 from ..lean_gym.models import Problem
 from ..lean_gym.verifier import Verifier
-from ..problem_index import ProblemIndex
+from ..utils.checkpoint import Checkpoint, record_status
 from ..utils.records import (
     DiscardReason,
     ProblemResult,
@@ -384,7 +384,7 @@ def _run_runtime(
     verifier: Verifier,
     *,
     run_directory: Path,
-    problem_index: ProblemIndex | None = None,
+    checkpoint: Checkpoint | None = None,
 ) -> tuple[SolveSummary, list[str], dict[str, dict[str, Any]]]:
     started = time.monotonic()
     details: dict[str, dict[str, Any]] = {}
@@ -445,8 +445,8 @@ def _run_runtime(
         })
         details[problem.id] = detail
         _write_json(run_directory / f"{problem.id}.json", detail)
-        if problem_index is not None:
-            problem_index.record(problem.id, outcome.status.value)
+        if checkpoint is not None:
+            record_status(checkpoint, problem.id, outcome.status.value)
         route = _problem_route(outcome, search_result)
         traces.append(render_problem_trace(detail, model_events, route=route))
         results.append(outcome)
@@ -460,7 +460,7 @@ def solve_problems(
     generator: TextGenerator,
     verifier: Verifier,
     *,
-    problem_index: ProblemIndex | None = None,
+    checkpoint: Checkpoint | None = None,
 ) -> SolveRun:
     configure_prompt_catalog(config.prompts.path)
     started = time.monotonic()
@@ -473,7 +473,7 @@ def solve_problems(
         generator,
         verifier,
         run_directory=run_directory,
-        problem_index=problem_index,
+        checkpoint=checkpoint,
     )
     run = SolveRun(
         run_id,
@@ -492,10 +492,10 @@ def solve_problems(
             "max_steps": config.search.max_steps,
             "max_analogy_model_calls_per_stuck_state": config.analogy.max_model_calls,
             "problem_index_signature": (
-                problem_index.signature if problem_index is not None else None
+                checkpoint.signature if checkpoint is not None else None
             ),
             "problem_index_fingerprints": (
-                problem_index.fingerprints if problem_index is not None else None
+                checkpoint.fingerprints if checkpoint is not None else None
             ),
             "elapsed_seconds": run.elapsed_seconds,
             "summary": asdict(summary),

@@ -14,7 +14,7 @@ from .lean_gym.corpus import load_problems
 from .lean_gym.models import Problem
 from .lean_gym.resources import LEAN_PROJECT_ROOT
 from .lean_gym.verifier import LeanSubprocessVerifier
-from .problem_index import ProblemIndex
+from .utils.checkpoint import Checkpoint, load_checkpoint, select_problems
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +24,7 @@ class Runtime:
     model: Any
     verifier: Any
     problems: tuple[Problem, ...]
-    problem_index: ProblemIndex
+    checkpoint: Checkpoint
 
 
 def runtime_config(config: AppConfig) -> AppConfig:
@@ -63,14 +63,14 @@ def get_runtime(
     config = with_analogy_enabled(config, analogy_enabled)
     config = with_problem_selection(config, problem_selection)
     all_problems = tuple(load_problems(config.benchmark.corpus))
-    problem_index = ProblemIndex.load(config, all_problems)
-    problems = problem_index.select(config.benchmark.selection)
+    checkpoint = load_checkpoint(config, all_problems)
+    problems = select_problems(checkpoint, config.benchmark.selection)
     if not problems:
-        return Runtime(config, None, None, None, (), problem_index)
+        return Runtime(config, None, None, None, (), checkpoint)
     prompts = configure_prompt_catalog(config.prompts.path)
     model = get_model_provider(config.model)
     verifier = LeanSubprocessVerifier(LEAN_PROJECT_ROOT)
-    return Runtime(config, prompts, model, verifier, problems, problem_index)
+    return Runtime(config, prompts, model, verifier, problems, checkpoint)
 
 
 __all__ = [

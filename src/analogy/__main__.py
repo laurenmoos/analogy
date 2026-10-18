@@ -66,7 +66,7 @@ def run_solve(args: argparse.Namespace) -> int:
         runtime.problems,
         runtime.model,
         runtime.verifier,
-        problem_index=runtime.problem_index,
+        checkpoint=runtime.checkpoint,
     )
     print(render_report(run))
     print(f"\nDETAILS: {run.output_directory}")

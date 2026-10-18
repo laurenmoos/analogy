@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import NamedTuple
 _TACTIC = re.compile(r"^state_\d+_tactic_(\d+):\n([^\n]+)", re.MULTILINE)
 SOURCE_REVISION = "62a13de410999c20f60ec2f3be93457dcaac0d62"
 SOURCE_REPOSITORY = "https://huggingface.co/datasets/KomeijiForce/PropL"
+NORMAL_SHA256 = "3f6585ce2bf6c0d267853252a132be2e5f87441d60395b09ee4691f3197a2439"
+BACKTRACK_SHA256 = "5170dbe3f025f60b731dd67519075aeed4d10a909f83b1977023963e3c1cc174"
 
 
 class SourceRecord(NamedTuple):
@@ -21,6 +24,7 @@ class SourceRecord(NamedTuple):
     target: str
     tactics: tuple[str, ...]
     attempt_indices: tuple[int, ...]
+    rollback_failures: int
 
 
 class Candidate(NamedTuple):
@@ -55,6 +59,7 @@ def parse_records(path: Path) -> dict[str, SourceRecord]:
                 target=target,
                 tactics=tuple(tactic for _, tactic in matches),
                 attempt_indices=tuple(int(index) for index, _ in matches),
+                rollback_failures=row["output"].count("no solution, return to state"),
             )
     return records
 
@@ -77,7 +82,7 @@ def pair_records(normal_path: Path, backtrack_path: Path) -> dict[str, Candidate
             data_id=data_id,
             target=record.target,
             tactics=record.tactics,
-            failed_attempts=sum(index > 0 for index in paired.attempt_indices),
+            failed_attempts=paired.rollback_failures,
             flat_trace=flat_trace,
         )
     return result
@@ -103,24 +108,46 @@ def rank_candidates(candidates: list[Candidate]) -> list[Candidate]:
     )
 
 
-def select_verified(
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_source_files(
     normal_path: Path,
     backtrack_path: Path,
-    project_root: Path,
+    *,
+    expected_normal: str = NORMAL_SHA256,
+    expected_backtrack: str = BACKTRACK_SHA256,
+) -> None:
+    actual_normal = _sha256(normal_path)
+    if actual_normal != expected_normal:
+        raise ValueError(
+            f"normal/test_ood.csv hash mismatch: expected {expected_normal}, got {actual_normal}"
+        )
+    actual_backtrack = _sha256(backtrack_path)
+    if actual_backtrack != expected_backtrack:
+        raise ValueError(
+            "backtrack/test_ood.csv hash mismatch: "
+            f"expected {expected_backtrack}, got {actual_backtrack}"
+        )
+
+
+def validate_candidates(
+    candidates: list[Candidate],
+    verifier: object,
     limit: int = 30,
 ) -> list[ValidatedCandidate]:
     from analogy.lean_gym.models import Problem, VerificationStatus
-    from analogy.lean_gym.verifier import LeanSubprocessVerifier
 
-    verifier = LeanSubprocessVerifier(project_root, timeout_seconds=20)
-    candidates = rank_candidates(
-        [
-            candidate
-            for candidate in pair_records(normal_path, backtrack_path).values()
-            if is_static_candidate(candidate)
-        ]
-    )
     selected: list[ValidatedCandidate] = []
+    infrastructure_failures = {
+        VerificationStatus.TIMEOUT,
+        VerificationStatus.INTERNAL_ERROR,
+    }
     for candidate in candidates:
         problem = Problem(
             id=f"propl_ood_{candidate.data_id}",
@@ -133,15 +160,45 @@ def select_verified(
             difficulty=len(candidate.tactics) + candidate.failed_attempts,
         )
         proof_result = verifier.verify_complete(problem, candidate.tactics)
+        if proof_result.status in infrastructure_failures:
+            raise RuntimeError(
+                f"inconclusive Lean status for {candidate.data_id} reference proof: "
+                f"{proof_result.status.value}"
+            )
         if proof_result.status is not VerificationStatus.COMPLETE:
             continue
         simp_result = verifier.try_tactic(problem, (), "simp")
+        if simp_result.status in infrastructure_failures:
+            raise RuntimeError(
+                f"inconclusive Lean status for {candidate.data_id} simp probe: "
+                f"{simp_result.status.value}"
+            )
         if simp_result.status is VerificationStatus.COMPLETE:
             continue
         selected.append(ValidatedCandidate(candidate, simp_result.status.value))
         if len(selected) == limit:
             return selected
     raise ValueError(f"only {len(selected)} verifier-compatible PropL records found; need {limit}")
+
+
+def select_verified(
+    normal_path: Path,
+    backtrack_path: Path,
+    project_root: Path,
+    limit: int = 30,
+) -> list[ValidatedCandidate]:
+    from analogy.lean_gym.verifier import LeanSubprocessVerifier
+
+    validate_source_files(normal_path, backtrack_path)
+    verifier = LeanSubprocessVerifier(project_root, timeout_seconds=20)
+    candidates = rank_candidates(
+        [
+            candidate
+            for candidate in pair_records(normal_path, backtrack_path).values()
+            if is_static_candidate(candidate)
+        ]
+    )
+    return validate_candidates(candidates, verifier, limit)
 
 
 def build_documents(
@@ -194,6 +251,8 @@ def build_documents(
             "split": "test_ood",
             "normal_path": "normal/test_ood.csv",
             "backtrack_path": "backtrack/test_ood.csv",
+            "normal_sha256": NORMAL_SHA256,
+            "backtrack_sha256": BACKTRACK_SHA256,
             "license": "MIT",
         },
         "selection": {

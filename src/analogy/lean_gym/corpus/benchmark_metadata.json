@@ -9,6 +9,8 @@
     "split": "test_ood",
     "normal_path": "normal/test_ood.csv",
     "backtrack_path": "backtrack/test_ood.csv",
+    "normal_sha256": "3f6585ce2bf6c0d267853252a132be2e5f87441d60395b09ee4691f3197a2439",
+    "backtrack_sha256": "5170dbe3f025f60b731dd67519075aeed4d10a909f83b1977023963e3c1cc174",
     "license": "MIT"
   },
   "selection": {
@@ -33,7 +35,7 @@
       "source_data_id": "307714199757159990961917100773",
       "selection_rank": 1,
       "reference_steps": 22,
-      "failed_attempts": 5,
+      "failed_attempts": 6,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
@@ -42,7 +44,7 @@
       "source_data_id": "301873284032250623028148772769",
       "selection_rank": 2,
       "reference_steps": 19,
-      "failed_attempts": 5,
+      "failed_attempts": 6,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
@@ -51,7 +53,7 @@
       "source_data_id": "249474521826265955663880755174",
       "selection_rank": 3,
       "reference_steps": 22,
-      "failed_attempts": 4,
+      "failed_attempts": 5,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
@@ -60,7 +62,7 @@
       "source_data_id": "317064830399563761278070121273",
       "selection_rank": 4,
       "reference_steps": 16,
-      "failed_attempts": 4,
+      "failed_attempts": 5,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
@@ -69,7 +71,7 @@
       "source_data_id": "198299705576588914912737276887",
       "selection_rank": 5,
       "reference_steps": 18,
-      "failed_attempts": 3,
+      "failed_attempts": 4,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
@@ -78,7 +80,7 @@
       "source_data_id": "252955983084163427303699743884",
       "selection_rank": 6,
       "reference_steps": 23,
-      "failed_attempts": 2,
+      "failed_attempts": 3,
       "lean_status": "complete",
       "one_step_simp_status": "open"
     },
@@ -137,9 +139,18 @@
       "one_step_simp_status": "open"
     },
     {
+      "problem_id": "propl_ood_227279818380026546832524313203",
+      "source_data_id": "227279818380026546832524313203",
+      "selection_rank": 13,
+      "reference_steps": 15,
+      "failed_attempts": 2,
+      "lean_status": "complete",
+      "one_step_simp_status": "open"
+    },
+    {
       "problem_id": "propl_ood_315295300028829528556344223522",
       "source_data_id": "315295300028829528556344223522",
-      "selection_rank": 13,
+      "selection_rank": 14,
       "reference_steps": 15,
       "failed_attempts": 2,
       "lean_status": "complete",
@@ -148,7 +159,7 @@
     {
       "problem_id": "propl_ood_149793964518389069287071648555",
       "source_data_id": "149793964518389069287071648555",
-      "selection_rank": 14,
+      "selection_rank": 15,
       "reference_steps": 32,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -157,7 +168,7 @@
     {
       "problem_id": "propl_ood_155559477803074115543777587908",
       "source_data_id": "155559477803074115543777587908",
-      "selection_rank": 15,
+      "selection_rank": 16,
       "reference_steps": 23,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -166,7 +177,7 @@
     {
       "problem_id": "propl_ood_358233606958956408248147497163",
       "source_data_id": "358233606958956408248147497163",
-      "selection_rank": 16,
+      "selection_rank": 17,
       "reference_steps": 20,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -175,7 +186,7 @@
     {
       "problem_id": "propl_ood_254637624771904022244407550769",
       "source_data_id": "254637624771904022244407550769",
-      "selection_rank": 17,
+      "selection_rank": 18,
       "reference_steps": 19,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -184,7 +195,7 @@
     {
       "problem_id": "propl_ood_343192239287091465349940722490",
       "source_data_id": "343192239287091465349940722490",
-      "selection_rank": 18,
+      "selection_rank": 19,
       "reference_steps": 19,
       "failed_attempts": 1,
       "lean_status": "complete",
@@ -193,17 +204,8 @@
     {
       "problem_id": "propl_ood_199017835646202633754304488318",
       "source_data_id": "199017835646202633754304488318",
-      "selection_rank": 19,
-      "reference_steps": 17,
-      "failed_attempts": 1,
-      "lean_status": "complete",
-      "one_step_simp_status": "open"
-    },
-    {
-      "problem_id": "propl_ood_227279818380026546832524313203",
-      "source_data_id": "227279818380026546832524313203",
       "selection_rank": 20,
-      "reference_steps": 15,
+      "reference_steps": 17,
       "failed_attempts": 1,
       "lean_status": "complete",
       "one_step_simp_status": "open"

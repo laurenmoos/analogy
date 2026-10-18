@@ -290,6 +290,26 @@
       ]
     },
     {
+      "problem_id": "propl_ood_227279818380026546832524313203",
+      "tactics": [
+        "apply Or.inr",
+        "intro h1",
+        "intro h2",
+        "intro h3",
+        "let h4 := h3.left",
+        "let h5 := h3.right",
+        "let h6 := h2.left",
+        "let h7 := h2.right",
+        "let h8 := h6.left",
+        "let h9 := h6.right",
+        "let h10 := h1.left",
+        "let h11 := h1.right",
+        "let h12 := h10.left",
+        "let h13 := h10.right",
+        "exact h8"
+      ]
+    },
+    {
       "problem_id": "propl_ood_315295300028829528556344223522",
       "tactics": [
         "apply Or.inr",
@@ -467,26 +487,6 @@
         "apply Or.inl",
         "apply Or.inr",
         "exact h7"
-      ]
-    },
-    {
-      "problem_id": "propl_ood_227279818380026546832524313203",
-      "tactics": [
-        "apply Or.inr",
-        "intro h1",
-        "intro h2",
-        "intro h3",
-        "let h4 := h3.left",
-        "let h5 := h3.right",
-        "let h6 := h2.left",
-        "let h7 := h2.right",
-        "let h8 := h6.left",
-        "let h9 := h6.right",
-        "let h10 := h1.left",
-        "let h11 := h1.right",
-        "let h12 := h10.left",
-        "let h13 := h10.right",
-        "exact h8"
       ]
     },
     {

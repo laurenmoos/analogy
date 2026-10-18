@@ -3,6 +3,11 @@ from __future__ import annotations
 import csv
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from analogy.lean_gym.models import VerificationStatus
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +55,7 @@ def test_parse_records_preserves_multiline_target_and_tactics(tmp_path: Path) ->
     assert record.tactics == ("intro h1", "exact Or.inr True.intro")
 
 
-def test_pair_records_counts_alternative_attempts_and_rejects_nested_traces(tmp_path: Path) -> None:
+def test_pair_records_counts_explicit_rollbacks_and_rejects_nested_traces(tmp_path: Path) -> None:
     normal = tmp_path / "normal.csv"
     backtrack = tmp_path / "backtrack.csv"
     base_input = "state_0:\np1 p2 p3 : Prop\n⊢ (p1 ∧ p2) ∨ (p2 → p3)\n"
@@ -68,7 +73,9 @@ def test_pair_records_counts_alternative_attempts_and_rejects_nested_traces(tmp_
             {
                 "data_id": "flat",
                 "input": base_input,
-                "output": _trace((0, 0, "apply Or.inr"), (0, 1, "apply Or.inl"), (1, 0, "exact h")),
+                "output": _trace((0, 0, "apply Or.inr"), (0, 1, "apply Or.inl"), (1, 0, "exact h"))
+                + "\nno solution, return to state 0 [that leads to state 1]"
+                + "\nno solution, return to state 1 [that leads to state 2]",
             },
             {"data_id": "case", "input": base_input, "output": _trace((0, 0, "case inl h =>"))},
             {"data_id": "have", "input": base_input, "output": _trace((0, 0, "have h : p1 := by"))},
@@ -77,7 +84,7 @@ def test_pair_records_counts_alternative_attempts_and_rejects_nested_traces(tmp_
 
     pairs = _load_importer().pair_records(normal, backtrack)
 
-    assert pairs["flat"].failed_attempts == 1
+    assert pairs["flat"].failed_attempts == 2
     assert pairs["flat"].flat_trace is True
     assert pairs["case"].flat_trace is False
     assert pairs["have"].flat_trace is False
@@ -151,3 +158,56 @@ def test_build_documents_separates_runtime_problem_from_selection_metadata() -> 
     assert metadata["source"]["revision"] == importer.SOURCE_REVISION
     assert metadata["records"][0]["failed_attempts"] == 2
     assert metadata["records"][0]["one_step_simp_status"] == "open"
+
+
+@pytest.mark.parametrize(
+    ("proof_status", "simp_status"),
+    [
+        (VerificationStatus.TIMEOUT, VerificationStatus.OPEN),
+        (VerificationStatus.INTERNAL_ERROR, VerificationStatus.OPEN),
+        (VerificationStatus.COMPLETE, VerificationStatus.TIMEOUT),
+        (VerificationStatus.COMPLETE, VerificationStatus.INTERNAL_ERROR),
+    ],
+)
+def test_validation_aborts_on_inconclusive_lean_infrastructure_status(
+    proof_status: VerificationStatus,
+    simp_status: VerificationStatus,
+) -> None:
+    importer = _load_importer()
+    candidate = importer.Candidate(
+        "42", "p1 ∧ p2 ∨ (p2 → p3)", ("intro h",) * 15, 2, True
+    )
+
+    class Verifier:
+        def verify_complete(self, problem, tactics):
+            return SimpleNamespace(status=proof_status)
+
+        def try_tactic(self, problem, prefix, tactic):
+            return SimpleNamespace(status=simp_status)
+
+    with pytest.raises(RuntimeError, match="inconclusive Lean status"):
+        importer.validate_candidates([candidate], Verifier(), limit=1)
+
+
+def test_source_hash_validation_rejects_unpinned_csv_bytes(tmp_path: Path) -> None:
+    importer = _load_importer()
+    normal = tmp_path / "normal.csv"
+    backtrack = tmp_path / "backtrack.csv"
+    normal.write_bytes(b"abc")
+    backtrack.write_bytes(b"")
+
+    importer.validate_source_files(
+        normal,
+        backtrack,
+        expected_normal="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        expected_backtrack="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    )
+    backtrack.write_bytes(b"changed")
+
+    with pytest.raises(ValueError, match="backtrack/test_ood.csv hash mismatch"):
+        importer.validate_source_files(
+            normal,
+            backtrack,
+            expected_normal="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            expected_backtrack="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )

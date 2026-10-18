@@ -140,6 +140,8 @@ def test_analogy_fallback_requests_exactly_one_tactic():
     assert "SAT: no countermodel; continue from this state." in prompt
     assert "OPEN tactics" in prompt
     assert "REJECTED tactics" in prompt
+    assert "Dependency evidence (may be absent)" in prompt
+    assert "countermodel-side dependency" not in prompt
 
 
 def test_conventional_ranker_explains_initial_and_immutable_analogy_blocks():
@@ -174,7 +176,8 @@ h2 : ¬S
     assert "target=" not in card
     assert "rcases h with a | b" not in card
     assert "obtain ⟨a,b⟩ := h" not in card
-    assert "Or.inl" in card and "Or.inr" in card and "⟨_,_⟩" in card
+    assert "Core moves: intro, exact <hyp>, apply <hyp>, constructor, cases/rcases, False.elim." in card
+    assert "Or.inl _, Or.inr _, ⟨_,_⟩" not in card
     assert "no tauto/itauto" in card
     assert len(card) <= 240
 
@@ -186,7 +189,7 @@ h : G ∨ H ∧ U
 
     card = lean_tactic_card(state)
 
-    assert "Build goals" in card
+    assert "Core moves" in card
     assert "rcases h with hG | hHU" in card
     assert "analogy_left" not in card
     assert "analogy_right" not in card

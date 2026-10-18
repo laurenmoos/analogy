@@ -336,7 +336,7 @@ def test_analogy_prompt_separates_open_from_rejected_feedback():
     assert "exact nope: unknown identifier" in rejected_section
 
 
-def test_analogy_prompt_requires_mapping_to_countermodel_dependency_table():
+def test_analogy_prompt_requires_using_available_dependency_evidence():
     prompts = []
 
     class Generator:
@@ -354,9 +354,9 @@ def test_analogy_prompt_requires_mapping_to_countermodel_dependency_table():
         dependency_table="left: P=true; hPQ=left\nright: Q=true; hPQ=right",
     )
 
-    assert "Countermodel dependency table" in prompts[0]
+    assert "Dependency evidence (may be absent)" in prompts[0]
     assert "hPQ=left" in prompts[0] and "hPQ=right" in prompts[0]
-    assert "analogy must explicitly map" in prompts[0]
+    assert "account for it explicitly" in prompts[0]
 
 
 def test_analogy_schema_requires_one_singular_tactic():

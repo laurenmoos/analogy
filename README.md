@@ -31,9 +31,9 @@ Disabling analogy records the same recovery decisions but makes no analogy model
 `analogy.max_model_calls` limits malformed, duplicate, and Lean-feedback correction attempts per
 stuck state. Each generation is logged; duplicate proposals are resampled without reaching Lean.
 
-Problem scheduling is controlled by `benchmark.selection`. The default,
-`previous_failures`, runs problems that have not yet completed under the current experiment
-configuration. Use an override when a full sweep or an explicit retry is needed:
+Problem scheduling is controlled by `benchmark.selection`. The default, `exhaustive`, runs the
+complete 30-problem PropL OOD benchmark. Use an override when an interrupted experiment should
+retry only unresolved or failed problems:
 
 ```bash
 uv run python -m analogy solve --all-problems
@@ -54,5 +54,9 @@ to Lean, not malformed generations. Semantic recovery records separately show th
 countermodel or validation result, chosen rescue state, abandoned path tactics, dependency table,
 and forced moves. Benchmark reports use one matched run of each arm on the same corpus problems.
 
-Historical activation-evaluation artifacts under `.artifacts/` are retained as evidence, but their
-former batch-selection and multi-arm runtime is not part of the package.
+The active corpus is a deterministic subset of the online
+[PropL dataset](https://huggingface.co/datasets/KomeijiForce/PropL), pinned to revision
+`62a13de410999c20f60ec2f3be93457dcaac0d62`. Each problem is intuitionistic propositional logic
+from `test_ood`, contains conjunction, disjunction, and implication, has a verifier-accepted source
+proof of at least 15 tactics, and is not solved by one `simp`. Selection and provenance details live
+in `src/analogy/lean_gym/corpus/benchmark_metadata.json`; they are not included in model prompts.

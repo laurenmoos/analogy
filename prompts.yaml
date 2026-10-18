@@ -39,7 +39,7 @@ prompts:
       Then return at most {{top_k}} candidates after the block.
 
   analogy_rescue:
-    version: analogy-rescue-v8
+    version: analogy-rescue-v9
     system: >-
       Use one concrete analogy to escape this Lean 4 proof state, then return one tactic. Lean is the judge.
       JSON only.
@@ -53,7 +53,7 @@ prompts:
       Semantic recovery:
       {{semantic_guidance}}
 
-      Countermodel dependency table:
+      Dependency evidence (may be absent):
       {{dependency_table}}
 
       Accepted prefix:
@@ -67,14 +67,14 @@ prompts:
 
       {{tactic_card}}
 
-      Return exactly "analogy", "predicted_state", and "tactic". The analogy must explicitly map
-      the countermodel-side dependency when a table is present.
+      Return exactly "analogy", "predicted_state", and "tactic". When dependency evidence is present,
+      account for it explicitly in the analogy mapping.
       predicted_state must be literal SOLVED or the exact full focused Lean state expected immediately after the tactic,
       including its visible context and goal. Never predict the unchanged current state. tactic is one complete Lean 4 line;
       use ; or <;> to sequence.
 
   analogy_update:
-    version: analogy-update-v1
+    version: analogy-update-v2
     system: >-
       Update the external analogy scratchpad to escape this stuck Lean 4 proof state, then return the first tactic
       from the updated story. Lean is the judge. Return exactly one <analogy> block followed by JSON only.
@@ -88,7 +88,7 @@ prompts:
       Semantic recovery:
       {{semantic_guidance}}
 
-      Countermodel dependency table:
+      Dependency evidence (may be absent):
       {{dependency_table}}
 
       Accepted prefix:
@@ -109,10 +109,10 @@ prompts:
       predicted_state is literal SOLVED or the exact full focused Lean state expected immediately after the first tactic.
 
   lean_tactic_card:
-    version: lean-tactic-card-v1
+    version: lean-tactic-card-v2
     text: >-
-      Lean card: complete line; no tauto/itauto. {{recipes}}Build goals: Or.inl _, Or.inr _, ⟨_,_⟩.
-      Use exact <hyp>, apply <hyp>, assumption, rw [<hyp>].
+      Lean card: complete line; no tauto/itauto. {{recipes}}Core moves: intro, exact <hyp>, apply <hyp>, constructor,
+      cases/rcases, False.elim. Also use assumption or rw [<hyp>] when justified by the state.
 
   lean_tactic_card_recipes:
     version: lean-tactic-card-recipes-v1

@@ -123,29 +123,6 @@ def test_negation_explanation_wording_comes_from_prompt_catalog(tmp_path, monkey
     assert render_lean_goal_for_model("⊢ ¬P") == "⊢ ¬P CUSTOM P"
 
 
-def test_analogy_fallback_requests_exactly_one_tactic():
-    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
-    values = {
-        "overall_target": "P",
-        "current_goals": "P",
-        "accepted": "(none)",
-        "open_tactics": "(none)",
-        "rejected_tactics": "(none)",
-        "tactic_card": "Lean card: one line.",
-        "semantic_guidance": "SAT: no countermodel; continue from this state.",
-        "dependency_table": "(none)",
-    }
-    prompt = "\n".join(message.content for message in catalog.messages("analogy_rescue", **values))
-
-    assert 'exactly "analogy", "predicted_state", and "tactic"' in prompt
-    assert "one complete Lean 4 line" in prompt
-    assert "SAT: no countermodel; continue from this state." in prompt
-    assert "OPEN tactics" in prompt
-    assert "REJECTED tactics" in prompt
-    assert "Dependency evidence (may be absent)" in prompt
-    assert "countermodel-side dependency" not in prompt
-
-
 def test_conventional_ranker_explains_immutable_mental_model_blocks():
     catalog = PromptCatalog.load(ROOT / "prompts.yaml")
     values = {
@@ -164,6 +141,7 @@ def test_conventional_ranker_explains_immutable_mental_model_blocks():
     assert "<mental_model>" in prompt
     assert "working mental model" in prompt
     assert "supplied mental-model block unchanged" in prompt
+    assert "create one" not in prompt
 
 
 def test_tactic_card_is_generic_and_bans_automation():
@@ -178,7 +156,9 @@ h2 : ¬S
     assert "target=" not in card
     assert "rcases h with a | b" not in card
     assert "obtain ⟨a,b⟩ := h" not in card
-    assert "Core moves: intro, exact <hyp>, apply <hyp>, constructor, cases/rcases, False.elim." in card
+    assert "intro h" in card
+    assert "cases <hyp>" in card
+    assert "exact False.elim <hyp>" in card
     assert "Or.inl _, Or.inr _, ⟨_,_⟩" not in card
     assert "no tauto/itauto" in card
     assert len(card) <= 240
@@ -191,7 +171,7 @@ h : G ∨ H ∧ U
 
     card = lean_tactic_card(state)
 
-    assert "Core moves" in card
+    assert "constructor" in card
     assert "rcases h with hG | hHU" in card
     assert "analogy_left" not in card
     assert "analogy_right" not in card
@@ -460,6 +440,7 @@ def test_live_analogy_prompts_request_mental_model_correspondences():
             open_tactics="(none)",
             rejected_tactics="(none)",
             tactic_card="card",
+            domain_card="Everyday-domain card: cooking.",
         )
     )
 
@@ -467,3 +448,4 @@ def test_live_analogy_prompts_request_mental_model_correspondences():
         assert "<mental_model>" in prompt
         assert '"correspondences"' in prompt
         assert '"domain_transition"' in prompt
+    assert "Everyday-domain card: cooking." in update

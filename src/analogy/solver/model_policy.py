@@ -83,6 +83,7 @@ class TacticRanker:
         failed = "\n".join(failed_values) if failed_values else "(none)"
         use_analogy_protocol = (
             self._analogy_scratchpad is not None
+            and self._analogy_scratchpad.current is not None
             and not self._analogy_scratchpad.pending_rebuild
         )
         base_messages = prompt_catalog().messages(

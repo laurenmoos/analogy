@@ -1,6 +1,6 @@
 prompts:
   conventional_ranker:
-    version: conventional-ranker-v4
+    version: conventional-ranker-v5
     system: >-
       Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic` and `score`.
       Tactics are one-line strings; scores are nonnegative numbers. Use visible identifiers only. Never repeat
@@ -8,7 +8,7 @@ prompts:
     user: |-
       Overall target:
       {{overall_target}}
-      Current goals:
+      Current focused Lean proof state:
       {{current_goals}}
       Accepted prefix:
       {{accepted}}
@@ -18,7 +18,7 @@ prompts:
       Return at most {{top_k}} candidates.
 
   analogy_conventional_ranker:
-    version: analogy-conventional-ranker-v2
+    version: analogy-conventional-ranker-v4
     system: >-
       Rank next Lean 4 tactics while maintaining the external working mental model. Return exactly one
       <mental_model> JSON block followed by a nonempty JSON array of objects with exactly `tactic` and `score`.
@@ -27,15 +27,14 @@ prompts:
     user: |-
       Overall target:
       {{overall_target}}
-      Current goals:
+      Current focused Lean proof state:
       {{current_goals}}
       Accepted prefix:
       {{accepted}}
       Recent path failure feedback:
       {{failed}}
       {{tactic_card}}
-      If no current mental model was supplied, create one using the initialization schema. Otherwise repeat the
-      supplied mental-model block unchanged; ordinary search must not revise its ordered correspondences.
+      Repeat the supplied mental-model block unchanged; ordinary search must not revise its ordered correspondences.
       Then return at most {{top_k}} candidates after the block.
 
   analogy_initialize:
@@ -127,51 +126,19 @@ prompts:
       household organization; or mechanical repair involving ordinary physical objects. Use concrete objects, states,
       and causal actions from that setting only. Do not use a mathematical, logical, programming, or proof setting.
 
-  analogy_rescue:
-    version: analogy-rescue-v9
-    system: >-
-      Use one concrete analogy to escape this Lean 4 proof state, then return one tactic. Lean is the judge.
-      JSON only.
-    user: |-
-      Overall target:
-      {{overall_target}}
-
-      Current goals:
-      {{current_goals}}
-
-      Semantic recovery:
-      {{semantic_guidance}}
-
-      Dependency evidence (may be absent):
-      {{dependency_table}}
-
-      Accepted prefix:
-      {{accepted}}
-
-      OPEN tactics (Lean accepted and left goals):
-      {{open_tactics}}
-
-      REJECTED tactics (Lean errors or unusable results):
-      {{rejected_tactics}}
-
-      {{tactic_card}}
-
-      Return exactly "analogy", "predicted_state", and "tactic". When dependency evidence is present,
-      account for it explicitly in the analogy mapping.
-      predicted_state must be literal SOLVED or the exact full focused Lean state expected immediately after the tactic,
-      including its visible context and goal. Never predict the unchanged current state. tactic is one complete Lean 4 line;
-      use ; or <;> to sequence.
-
   analogy_update:
-    version: analogy-update-v3
+    version: analogy-update-v4
     system: >-
-      Revise the external working mental model to escape this stuck Lean 4 proof state, then return the first tactic
-      implied by the revision. Lean is the judge. Return exactly one <mental_model> JSON block followed by JSON only.
+      Revise the external everyday mental model to escape this stuck Lean 4 proof state, then return the first tactic
+      implied by the revision. Preserve its exact structural mapping: distinct proof propositions remain distinct
+      concrete things, and each proof tactic remains one distinct everyday action. Use only a source domain from the
+      supplied domain card and only proof tactics from the supplied tactic card. Lean is the judge. Return exactly one
+      <mental_model> JSON block followed by JSON only.
     user: |-
       Overall target:
       {{overall_target}}
 
-      Current goals:
+      Current focused Lean proof state:
       {{current_goals}}
 
       Semantic recovery:
@@ -190,10 +157,14 @@ prompts:
       {{rejected_tactics}}
 
       {{tactic_card}}
+
+      Allowed source domains:
+      {{domain_card}}
 
       Choose action revise_model or change_domain. revise_model must preserve the supplied domain while revising
       its ordered transition correspondences. change_domain must choose a new domain not listed under abandoned_domains
-      and supply a new ordered correspondence list. A SAT restart/countermodel requires change_domain.
+      and must select that domain from the supplied domain card before creating a new ordered correspondence list.
+      A SAT restart/countermodel requires change_domain.
       The mental-model JSON must contain exactly "domain", "correspondences", and "abandoned_domains". Every
       correspondence must contain "domain_before", "domain_transition", "domain_after", "proof_before",
       "proof_transition", and "proof_after"; use null for unknown proof fields.
@@ -201,10 +172,10 @@ prompts:
       predicted_state is literal SOLVED or the exact full focused Lean state expected immediately after the first tactic.
 
   lean_tactic_card:
-    version: lean-tactic-card-v2
+    version: lean-tactic-card-v3
     text: >-
-      Lean card: no tauto/itauto. {{recipes}}Core moves: intro, exact <hyp>, apply <hyp>, constructor,
-      cases/rcases, False.elim. Use assumption or rw [<hyp>] when justified. P : Prop is not evidence.
+      Lean card: {{recipes}}intro h; exact <hyp>; apply <hyp>; cases <hyp>; constructor; left/right;
+      rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.
 
   lean_tactic_card_recipes:
     version: lean-tactic-card-recipes-v1
@@ -231,10 +202,6 @@ prompts:
       - {{discarded}}
       Return replacement candidates only. Do not repeat any removed or already tried tactic. Supply every operand,
       for example `exact h2`, `apply h1`, `rw [h1]`, or `rcases h with ⟨hH,hU⟩`. {{contract}}
-
-  analogy_rescue_output_contract:
-    version: analogy-rescue-output-contract-v1
-    text: 'Return only strict JSON with exactly "analogy", "predicted_state", and singular "tactic".'
 
   analogy_update_output_contract:
     version: analogy-update-output-contract-v2
@@ -320,49 +287,3 @@ prompts:
   semantic_countermodel_guidance:
     version: semantic-countermodel-guidance-v1
     text: 'SAT restart: {{edge}} led to a countermodel ({{assignments}}); choose a different plan from this last valid state.'
-
-  proof_language_view:
-    version: proof-language-view-v1
-    system: Represent this proof-search state for a frozen embedding model.
-    user: |-
-      Overall target:
-      {{overall_target}}
-      Current proof state:
-      {{current_state}}
-      Accepted tactics:
-      {{accepted}}
-      Failed tactics:
-      {{failed}}
-
-  policy_target_embedding:
-    version: policy-target-embedding-v1
-    system: Represent the fixed theorem target.
-    user: '{{target}}'
-
-  policy_current_embedding:
-    version: policy-current-embedding-v1
-    system: Represent the current proof need and structural signature.
-    user: |-
-      {{language_view}}
-      Structure:
-      {{structure}}
-
-  transition_embedding:
-    version: transition-embedding-v1
-    system: Represent the change between two proof states.
-    user: |-
-      Before proof state:
-      {{before}}
-      After proof state:
-      {{after}}
-
-  observed_transition_embedding:
-    version: observed-transition-embedding-v1
-    system: Represent one verified proof-state transition.
-    user: |-
-      Before proof state:
-      {{before}}
-      Verified tactic:
-      {{tactic}}
-      After proof state:
-      {{after}}

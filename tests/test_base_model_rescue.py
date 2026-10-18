@@ -736,6 +736,7 @@ def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call()
             model_calls.append((messages, seed))
             if len(model_calls) == 1:
                 assert "Lean card:" in messages[-1].content
+                assert "Everyday-domain card:" in messages[-1].content
                 assert "SAT: no countermodel; continue from this state." in messages[-1].content
                 return "not json"
             assert "not json" in messages[-1].content

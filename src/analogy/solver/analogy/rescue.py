@@ -478,6 +478,7 @@ class AnalogyFallback:
             open_tactics="\n".join(open_feedback) or "(none)",
             rejected_tactics="\n".join(rejected_feedback) or "(none)",
             tactic_card=lean_tactic_card(state.expression),
+            domain_card=prompt_catalog().text("analogy_domain_card"),
             semantic_guidance=semantic_guidance,
             dependency_table=dependency_table,
         )

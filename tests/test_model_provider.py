@@ -162,26 +162,18 @@ def test_tactic_ranker_prompt_contains_only_the_focused_goal():
 
     assert "h : P" in seen[0]
     assert "bad : Q" not in seen[0]
+    assert "Current focused Lean proof state:" in seen[0]
 
 
-def test_enabled_ranker_initializes_scratchpad_and_strips_block_before_candidate_parser():
+def test_empty_analogy_scratchpad_does_not_implicitly_initialize_during_ranking():
     scratchpad = AnalogyScratchpad()
 
     class Provider:
         def generate(self, messages, *, seed):
             assert seed == 7
             assert len(messages) == 2
-            assert "create one" in messages[-1].content
-            return """<analogy>
-domain: locksmithing
-mapping:
-- P -> locked door
-steps:
-1. Open the matching lock.
-abandoned domains:
-- (none)
-</analogy>
-[{"tactic":"exact h","score":1}]"""
+            assert "mental model" not in messages[-1].content
+            return '[{"tactic":"exact h","score":1}]'
 
     configure_prompt_catalog(ROOT / "prompts.yaml")
     candidates = _ranker(
@@ -192,8 +184,7 @@ abandoned domains:
     )
 
     assert [item.source for item in candidates] == ["exact h"]
-    assert scratchpad.current is not None
-    assert scratchpad.current.domain == "locksmithing"
+    assert scratchpad.current is None
     assert scratchpad.history == ('[{"tactic":"exact h","score":1}]',)
 
 
@@ -279,8 +270,8 @@ def test_pending_rebuild_uses_plain_ordinary_tactics_without_reinitializing():
 
 
 def test_enabled_partial_candidate_repair_refreshes_current_block_and_contract():
-    scratchpad = AnalogyScratchpad()
     state = AnalogyState("locksmithing", ("P -> lock",), ("Open it.",))
+    scratchpad = AnalogyScratchpad(state)
     calls = []
 
     class Provider:

@@ -49,12 +49,12 @@
 - Consumes: existing `SearchResult`, policies, `EpisodeContext`, `SearchSession`, tactic batches, `initialize_search`, `start_search`, and `update_search` behavior.
 - Produces: the same names through `analogy.solver.search`, with `run.py` consuming `initialize_search` and `update_search` from that facade.
 
-- [ ] Add failing dependency assertions that `analogy.solver.search` is a package, its four internal modules exist, and the retired episode/setup modules are absent.
-- [ ] Run the dependency assertion and confirm it fails against the current module layout.
-- [ ] Move `SearchResult` to `result.py`, protocols/default policies to `policies.py`, the episode state machine to `session.py`, and configuration wiring to `setup.py`.
-- [ ] Export the stable engine API from `search/__init__.py` and update production/test imports without compatibility shims.
-- [ ] Run episode, analogy rescue, reporting, runtime, and dependency tests and confirm they pass.
-- [ ] Commit the package migration directly to `main`.
+- [x] Add failing dependency assertions that `analogy.solver.search` is a package, its four internal modules exist, and the retired episode/setup modules are absent.
+- [x] Run the dependency assertion and confirm it fails against the current module layout.
+- [x] Move `SearchResult` to `result.py`, protocols/default policies to `policies.py`, the episode state machine to `session.py`, and configuration wiring to `setup.py`.
+- [x] Export the stable engine API from `search/__init__.py` and update production/test imports without compatibility shims.
+- [x] Run episode, analogy rescue, reporting, runtime, and dependency tests and confirm they pass.
+- [x] Commit the package migration directly to `main`.
 
 ### Task 2: Enforce the engine boundary
 
@@ -66,8 +66,8 @@
 - Consumes: the completed `solver.search` facade.
 - Produces: architecture assertions that keep `run.py` on the facade and prevent reverse dependencies from proof to search.
 
-- [ ] Add an AST assertion that `run.py` imports no retired search modules and imports both engine operations from `solver.search`.
-- [ ] Add an import-graph assertion that no module under `solver/proof/` imports `solver.search`.
-- [ ] Run the architecture tests and confirm they pass.
-- [ ] Run the full test suite and `git diff --check`.
-- [ ] Inspect the complete diff against both run recipes and commit the guardrails directly to `main`.
+- [x] Add an AST assertion that `run.py` imports no retired search modules and imports both engine operations from `solver.search`.
+- [x] Add an import-graph assertion that no module under `solver/proof/` imports `solver.search`.
+- [x] Run the architecture tests and confirm they pass.
+- [x] Run the full test suite and `git diff --check`.
+- [x] Inspect the complete diff against both run recipes and commit the guardrails directly to `main`.

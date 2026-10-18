@@ -136,3 +136,39 @@ def test_computational_state_is_separate_from_report_presentation() -> None:
             name.startswith(("render", "write"))
             for name in vars(record_type)
         )
+
+
+def test_run_uses_search_facade_and_proof_does_not_depend_on_search() -> None:
+    run_tree = ast.parse(
+        (PACKAGE / "solver" / "run.py").read_text(encoding="utf-8")
+    )
+    search_imports = [
+        node
+        for node in ast.walk(run_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "search"
+    ]
+
+    assert {
+        alias.name for node in search_imports for alias in node.names
+    } >= {"initialize_search", "submit_tactics_to_lean", "update_search"}
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and node.module in {"episode", "search_setup", "search.session"}
+        for node in ast.walk(run_tree)
+    )
+
+    reverse_dependencies = []
+    for path in (PACKAGE / "solver" / "proof").glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module == "search" or node.module.endswith(".solver.search"):
+                    reverse_dependencies.append((path.name, node.lineno))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("analogy.solver.search"):
+                        reverse_dependencies.append((path.name, node.lineno))
+
+    assert reverse_dependencies == []

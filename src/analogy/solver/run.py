@@ -20,7 +20,7 @@ from .model_policy import (
     initialize_model_policy,
     initialize_model_protocol,
 )
-from .proof.adapter import initialize_proof, submit_tactics_to_lean
+from .proof.adapter import initialize_proof
 from .report import (
     SolveRunRecord,
     build_problem_record,
@@ -29,7 +29,7 @@ from .report import (
     write_problem_record,
     write_run_record,
 )
-from .search import initialize_search, update_search
+from .search import initialize_search, submit_tactics_to_lean, update_search
 
 
 def run_vanilla(

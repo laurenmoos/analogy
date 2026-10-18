@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from heapq import heappop, heappush
 from itertools import count
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from ...utils.records import (
     CancellationToken,
@@ -136,6 +136,25 @@ class TacticBatchResult:
     def __post_init__(self) -> None:
         if tuple(item.candidate for item in self.results) != self.batch.candidates:
             raise ValueError("tactic results must match the submitted candidates")
+
+
+class _TacticSubmitter(Protocol):
+    def run_tactic(
+        self, state: SymbolicState, candidate: TacticCandidate
+    ) -> TacticResult: ...
+
+
+def submit_tactics_to_lean(
+    proof: _TacticSubmitter,
+    tactics: TacticBatch,
+) -> TacticBatchResult:
+    """Submit one generated batch to Lean without mutating search state."""
+
+    results = tuple(
+        proof.run_tactic(tactics.node.state, candidate)
+        for candidate in tactics.candidates
+    )
+    return TacticBatchResult(tactics, results)
 
 
 @dataclass(slots=True)
@@ -735,6 +754,7 @@ __all__ = [
     "SearchSession",
     "TacticBatch",
     "TacticBatchResult",
+    "submit_tactics_to_lean",
     "start_search",
     "update_search",
 ]

@@ -19,6 +19,7 @@ from .session import (
     TacticBatch,
     TacticBatchResult,
     start_search,
+    submit_tactics_to_lean,
     update_search,
 )
 from .setup import initialize_search
@@ -41,5 +42,6 @@ __all__ = [
     "WhitespaceTacticCanonicalizer",
     "initialize_search",
     "start_search",
+    "submit_tactics_to_lean",
     "update_search",
 ]

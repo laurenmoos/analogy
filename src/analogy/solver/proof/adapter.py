@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
 
 from ...lean_gym.models import (
     Problem,
@@ -13,10 +12,6 @@ from ...lean_gym.models import (
 )
 from ...lean_gym.verifier import Verifier
 from ...utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
-
-if TYPE_CHECKING:
-    from ..search import TacticBatch, TacticBatchResult
-
 
 _MAX_FAILURE_FEEDBACK = 8
 _MAX_FAILURE_ENTRY_CHARS = 120
@@ -173,36 +168,13 @@ class LeanGymAdapter:
         return SymbolicState(state_id, proof_state, "lean4", prefix)
 
 
-class TacticSubmitter(Protocol):
-    def run_tactic(
-        self, state: SymbolicState, candidate: TacticCandidate
-    ) -> TacticResult: ...
-
-
 def initialize_proof(problem: Problem, verifier: Verifier) -> LeanGymAdapter:
     """Create the solver-facing adapter for one Lean problem."""
 
     return LeanGymAdapter(problem, verifier)
 
-
-def submit_tactics_to_lean(
-    proof: TacticSubmitter,
-    tactics: TacticBatch,
-) -> TacticBatchResult:
-    """Submit one generated batch to Lean without mutating search state."""
-
-    from ..search import TacticBatchResult
-
-    results = tuple(
-        proof.run_tactic(tactics.node.state, candidate)
-        for candidate in tactics.candidates
-    )
-    return TacticBatchResult(tactics, results)
-
-
 __all__ = [
     "LeanGymAdapter",
     "LeanInfrastructureResult",
     "initialize_proof",
-    "submit_tactics_to_lean",
 ]

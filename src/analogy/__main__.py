@@ -10,26 +10,26 @@ from pathlib import Path
 from .config import ConfigError
 from .model.model_provider import ModelConfigurationError
 from .runtime import get_runtime
-from .solver.inference import SolveRun, solve_problems
+from .solver.run import SolveRun, solve_problems
 
 
 def render_report(run: SolveRun) -> str:
     """Render one runtime invocation."""
 
     lines: list[str] = []
-    for result in run.inference.results:
+    for result in run.summary.results:
         lines.append(
             f"{result.status.value.upper()} {result.problem_id}: "
             f"lean_calls={result.verifier_call_count}, "
             f"analogy_fallbacks={result.analogy_fallback_count}"
         )
     fallback_count = sum(
-        result.analogy_fallback_count for result in run.inference.results
+        result.analogy_fallback_count for result in run.summary.results
     )
     lines.extend((
         "",
         f"SUMMARY: analogy={'on' if run.analogy_enabled else 'off'}, "
-        f"solved={run.inference.solved_count}/{run.inference.attempted_count}, "
+        f"solved={run.summary.solved_count}/{run.summary.attempted_count}, "
         f"analogy_fallbacks={fallback_count}",
     ))
     return "\n".join(lines)

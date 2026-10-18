@@ -5,20 +5,20 @@ import pytest
 
 from analogy.__main__ import build_parser, main, render_report, run_solve
 from analogy.config import load_config
-from analogy.records import InferenceProblemResult, InferenceRun, InferenceStatus
+from analogy.records import ProblemResult, SolveSummary, SolveStatus
 from analogy.runtime import with_analogy_enabled
-from analogy.solver import inference
-from analogy.solver.inference import SolveRun
+from analogy.solver import run as run_module
+from analogy.solver.run import SolveRun
 
 
 ROOT = Path(__file__).parents[1]
 
 
 def _result(problem_id, status, *, fallbacks=0):
-    return InferenceProblemResult(
+    return ProblemResult(
         problem_id=problem_id,
         status=status,
-        proof="exact h" if status is InferenceStatus.COMPLETE else None,
+        proof="exact h" if status is SolveStatus.COMPLETE else None,
         failure=None,
         expansion_count=1,
         verifier_call_count=1 + fallbacks,
@@ -65,15 +65,15 @@ def test_boolean_override_changes_only_analogy_enabled():
 
 
 def test_report_describes_one_runtime_run():
-    inference_run = InferenceRun(
+    summary = SolveSummary(
         "analogy-on",
         (
-            _result("easy", InferenceStatus.COMPLETE),
-            _result("hard", InferenceStatus.EXHAUSTED, fallbacks=1),
+            _result("easy", SolveStatus.COMPLETE),
+            _result("hard", SolveStatus.EXHAUSTED, fallbacks=1),
         ),
         1.5,
     )
-    run = SolveRun("run-1", True, inference_run, 1.5, Path("/tmp/run-1"))
+    run = SolveRun("run-1", True, summary, 1.5, Path("/tmp/run-1"))
 
     assert render_report(run) == (
         "COMPLETE easy: lean_calls=1, analogy_fallbacks=0\n"
@@ -83,12 +83,12 @@ def test_report_describes_one_runtime_run():
 
 
 def test_report_names_semantic_failure_distinctly():
-    inference_run = InferenceRun(
+    summary = SolveSummary(
         "analogy-on",
-        (_result("false-root", InferenceStatus.SEMANTIC_FAILURE),),
+        (_result("false-root", SolveStatus.SEMANTIC_FAILURE),),
         0.2,
     )
-    run = SolveRun("run-2", True, inference_run, 0.2, Path("/tmp/run-2"))
+    run = SolveRun("run-2", True, summary, 0.2, Path("/tmp/run-2"))
 
     assert render_report(run).startswith(
         "SEMANTIC_FAILURE false-root: lean_calls=1, analogy_fallbacks=0"
@@ -104,13 +104,13 @@ def test_solve_runs_shared_runtime_once(tmp_path, monkeypatch):
         config, problems, generator, verifier, *, run_directory, problem_index=None
     ):
         calls.append((config, problems, generator, verifier, run_directory, problem_index))
-        return InferenceRun("analogy-on", (), 0.0), [], {}
+        return SolveSummary("analogy-on", (), 0.0), [], {}
 
-    monkeypatch.setattr(inference, "_run_runtime", fake_runtime)
-    run = inference.solve_problems(configured, (), object(), object())
+    monkeypatch.setattr(run_module, "_run_runtime", fake_runtime)
+    run = run_module.solve_problems(configured, (), object(), object())
 
     assert len(calls) == 1
     assert calls[0][0] is configured
     assert calls[0][5] is None
     assert run.analogy_enabled is True
-    assert run.inference.results == ()
+    assert run.summary.results == ()

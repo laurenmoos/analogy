@@ -18,9 +18,9 @@ from ..lean_gym.verifier import Verifier
 from ..problem_index import ProblemIndex
 from ..records import (
     DiscardReason,
-    InferenceProblemResult,
-    InferenceRun,
-    InferenceStatus,
+    ProblemResult,
+    SolveSummary,
+    SolveStatus,
     SearchStatus,
     SymbolicState,
     TacticStatus,
@@ -45,7 +45,7 @@ from .search import (
 class SolveRun:
     run_id: str
     analogy_enabled: bool
-    inference: InferenceRun
+    summary: SolveSummary
     elapsed_seconds: float
     output_directory: Path
 
@@ -192,7 +192,7 @@ def render_problem_trace(
     analogy_submissions = sum(
         len(rollout.get("attempts", ())) for rollout in rescue_rollouts
     )
-    icon = "✅" if status == InferenceStatus.COMPLETE.value else "❌"
+    icon = "✅" if status == SolveStatus.COMPLETE.value else "❌"
     binders = f" {problem.get('binders', '')}" if problem.get("binders") else ""
     lines = [
         "<details>",
@@ -296,7 +296,7 @@ def render_problem_trace(
     return "\n".join(lines)
 
 
-def _problem_result(problem_id: str, search_result: Any) -> InferenceProblemResult:
+def _problem_result(problem_id: str, search_result: Any) -> ProblemResult:
     ordinary = tuple(
         attempt
         for expansion in search_result.ordinary_expansions
@@ -315,23 +315,23 @@ def _problem_result(problem_id: str, search_result: Any) -> InferenceProblemResu
         for item in expansion.discarded
     )
     status = (
-        InferenceStatus.COMPLETE
+        SolveStatus.COMPLETE
         if search_result.status is SearchStatus.COMPLETE
-        else InferenceStatus.BUDGET_EXHAUSTED
+        else SolveStatus.BUDGET_EXHAUSTED
         if search_result.status is SearchStatus.BUDGET_EXHAUSTED
-        else InferenceStatus.SEMANTIC_FAILURE
+        else SolveStatus.SEMANTIC_FAILURE
         if search_result.status is SearchStatus.SEMANTIC_FAILURE
-        else InferenceStatus.EXHAUSTED
+        else SolveStatus.EXHAUSTED
     )
     failure = None
-    if status is InferenceStatus.SEMANTIC_FAILURE:
+    if status is SolveStatus.SEMANTIC_FAILURE:
         event = search_result.semantic_recoveries[-1]
         failure = (
             f"semantic check failed: {event.error}"
             if event.error is not None
             else "no propositionally valid rescue ancestor"
         )
-    return InferenceProblemResult(
+    return ProblemResult(
         problem_id=problem_id,
         status=status,
         proof=search_result.proof,
@@ -346,14 +346,14 @@ def _problem_result(problem_id: str, search_result: Any) -> InferenceProblemResu
     )
 
 
-def _failed_problem_result(problem_id: str, status: InferenceStatus, failure: str) -> InferenceProblemResult:
-    return InferenceProblemResult(problem_id, status, None, failure, 0, 0, 0, 0, 0, 0, 0)
+def _failed_problem_result(problem_id: str, status: SolveStatus, failure: str) -> ProblemResult:
+    return ProblemResult(problem_id, status, None, failure, 0, 0, 0, 0, 0, 0, 0)
 
 
-def _problem_route(outcome: InferenceProblemResult, search_result: Any | None) -> str:
+def _problem_route(outcome: ProblemResult, search_result: Any | None) -> str:
     if search_result is not None and search_result.rescue_rollouts:
         return "analogy-assisted"
-    if _enum_value(outcome.status) == InferenceStatus.COMPLETE.value:
+    if _enum_value(outcome.status) == SolveStatus.COMPLETE.value:
         return "ordinary"
     return "unsolved"
 
@@ -385,11 +385,11 @@ def _run_runtime(
     *,
     run_directory: Path,
     problem_index: ProblemIndex | None = None,
-) -> tuple[InferenceRun, list[str], dict[str, dict[str, Any]]]:
+) -> tuple[SolveSummary, list[str], dict[str, dict[str, Any]]]:
     started = time.monotonic()
     details: dict[str, dict[str, Any]] = {}
     traces: list[str] = []
-    results: list[InferenceProblemResult] = []
+    results: list[ProblemResult] = []
     for problem in problems:
         model_events: list[dict[str, Any]] = []
         search_result = None
@@ -434,9 +434,9 @@ def _run_runtime(
             )
             outcome = _problem_result(problem.id, search_result)
         except TacticRankingError as error:
-            outcome = _failed_problem_result(problem.id, InferenceStatus.MODEL_FAILURE, str(error))
+            outcome = _failed_problem_result(problem.id, SolveStatus.MODEL_FAILURE, str(error))
         except Exception as error:
-            outcome = _failed_problem_result(problem.id, InferenceStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
+            outcome = _failed_problem_result(problem.id, SolveStatus.VERIFIER_FAILURE, f"{type(error).__name__}: {error}")
         detail = _public_payload({
             "problem": asdict(problem),
             "outcome": asdict(outcome),
@@ -451,7 +451,7 @@ def _run_runtime(
         traces.append(render_problem_trace(detail, model_events, route=route))
         results.append(outcome)
     label = "analogy-on" if config.analogy.enabled else "analogy-off"
-    return InferenceRun(label, tuple(results), time.monotonic() - started), traces, details
+    return SolveSummary(label, tuple(results), time.monotonic() - started), traces, details
 
 
 def solve_problems(
@@ -467,7 +467,7 @@ def solve_problems(
     run_id = uuid.uuid4().hex
     run_directory = config.run.output_dir / "solve" / run_id
     run_directory.mkdir(parents=True, exist_ok=False)
-    inference, traces, _details = _run_runtime(
+    summary, traces, _details = _run_runtime(
         config,
         problems,
         generator,
@@ -478,7 +478,7 @@ def solve_problems(
     run = SolveRun(
         run_id,
         config.analogy.enabled,
-        inference,
+        summary,
         time.monotonic() - started,
         run_directory,
     )
@@ -498,15 +498,15 @@ def solve_problems(
                 problem_index.fingerprints if problem_index is not None else None
             ),
             "elapsed_seconds": run.elapsed_seconds,
-            "inference": asdict(inference),
+            "summary": asdict(summary),
         },
     )
     report = [
         "# Proof search run",
         "",
         f"- Analogy fallback: {'enabled' if config.analogy.enabled else 'disabled'}",
-        f"- Solved: {inference.solved_count}/{inference.attempted_count}",
-        f"- Analogy tactics submitted to Lean: {sum(item.analogy_fallback_count for item in inference.results)}",
+        f"- Solved: {summary.solved_count}/{summary.attempted_count}",
+        f"- Analogy tactics submitted to Lean: {sum(item.analogy_fallback_count for item in summary.results)}",
         "",
         "## Detailed traces",
         "",

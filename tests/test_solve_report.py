@@ -1,12 +1,13 @@
+import json
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
-from analogy.records import InferenceStatus, SearchStatus, SymbolicState
-from analogy.solver import inference as inference_module
-from analogy.solver.inference import (
+from analogy.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
+from analogy.solver import run as run_module
+from analogy.solver.run import (
     _problem_result,
     _problem_route,
     _run_runtime,
@@ -41,8 +42,8 @@ def test_runtime_shares_one_scratchpad_within_each_problem_and_isolates_problems
         contexts.append(context)
         return SearchResult(SearchStatus.EXHAUSTED, None)
 
-    monkeypatch.setattr(inference_module, "LeanGymAdapter", FakeLean)
-    monkeypatch.setattr(inference_module, "run_episode", fake_run_episode)
+    monkeypatch.setattr(run_module, "LeanGymAdapter", FakeLean)
+    monkeypatch.setattr(run_module, "run_episode", fake_run_episode)
     config = load_config(ROOT / "config.yaml")
     config = replace(config, analogy=replace(config.analogy, enabled=True))
     problems = tuple(
@@ -64,6 +65,23 @@ def test_runtime_shares_one_scratchpad_within_each_problem_and_isolates_problems
     second_ranker = contexts[1].tactic_ranker._analogy_scratchpad
     assert first_ranker is first_fallback
     assert first_ranker is not second_ranker
+
+
+def test_solve_artifact_uses_summary_key(tmp_path, monkeypatch) -> None:
+    config = load_config(ROOT / "config.yaml")
+    config = replace(config, run=replace(config.run, output_dir=tmp_path))
+    summary = SolveSummary("analogy-on", (), 0.0)
+    monkeypatch.setattr(
+        run_module,
+        "_run_runtime",
+        lambda *args, **kwargs: (summary, [], {}),
+    )
+
+    run = run_module.solve_problems(config, (), object(), object())
+    payload = json.loads((run.output_directory / "run.json").read_text())
+
+    assert payload["summary"]["results"] == []
+    assert "inference" not in payload
 
 
 def test_problem_report_shows_analogy_as_one_fallback_inside_shared_search():
@@ -282,7 +300,7 @@ def test_semantic_failure_status_and_events_survive_problem_serialization() -> N
 
     outcome = _problem_result("demo", search)
 
-    assert outcome.status is InferenceStatus.SEMANTIC_FAILURE
+    assert outcome.status is SolveStatus.SEMANTIC_FAILURE
     assert outcome.failure == "no propositionally valid rescue ancestor"
     assert asdict(search)["semantic_recoveries"][0]["countermodel"] == (
         ("P", False),

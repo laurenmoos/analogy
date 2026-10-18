@@ -3,6 +3,8 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
 from analogy.problem_index import ProblemIndex
@@ -102,7 +104,10 @@ def test_changed_prompts_do_not_reuse_solved_status(tmp_path):
     assert [problem.id for problem in ProblemIndex.load(config, problems).select("previous_failures")] == ["p"]
 
 
-def test_missing_index_is_reconstructed_from_compatible_run_artifacts(tmp_path):
+@pytest.mark.parametrize("result_key", ["summary", "inference"])
+def test_missing_index_is_reconstructed_from_compatible_run_artifacts(
+    tmp_path, result_key
+):
     config = _config(tmp_path)
     problems = (_problem("solved"), _problem("failed"))
     index = ProblemIndex.load(config, problems)
@@ -114,7 +119,7 @@ def test_missing_index_is_reconstructed_from_compatible_run_artifacts(tmp_path):
             {
                 "problem_index_signature": index.signature,
                 "problem_index_fingerprints": index.fingerprints,
-                "inference": {
+                result_key: {
                     "results": [
                         {"problem_id": "solved", "status": "complete"},
                         {"problem_id": "failed", "status": "exhausted"},

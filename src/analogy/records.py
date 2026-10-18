@@ -291,7 +291,7 @@ class SearchStatus(str, Enum):
     SEMANTIC_FAILURE = "semantic_failure"
 
 
-class InferenceStatus(str, Enum):
+class SolveStatus(str, Enum):
     COMPLETE = "complete"
     EXHAUSTED = "exhausted"
     BUDGET_EXHAUSTED = "budget_exhausted"
@@ -472,9 +472,9 @@ def _nonnegative_integer(value: object, field: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class InferenceProblemResult:
+class ProblemResult:
     problem_id: str
-    status: InferenceStatus
+    status: SolveStatus
     proof: str | None
     failure: str | None
     expansion_count: int
@@ -487,9 +487,9 @@ class InferenceProblemResult:
 
     def __post_init__(self) -> None:
         _require_text(self.problem_id, "problem_id")
-        if not isinstance(self.status, InferenceStatus):
-            raise ValueError("status must be an InferenceStatus")
-        if self.status is InferenceStatus.COMPLETE:
+        if not isinstance(self.status, SolveStatus):
+            raise ValueError("status must be a SolveStatus")
+        if self.status is SolveStatus.COMPLETE:
             _require_text(self.proof, "proof")
             if self.failure is not None:
                 raise ValueError("complete results must not include failure")
@@ -510,9 +510,9 @@ class InferenceProblemResult:
 
 
 @dataclass(frozen=True, slots=True)
-class InferenceRun:
+class SolveSummary:
     run_id: str
-    results: tuple[InferenceProblemResult, ...]
+    results: tuple[ProblemResult, ...]
     elapsed_seconds: float
 
     def __post_init__(self) -> None:
@@ -520,7 +520,7 @@ class InferenceRun:
         object.__setattr__(
             self,
             "results",
-            _typed_tuple(self.results, InferenceProblemResult, "results"),
+            _typed_tuple(self.results, ProblemResult, "results"),
         )
         elapsed = _finite_float(self.elapsed_seconds, "elapsed_seconds")
         if elapsed < 0.0:
@@ -533,12 +533,12 @@ class InferenceRun:
 
     @property
     def solved_count(self) -> int:
-        return sum(item.status is InferenceStatus.COMPLETE for item in self.results)
+        return sum(item.status is SolveStatus.COMPLETE for item in self.results)
 
     @property
     def model_failure_count(self) -> int:
         return sum(
-            item.status is InferenceStatus.MODEL_FAILURE for item in self.results
+            item.status is SolveStatus.MODEL_FAILURE for item in self.results
         )
 
     @property

@@ -140,8 +140,10 @@ class ProblemIndex:
             artifact_fingerprints = payload.get("problem_index_fingerprints", {})
             if not isinstance(artifact_fingerprints, dict):
                 continue
-            inference = payload.get("inference", {})
-            results = inference.get("results", []) if isinstance(inference, dict) else []
+            summary = payload.get("summary")
+            if not isinstance(summary, dict):
+                summary = payload.get("inference", {})
+            results = summary.get("results", []) if isinstance(summary, dict) else []
             if not isinstance(results, list):
                 continue
             for result in results:

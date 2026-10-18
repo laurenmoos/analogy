@@ -1,4 +1,4 @@
-"""Typed records and the one-shot analogy fallback for stuck proof states."""
+"""Typed records and bounded analogy correction for stuck proof states."""
 
 from __future__ import annotations
 
@@ -8,8 +8,17 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Protocol
 
-from ..inference.parser import normalize_lean4_tactic
-from ..inference.prompts import prompt_catalog, render_lean_goal_for_model
+from ..inference.parser import (
+    candidate_rejection_reason,
+    normalize_lean4_tactic,
+    tactic_is_incomplete,
+)
+from ..inference.prompts import (
+    focused_lean_goal,
+    lean_tactic_card,
+    prompt_catalog,
+    render_lean_goal_for_model,
+)
 from ..records import (
     CancellationToken,
     CandidateOrigin,
@@ -66,12 +75,21 @@ class RescueTermination(str, Enum):
     CANCELLED = "cancelled"
     GENERATION_ERROR = "generation_error"
     INVALID_OUTPUT = "invalid_output"
+    DUPLICATE = "duplicate"
+    PREDICTED_NO_CHANGE = "predicted_no_change"
 
 
 class GenerationStatus(str, Enum):
     VALID = "valid"
     INVALID = "invalid"
     RUNTIME_ERROR = "runtime_error"
+    DUPLICATE = "duplicate"
+
+
+class PredictionLabel(str, Enum):
+    PREDICTED_NO_CHANGE = "predicted_no_change"
+    PREDICTION_MATCHED = "prediction_matched"
+    PREDICTION_MISMATCHED = "prediction_mismatched"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +100,7 @@ class GenerationAttempt:
     repair: bool = False
     error_kind: str | None = None
     diagnostic: str | None = None
+    prediction_label: PredictionLabel | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
@@ -89,6 +108,10 @@ class GenerationAttempt:
         _require_text(self.raw_text, "raw_text", allow_empty=True)
         if not isinstance(self.status, GenerationStatus):
             raise ValueError("status must be a GenerationStatus")
+        if self.prediction_label is not None and not isinstance(
+            self.prediction_label, PredictionLabel
+        ):
+            raise ValueError("prediction_label must be a PredictionLabel or None")
         if self.status is GenerationStatus.VALID:
             if self.error_kind is not None or self.diagnostic is not None:
                 raise ValueError("valid generation attempts must not include errors")
@@ -199,6 +222,7 @@ class RescueRollout:
     generations: tuple[GenerationAttempt, ...] = ()
     analogy_stream: Any | None = None
     analogy_trace: Any | None = None
+    semantic_event_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.rollout_id, "rollout_id")
@@ -208,6 +232,8 @@ class RescueRollout:
         object.__setattr__(self, "generations", _typed_tuple(self.generations, GenerationAttempt, "generations"))
         if not isinstance(self.termination, RescueTermination):
             raise ValueError("termination must be a RescueTermination")
+        if self.semantic_event_id is not None:
+            _require_text(self.semantic_event_id, "semantic_event_id")
         if any(item.proposal not in self.proposals for item in self.attempts):
             raise ValueError("attempt proposals must belong to rollout")
 
@@ -234,6 +260,8 @@ class GenericRescueRunner(Protocol):
         ordinary_attempts: tuple[TacticResult, ...],
         evaluator: Callable[[TacticCandidate], TacticEvaluation],
         cancellation: CancellationToken,
+        semantic_guidance: str,
+        dependency_table: str = "(none)",
     ) -> GenericRescueOutcome: ...
 
 
@@ -254,7 +282,11 @@ def _extract_json_object(text: str) -> str:
     return inner
 
 
-def parse_analogy_tactic(text: str) -> tuple[str, RescueProposal]:
+def parse_analogy_tactic(
+    text: str,
+    *,
+    proof_state: str | None = None,
+) -> tuple[str, RescueProposal]:
     if not isinstance(text, str):
         raise RescueOutputError("analogy fallback output must be text")
     try:
@@ -272,14 +304,22 @@ def parse_analogy_tactic(text: str) -> tuple[str, RescueProposal]:
         raise RescueOutputError("tactic must be nonblank text")
     if "\n" in tactic or "\r" in tactic or "\x00" in tactic:
         raise RescueOutputError("tactic must be one safe single line")
+    canonical = normalize_lean4_tactic(tactic, proof_state)
+    if tactic_is_incomplete(canonical):
+        raise RescueOutputError(
+            f"tactic {canonical!r} is incomplete; supply its required operands"
+        )
+    rejection = candidate_rejection_reason(canonical, proof_state)
+    if rejection is not None:
+        raise RescueOutputError(f"tactic {canonical!r} was filtered: {rejection}")
     return analogy.strip(), RescueProposal(
-        TacticCandidate(normalize_lean4_tactic(tactic), 1.0, CandidateOrigin.ANALOGICAL),
+        TacticCandidate(canonical, 1.0, CandidateOrigin.ANALOGICAL),
         predicted_state.strip(),
     )
 
 
 class AnalogyFallback:
-    """Retry malformed generations, then submit the first valid tactic exactly once."""
+    """Use a bounded generation budget to repair invalid or Lean-rejected tactics."""
 
     def __init__(self, generator: Any, *, max_model_calls: int, seed: int, trace_sink: Any | None = None) -> None:
         if isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls <= 0:
@@ -291,16 +331,47 @@ class AnalogyFallback:
         self._seed = seed
         self._trace_sink = trace_sink
 
-    def search(self, state, goal, tactic_pool, ordinary_attempts, evaluator, cancellation) -> GenericRescueOutcome:
+    def search(
+        self,
+        state,
+        goal,
+        tactic_pool,
+        ordinary_attempts,
+        evaluator,
+        cancellation,
+        semantic_guidance,
+        dependency_table="(none)",
+    ) -> GenericRescueOutcome:
         del tactic_pool
         if cancellation.is_cancelled():
             return GenericRescueOutcome(cancelled=True)
+        attempted_order: list[str] = []
+        attempted_tactics: set[str] = set()
+        for attempt in ordinary_attempts:
+            tactic = normalize_lean4_tactic(attempt.candidate.source, state.expression)
+            if tactic not in attempted_tactics:
+                attempted_tactics.add(tactic)
+                attempted_order.append(tactic)
+        open_feedback = tuple(
+            _result_feedback(item)
+            for item in ordinary_attempts
+            if item.status is TacticStatus.ACCEPTED
+        )
+        rejected_feedback = tuple(
+            _result_feedback(item)
+            for item in ordinary_attempts
+            if item.status is not TacticStatus.ACCEPTED
+        )
         messages = prompt_catalog().messages(
             "analogy_rescue",
             overall_target=render_lean_goal_for_model(goal.expression),
-            current_goals=render_lean_goal_for_model(state.expression),
+            current_goals=render_lean_goal_for_model(focused_lean_goal(state.expression)),
             accepted="\n".join(state.context) or "(none)",
-            failed="\n".join(_result_feedback(item) for item in ordinary_attempts) or "(none)",
+            open_tactics="\n".join(open_feedback) or "(none)",
+            rejected_tactics="\n".join(rejected_feedback) or "(none)",
+            tactic_card=lean_tactic_card(state.expression),
+            semantic_guidance=semantic_guidance,
+            dependency_table=dependency_table,
         )
         active_messages = messages
         rollouts: list[RescueRollout] = []
@@ -312,7 +383,50 @@ class AnalogyFallback:
             try:
                 raw = self._generator.generate(active_messages, seed=seed)
                 self._trace(state.id, active_messages, seed, raw)
-                analogy, proposal = parse_analogy_tactic(raw)
+                analogy, proposal = parse_analogy_tactic(
+                    raw,
+                    proof_state=state.expression,
+                )
+                if proposal.candidate.source in attempted_tactics:
+                    diagnostic = (
+                        f"tactic {proposal.candidate.source!r} was already attempted "
+                        "at this proof state; return a different tactic"
+                    )
+                    generation = GenerationAttempt(
+                        seed,
+                        raw,
+                        GenerationStatus.DUPLICATE,
+                        index > 0,
+                        "duplicate_tactic",
+                        diagnostic,
+                    )
+                    rollouts.append(
+                        RescueRollout(
+                            f"{state.id}:analogy:{index}",
+                            state.id,
+                            None,
+                            (),
+                            (),
+                            RescueTermination.DUPLICATE,
+                            generations=(generation,),
+                            analogy_trace=analogy,
+                        )
+                    )
+                    active_messages = messages + (
+                        Message(
+                            "user",
+                            "The previous tactic was valid but already tried at this "
+                            "proof state. Return a different tactic.\n\n"
+                            f"Tactics already tried here: {_bounded_tactic_ledger(attempted_order)}\n\n"
+                            f"Duplicate diagnostic:\n{diagnostic}\n\n"
+                            f"Previous response:\n{raw}\n\n"
+                            'Return only strict JSON with exactly "analogy", '
+                            '"predicted_state", and singular "tactic".',
+                        ),
+                    )
+                    continue
+                attempted_tactics.add(proposal.candidate.source)
+                attempted_order.append(proposal.candidate.source)
                 generation = GenerationAttempt(
                     seed, raw, GenerationStatus.VALID, repair=index > 0
                 )
@@ -351,7 +465,45 @@ class AnalogyFallback:
                 return GenericRescueOutcome(
                     rollouts=tuple(rollouts), cancelled=True
                 )
+            current_state = _normalized_prediction_state(state.expression)
+            predicted_state = _normalized_prediction_state(proposal.predicted_state)
+            if predicted_state == current_state:
+                generation = replace(
+                    generation,
+                    prediction_label=PredictionLabel.PREDICTED_NO_CHANGE,
+                )
+                rollouts.append(
+                    RescueRollout(
+                        f"{state.id}:analogy:{index}",
+                        state.id,
+                        None,
+                        (proposal,),
+                        (),
+                        RescueTermination.PREDICTED_NO_CHANGE,
+                        generations=(generation,),
+                        analogy_trace=analogy,
+                    )
+                )
+                active_messages = messages + (
+                    Message(
+                        "user",
+                        "The previous response predicted no state change, so it was not sent to Lean. "
+                        "Return a tactic with a different immediate state prediction.\n\n"
+                        f"Tactics already tried here: {_bounded_tactic_ledger(attempted_order)}\n\n"
+                        'Return only strict JSON with exactly "analogy", "predicted_state", and "tactic".',
+                    ),
+                )
+                continue
             evaluation = evaluator(proposal.candidate)
+            matched = _prediction_matches(proposal.predicted_state, evaluation)
+            generation = replace(
+                generation,
+                prediction_label=(
+                    PredictionLabel.PREDICTION_MATCHED
+                    if matched
+                    else PredictionLabel.PREDICTION_MISMATCHED
+                ),
+            )
             attempt = RescueAttempt(proposal, evaluation.result, evaluation.discarded)
             termination = (
                 RescueTermination.COMPLETE if evaluation.completed_proof is not None
@@ -364,7 +516,14 @@ class AnalogyFallback:
                 return GenericRescueOutcome(completed_proof=evaluation.completed_proof, rollouts=tuple(rollouts))
             if evaluation.successor is not None:
                 return GenericRescueOutcome(successor=evaluation.successor, rollouts=tuple(rollouts))
-            return GenericRescueOutcome(rollouts=tuple(rollouts))
+            if getattr(evaluation.result, "infrastructure_failure", None) is not None:
+                return GenericRescueOutcome(rollouts=tuple(rollouts))
+            active_messages = messages + (
+                Message(
+                    "user",
+                    _analogy_correction_feedback(proposal, evaluation),
+                ),
+            )
         return GenericRescueOutcome(rollouts=tuple(rollouts))
 
     def _trace(self, state_id: str, messages: tuple[Message, ...], seed: int, response: str, *, error: Exception | None = None) -> None:
@@ -384,6 +543,60 @@ def _result_feedback(result: TacticResult) -> str:
     return f"{result.candidate.source}: {diagnostic}"
 
 
+def _bounded_diagnostic(text: str, *, limit: int = 500) -> str:
+    normalized = " ".join(text.split())
+    marker = " [truncated]"
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - len(marker)].rstrip() + marker
+
+
+def _bounded_tactic_ledger(tactics: list[str], *, count: int = 8, limit: int = 240) -> str:
+    rendered = ", ".join(tactics[:count]) or "(none)"
+    return rendered if len(rendered) <= limit else rendered[: limit - 1].rstrip() + "…"
+
+
+def _normalized_prediction_state(text: str) -> str:
+    return " ".join(render_lean_goal_for_model(focused_lean_goal(text)).split())
+
+
+def _prediction_matches(predicted_state: str, evaluation: TacticEvaluation) -> bool:
+    predicts_solved = predicted_state.strip().upper() == "SOLVED"
+    if evaluation.completed_proof is not None:
+        return predicts_solved
+    if predicts_solved or evaluation.successor is None:
+        return False
+    return _normalized_prediction_state(predicted_state) == _normalized_prediction_state(
+        evaluation.successor.state.expression
+    )
+
+
+def _analogy_correction_feedback(
+    proposal: RescueProposal,
+    evaluation: TacticEvaluation,
+) -> str:
+    if evaluation.result.status is TacticStatus.ERROR:
+        raw = next(
+            (item for item in evaluation.result.diagnostics if item.strip()),
+            "Lean rejected the tactic",
+        )
+        label = "Lean diagnostic"
+    else:
+        reason = (
+            evaluation.discarded.reason.value
+            if evaluation.discarded is not None
+            else "no_progress"
+        )
+        raw = f"accepted but discarded: {reason}"
+        label = "Search diagnostic"
+    return (
+        "The previous tactic did not make usable progress.\n"
+        f"Tactic: {proposal.candidate.source}\n"
+        f"{label}: {_bounded_diagnostic(raw)}\n"
+        "Return a different complete tactic as the required strict JSON object."
+    )
+
+
 def _fallback_seed(base_seed: int, state: SymbolicState, attempt: int) -> int:
     payload = (
         f"analogy-fallback-v1\x1f{base_seed}\x1f{state.id}\x1f"
@@ -395,7 +608,7 @@ def _fallback_seed(base_seed: int, state: SymbolicState, attempt: int) -> int:
 
 
 __all__ = [
-    "AnalogyFallback", "GenerationAttempt", "GenerationStatus",
+    "AnalogyFallback", "GenerationAttempt", "GenerationStatus", "PredictionLabel",
     "GenericRescueOutcome", "GenericRescueRunner", "PolicyActionRecord",
     "ProofRepresentation", "ProofRescueContext", "RescueAttempt",
     "RescueOutputError", "RescueProposal", "RescueRollout", "RescueTermination",

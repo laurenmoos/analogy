@@ -1,28 +1,155 @@
-from analogy.records import CandidateOrigin, SymbolicState, TacticResult, TacticStatus
+from analogy.records import (
+    CandidateOrigin,
+    DiscardReason,
+    DiscardedSuccessor,
+    SymbolicState,
+    TacticCandidate,
+    TacticResult,
+    TacticStatus,
+)
+from analogy.lean_gym.models import VerificationStatus
+from analogy.solver.lean_adapter import LeanInfrastructureResult
 from analogy.solver.rescue import (
     AnalogyFallback,
     GenerationStatus,
+    PredictionLabel,
     RescueOutputError,
     RescueTermination,
     TacticEvaluation,
     parse_analogy_tactic,
 )
 from analogy.solver.search import NeverCancelled
+from analogy.solver.semantic import (
+    SemanticRecoveryEvent,
+    SemanticResult,
+    render_semantic_guidance,
+)
 
 
 STATE = SymbolicState("state", "P", "lean4")
 GOAL = SymbolicState("goal", "P", "lean4")
 
 
-def _search(generator, evaluate, *, calls=3, cancellation=None, traces=None):
+def _search(
+    generator,
+    evaluate,
+    *,
+    calls=3,
+    cancellation=None,
+    traces=None,
+    ordinary_attempts=(),
+    semantic_guidance="SAT: no countermodel; continue from this state.",
+    dependency_table="(none)",
+):
     return AnalogyFallback(
         generator,
         max_model_calls=calls,
         seed=7,
         trace_sink=None if traces is None else traces.append,
     ).search(
-        STATE, GOAL, (), (), evaluate, cancellation or NeverCancelled()
+        STATE,
+        GOAL,
+        (),
+        ordinary_attempts,
+        evaluate,
+        cancellation or NeverCancelled(),
+        semantic_guidance,
+        dependency_table,
     )
+
+
+def test_semantic_guidance_distinguishes_continue_from_restart() -> None:
+    valid = SemanticRecoveryEvent(
+        "semantic:0", "state", SemanticResult.VALID, rescue_state_id="state"
+    )
+    invalid = SemanticRecoveryEvent(
+        "semantic:1",
+        "false",
+        SemanticResult.COUNTERMODEL,
+        (("G", False), ("H", True)),
+        "parent",
+        ("left",),
+    )
+
+    assert (
+        render_semantic_guidance(valid)
+        == "SAT: no countermodel; continue from this state."
+    )
+    assert render_semantic_guidance(invalid) == (
+        "SAT restart: left led to a countermodel (G=false, H=true); "
+        "choose a different plan from this last valid state."
+    )
+
+
+def test_semantic_guidance_has_a_hard_size_ceiling() -> None:
+    event = SemanticRecoveryEvent(
+        "semantic:1",
+        "false",
+        SemanticResult.COUNTERMODEL,
+        tuple((f"proposition_{index}_with_a_long_name", bool(index % 2)) for index in range(30)),
+        "parent",
+        ("apply an_extremely_long_tactic_name " + "x" * 300,),
+    )
+
+    guidance = render_semantic_guidance(event)
+
+    assert len(guidance) <= 240
+    assert guidance.startswith("SAT restart:")
+    assert guidance.endswith("choose a different plan from this last valid state.")
+
+
+def test_analogy_prompt_separates_open_from_rejected_feedback():
+    prompts = []
+    opened = TacticResult(
+        TacticCandidate("constructor", 1.0, CandidateOrigin.ORDINARY),
+        TacticStatus.ACCEPTED,
+        state=SymbolicState("open", "P : Prop\n⊢ P", "lean4"),
+    )
+    rejected = TacticResult(
+        TacticCandidate("exact nope", 1.0, CandidateOrigin.ORDINARY),
+        TacticStatus.ERROR,
+        diagnostics=("unknown identifier",),
+    )
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            prompts.append(messages[-1].content)
+            return '{"analogy":"x","predicted_state":"done","tactic":"exact h"}'
+
+    def evaluate(candidate):
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    _search(Generator(), evaluate, ordinary_attempts=(opened, rejected))
+
+    prompt = prompts[0]
+    open_section, rejected_section = prompt.split("REJECTED tactics", 1)
+    assert "constructor: accepted" in open_section
+    assert "exact nope: unknown identifier" not in open_section
+    assert "exact nope: unknown identifier" in rejected_section
+
+
+def test_analogy_prompt_requires_mapping_to_countermodel_dependency_table():
+    prompts = []
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            prompts.append(messages[-1].content)
+            return '{"analogy":"map hPQ sides","predicted_state":"done","tactic":"exact h"}'
+
+    def evaluate(candidate):
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    _search(
+        Generator(),
+        evaluate,
+        dependency_table="left: P=true; hPQ=left\nright: Q=true; hPQ=right",
+    )
+
+    assert "Countermodel dependency table" in prompts[0]
+    assert "hPQ=left" in prompts[0] and "hPQ=right" in prompts[0]
+    assert "analogy must explicitly map" in prompts[0]
 
 
 def test_analogy_schema_requires_one_singular_tactic():
@@ -46,6 +173,18 @@ def test_analogy_schema_requires_one_singular_tactic():
             raise AssertionError(f"accepted invalid schema: {invalid}")
 
 
+def test_analogy_tactic_is_normalized_with_the_current_proof_state():
+    raw = (
+        '{"analogy":"unpack a pair","predicted_state":"H and U available",'
+        '"tactic":"rcases hB with ⟨hA,hB⟩; exact hA"}'
+    )
+    state = "G H U : Prop\nhA : G\nhB : H ∧ U\n⊢ H"
+
+    _, proposal = parse_analogy_tactic(raw, proof_state=state)
+
+    assert proposal.candidate.source == "rcases hB with ⟨hH,hU⟩; exact hH"
+
+
 def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call():
     model_calls = []
     lean_calls = []
@@ -55,6 +194,8 @@ def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call()
         def generate(self, messages, *, seed):
             model_calls.append((messages, seed))
             if len(model_calls) == 1:
+                assert "Lean card:" in messages[1].content
+                assert "SAT: no countermodel; continue from this state." in messages[1].content
                 return "not json"
             assert "not json" in messages[-1].content
             assert "must be one JSON object" in messages[-1].content
@@ -84,25 +225,252 @@ def test_invalid_generations_retry_but_first_valid_response_gets_one_lean_call()
     ]
 
 
-def test_valid_tactic_rejection_ends_event_without_another_model_call():
+def test_valid_tactic_rejection_feeds_lean_feedback_into_a_second_attempt():
+    calls = []
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            calls.append((messages, seed))
+            if len(calls) == 1:
+                return '{"analogy":"a lock and key","predicted_state":"open","tactic":"exact h2"}'
+            assert "exact h2" in messages[-1].content
+            assert "h2 has type U but the goal is H" in messages[-1].content
+            return '{"analogy":"use the matching key","predicted_state":"solved","tactic":"exact hH"}'
+
+    def evaluate(candidate):
+        if candidate.source == "exact hH":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+            return TacticEvaluation(result, completed_proof="done")
+        return TacticEvaluation(
+            TacticResult(
+                candidate,
+                TacticStatus.ERROR,
+                diagnostics=("h2 has type U but the goal is H",),
+            )
+        )
+
+    outcome = _search(Generator(), evaluate, calls=3)
+
+    assert outcome.completed_proof == "done"
+    assert len(calls) == 2
+    assert [item.termination for item in outcome.rollouts] == [
+        RescueTermination.REJECTED,
+        RescueTermination.COMPLETE,
+    ]
+
+
+def test_discarded_analogy_progress_is_explained_and_retried():
+    calls = []
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            calls.append((messages, seed))
+            tactic = "assumption" if len(calls) == 1 else "exact h"
+            if len(calls) == 2:
+                assert "repeated_state" in messages[-1].content
+            return (
+                '{"analogy":"try another route","predicted_state":"open",'
+                f'"tactic":"{tactic}"}}'
+            )
+
+    def evaluate(candidate):
+        if candidate.source == "exact h":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+            return TacticEvaluation(result, completed_proof="done")
+        result = TacticResult(candidate, TacticStatus.ACCEPTED, state=STATE)
+        discarded = DiscardedSuccessor(result, DiscardReason.REPEATED_STATE)
+        return TacticEvaluation(result, discarded=discarded)
+
+    outcome = _search(Generator(), evaluate, calls=3)
+
+    assert outcome.completed_proof == "done"
+    assert [item.termination for item in outcome.rollouts] == [
+        RescueTermination.EXHAUSTED,
+        RescueTermination.COMPLETE,
+    ]
+
+
+def test_rejected_analogy_tactics_exhaust_the_existing_three_call_budget():
     calls = []
 
     class Generator:
         def generate(self, _messages, *, seed):
             calls.append(seed)
-            return '{"analogy":"a lock and key","predicted_state":"open","tactic":"bad"}'
+            tactic = ("assumption", "rfl", "contradiction")[len(calls) - 1]
+            return (
+                '{"analogy":"route","predicted_state":"open",'
+                f'"tactic":"{tactic}"}}'
+            )
 
     def evaluate(candidate):
         return TacticEvaluation(
             TacticResult(candidate, TacticStatus.ERROR, diagnostics=("rejected",))
         )
 
-    outcome = _search(Generator(), evaluate, calls=5)
+    outcome = _search(Generator(), evaluate, calls=3)
+
+    assert len(calls) == 3
+    assert len(outcome.rollouts) == 3
+    assert all(
+        item.termination is RescueTermination.REJECTED
+        for item in outcome.rollouts
+    )
+
+
+def test_analogy_retry_feedback_is_bounded():
+    calls = []
+    long_diagnostic = "detail " + ("x" * 900)
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            calls.append((messages, seed))
+            if len(calls) == 2:
+                feedback = messages[-1].content
+                assert "[truncated]" in feedback
+                assert len(feedback) < 800
+            tactic = "bad" if len(calls) == 1 else "exact h"
+            return (
+                '{"analogy":"route","predicted_state":"open",'
+                f'"tactic":"{tactic}"}}'
+            )
+
+    def evaluate(candidate):
+        if candidate.source == "exact h":
+            result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+            return TacticEvaluation(result, completed_proof="done")
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.ERROR, diagnostics=(long_diagnostic,))
+        )
+
+    assert _search(Generator(), evaluate).completed_proof == "done"
+
+
+def test_infrastructure_failure_does_not_consume_an_analogy_correction_call():
+    calls = []
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            calls.append(seed)
+            return '{"analogy":"route","predicted_state":"open","tactic":"exact h"}'
+
+    def evaluate(candidate):
+        result = LeanInfrastructureResult(
+            candidate=candidate,
+            status=TacticStatus.ERROR,
+            diagnostics=("timed out",),
+            verification_status=VerificationStatus.TIMEOUT,
+        )
+        return TacticEvaluation(result)
+
+    outcome = _search(Generator(), evaluate, calls=3)
 
     assert len(calls) == 1
     assert len(outcome.rollouts) == 1
-    assert outcome.rollouts[0].termination is RescueTermination.REJECTED
-    assert len(outcome.rollouts[0].attempts) == 1
+
+
+def test_duplicate_ordinary_tactic_is_logged_as_duplicate_and_resampled_without_lean():
+    model_calls = []
+    lean_calls = []
+    ordinary = TacticResult(
+        TacticCandidate("apply h2", 1.0, CandidateOrigin.ORDINARY),
+        TacticStatus.ERROR,
+        diagnostics=("rejected",),
+    )
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            model_calls.append((messages, seed))
+            if len(model_calls) == 1:
+                return (
+                    '{"analogy":"same key","predicted_state":"open",'
+                    '"tactic":"  apply   h2  "}'
+                )
+            assert "already attempted at this proof state" in messages[-1].content
+            assert "Tactics already tried here: apply h2" in messages[-1].content
+            return (
+                '{"analogy":"contrapositive","predicted_state":"solved",'
+                '"tactic":"intro h; exact h2 (h1 h)"}'
+            )
+
+    def evaluate(candidate):
+        lean_calls.append(candidate.source)
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    outcome = _search(
+        Generator(),
+        evaluate,
+        calls=3,
+        ordinary_attempts=(ordinary,),
+    )
+
+    assert outcome.completed_proof == "done"
+    assert lean_calls == ["intro h; exact h2 (h1 h)"]
+    assert len(model_calls) == 2
+    assert outcome.rollouts[0].termination is RescueTermination.DUPLICATE
+    assert outcome.rollouts[0].generations[0].status is GenerationStatus.DUPLICATE
+    assert outcome.rollouts[0].generations[0].error_kind == "duplicate_tactic"
+    assert outcome.rollouts[1].generations[0].repair is True
+
+
+def test_predicted_no_change_is_labeled_and_never_sent_to_lean():
+    lean_calls = []
+
+    class Generator:
+        calls = 0
+
+        def generate(self, messages, *, seed):
+            self.calls += 1
+            if self.calls == 1:
+                return '{"analogy":"stall","predicted_state":"P","tactic":"assumption"}'
+            assert "predicted no state change" in messages[-1].content
+            assert "Tactics already tried here: assumption" in messages[-1].content
+            return '{"analogy":"finish","predicted_state":"SOLVED","tactic":"exact h"}'
+
+    def evaluate(candidate):
+        lean_calls.append(candidate.source)
+        result = TacticResult(candidate, TacticStatus.COMPLETE, proof="done")
+        return TacticEvaluation(result, completed_proof="done")
+
+    outcome = _search(Generator(), evaluate)
+
+    assert lean_calls == ["exact h"]
+    assert outcome.rollouts[0].generations[0].prediction_label is PredictionLabel.PREDICTED_NO_CHANGE
+    assert outcome.rollouts[1].generations[0].prediction_label is PredictionLabel.PREDICTION_MATCHED
+
+
+def test_changed_prediction_is_labeled_mismatched_when_lean_disagrees():
+    successor = SymbolicState("next", "Q : Prop\n⊢ Q", "lean4")
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return '{"analogy":"move","predicted_state":"R : Prop\\n⊢ R","tactic":"intro h"}'
+
+    def evaluate(candidate):
+        result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
+        from analogy.records import SearchNode
+        return TacticEvaluation(result, successor=SearchNode(successor, 1.0))
+
+    outcome = _search(Generator(), evaluate, calls=1)
+
+    assert outcome.rollouts[0].generations[0].prediction_label is PredictionLabel.PREDICTION_MISMATCHED
+
+
+def test_prediction_matching_preserves_lean_identifier_case():
+    successor = SymbolicState("next", "P : Prop\nhA : P\n⊢ P", "lean4")
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return '{"analogy":"move","predicted_state":"p : Prop\\nha : p\\n⊢ p","tactic":"intro h"}'
+
+    def evaluate(candidate):
+        result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
+        from analogy.records import SearchNode
+        return TacticEvaluation(result, successor=SearchNode(successor, 1.0))
+
+    outcome = _search(Generator(), evaluate, calls=1)
+
+    assert outcome.rollouts[0].generations[0].prediction_label is PredictionLabel.PREDICTION_MISMATCHED
 
 
 def test_cancellation_before_generation_makes_no_model_or_lean_call():
@@ -163,7 +531,13 @@ def test_fallback_seed_namespace_is_stable_and_distinct_per_state():
 
     def run(state):
         return fallback.search(
-            state, GOAL, (), (), lambda _candidate: None, NeverCancelled()
+            state,
+            GOAL,
+            (),
+            (),
+            lambda _candidate: None,
+            NeverCancelled(),
+            "SAT: no countermodel; continue from this state.",
         )
 
     run(SymbolicState("first", "P", "lean4"))

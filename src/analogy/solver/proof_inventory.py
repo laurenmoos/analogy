@@ -67,6 +67,12 @@ class PropositionRoot:
     parts: tuple[str, str] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ProofGoal:
+    declarations: tuple[tuple[str, str], ...]
+    target: str
+
+
 def proposition_root(proposition: str) -> PropositionRoot:
     """Conservatively split only a supported outer Lean connective."""
     text = proposition.strip()
@@ -198,6 +204,34 @@ def _declarations_and_target(expression: str) -> tuple[list[tuple[str, str]], st
     if not target.strip():
         raise InventoryError("active subgoal must be nonblank")
     return declarations, target
+
+
+def proof_goals(expression: str) -> tuple[ProofGoal, ...]:
+    """Parse every displayed Lean goal without merging case-local contexts."""
+    if not isinstance(expression, str) or not expression.strip():
+        raise InventoryError("proof state must be nonblank text")
+    lines = expression.splitlines()
+    case_indices = [
+        index for index, line in enumerate(lines) if line.startswith("case ")
+    ]
+    if not case_indices:
+        if sum(line.lstrip().startswith("⊢") for line in lines) != 1:
+            raise InventoryError("proof state must contain exactly one unnamed goal")
+        declarations, target = _declarations_and_target(expression)
+        return (ProofGoal(tuple(declarations), target),)
+
+    preamble = lines[: case_indices[0]]
+    goals: list[ProofGoal] = []
+    for position, start in enumerate(case_indices):
+        end = case_indices[position + 1] if position + 1 < len(case_indices) else len(lines)
+        block = preamble + lines[start + 1 : end]
+        if sum(line.lstrip().startswith("⊢") for line in block) != 1:
+            raise InventoryError("each named case must contain exactly one goal")
+        declarations, target = _declarations_and_target("\n".join(block))
+        goals.append(ProofGoal(tuple(declarations), target))
+    if not goals:
+        raise InventoryError("proof state has no active goal")
+    return tuple(goals)
 
 
 def _split_component(expression: str, operator: str) -> tuple[str, str] | None:
@@ -334,7 +368,7 @@ def render_model_inventory(inventory: LocalProofInventory) -> str:
 
 __all__ = [
     "InventoryEntry", "InventoryError", "InventoryKind", "LocalProofInventory",
-    "PropositionRoot", "build_local_inventory", "implication_parts",
-    "proposition_binary", "proposition_root", "render_model_inventory",
+    "ProofGoal", "PropositionRoot", "build_local_inventory", "implication_parts",
+    "proof_goals", "proposition_binary", "proposition_root", "render_model_inventory",
     "same_proposition",
 ]

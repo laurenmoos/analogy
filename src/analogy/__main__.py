@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import ConfigError
 from .inference.model_provider import ModelConfigurationError
-from .runtime import get_runtime, with_analogy_enabled
+from .runtime import get_runtime
 from .solver.inference import SolveRun, solve_problems
 
 
@@ -38,14 +38,19 @@ def render_report(run: SolveRun) -> str:
 def run_solve(args: argparse.Namespace) -> int:
     """Solve configured problems, using analogy retries only when Lean gets stuck."""
 
-    runtime = get_runtime(args.config)
-    config = with_analogy_enabled(runtime.config, args.analogy_enabled)
+    runtime = get_runtime(
+        args.config,
+        args.analogy_enabled,
+        args.problem_selection,
+    )
+    config = runtime.config
 
     print(f"MODEL: {config.model.name}")
     print(f"PROBLEMS: {len(runtime.problems)} from {config.benchmark.corpus}")
+    print(f"SELECTION: {config.benchmark.selection}")
     print(
         f"SEARCH: top_k={config.search.top_k}, "
-        f"max_steps={config.search.max_steps}, seed={config.run.seed}"
+        f"max_steps={config.search.max_steps}"
     )
     print(
         f"ANALOGY: {'enabled' if config.analogy.enabled else 'disabled'}; "
@@ -53,11 +58,15 @@ def run_solve(args: argparse.Namespace) -> int:
     )
     print("DIVERSITY: frozen-model 3-nearest-neighbor cosine novelty")
     print("JUDGE: Lean\n")
+    if not runtime.problems:
+        print("No unresolved problems for this experiment configuration.")
+        return 0
     run = solve_problems(
         config,
         runtime.problems,
         runtime.model,
         runtime.verifier,
+        problem_index=runtime.problem_index,
     )
     print(render_report(run))
     print(f"\nDETAILS: {run.output_directory}")
@@ -90,6 +99,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable analogy fallback",
     )
     command.set_defaults(analogy_enabled=None)
+    selection = command.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--all-problems",
+        dest="problem_selection",
+        action="store_const",
+        const="exhaustive",
+        help="run the complete configured corpus",
+    )
+    selection.add_argument(
+        "--previous-failures",
+        dest="problem_selection",
+        action="store_const",
+        const="previous_failures",
+        help="run only unresolved or previously unsuccessful problems",
+    )
+    command.set_defaults(problem_selection=None)
     command.set_defaults(handler=run_solve)
     return parser
 

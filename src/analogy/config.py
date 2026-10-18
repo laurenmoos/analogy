@@ -35,6 +35,7 @@ class PromptConfig:
 @dataclass(frozen=True)
 class BenchmarkConfig:
     corpus: Path
+    selection: str
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ _SCHEMA = {
             "timeout_seconds", "do_sample", "temperature", "top_p",
         }
     ),
-    "benchmark": frozenset({"corpus"}),
+    "benchmark": frozenset({"corpus", "selection"}),
     "search": frozenset({"top_k", "max_steps", "stuck_after"}),
     "analogy": frozenset({"enabled", "max_model_calls"}),
     "run": frozenset({"output_dir", "seed"}),
@@ -146,6 +147,10 @@ def load_config(path: Path) -> AppConfig:
     sections: dict[str, dict[str, Any]] = {}
     for name, keys in _SCHEMA.items():
         section = _mapping(root[name], f"config.{name}")
+        if name == "benchmark" and "selection" not in section:
+            section = {**section, "selection": "previous_failures"}
+        if name == "run" and "seed" not in section:
+            section = {**section, "seed": 0}
         _validate_keys(section, keys, f"config.{name}")
         sections[name] = section
     base = config_path.parent
@@ -156,6 +161,13 @@ def load_config(path: Path) -> AppConfig:
     top_p = _number(model["top_p"], "config.model.top_p", positive=True)
     if top_p > 1.0:
         raise ConfigError("config.model.top_p must be at most 1")
+    selection = _string(
+        sections["benchmark"]["selection"], "config.benchmark.selection"
+    )
+    if selection not in {"exhaustive", "previous_failures"}:
+        raise ConfigError(
+            "config.benchmark.selection must be 'exhaustive' or 'previous_failures'"
+        )
     return AppConfig(
         prompts=PromptConfig(_path(sections["prompts"]["path"], "config.prompts.path", base)),
         model=ModelConfig(
@@ -169,7 +181,10 @@ def load_config(path: Path) -> AppConfig:
             temperature=_number(model["temperature"], "config.model.temperature", positive=True),
             top_p=top_p,
         ),
-        benchmark=BenchmarkConfig(_path(sections["benchmark"]["corpus"], "config.benchmark.corpus", base)),
+        benchmark=BenchmarkConfig(
+            _path(sections["benchmark"]["corpus"], "config.benchmark.corpus", base),
+            selection,
+        ),
         search=SearchConfig(
             top_k=_positive_integer(sections["search"]["top_k"], "config.search.top_k"),
             max_steps=_positive_integer(sections["search"]["max_steps"], "config.search.max_steps"),

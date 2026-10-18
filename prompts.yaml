@@ -1,12 +1,10 @@
 prompts:
   conventional_ranker:
-    version: conventional-ranker-v2
+    version: conventional-ranker-v4
     system: >-
-      Propose ranked next tactics for Lean 4. Return only a nonempty JSON array of objects with exactly
-      `tactic` and `score`. Each tactic must be one complete line. Scores are nonnegative relative weights.
-      Use only visible identifiers and do not repeat failed tactics. Use Lean 4 syntax: a standalone case
-      split is `cases h`; branch programs use `cases h with | inl hp => ... | inr hq => ...`, never Lean 3
-      syntax such as `cases h with hp hq`.
+      Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic` and `score`.
+      Tactics are one-line strings; scores are nonnegative numbers. Use visible identifiers only. Never repeat
+      a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.
     user: |-
       Overall target:
       {{overall_target}}
@@ -14,16 +12,16 @@ prompts:
       {{current_goals}}
       Accepted prefix:
       {{accepted}}
-      Failed tactics:
+      Recent path failure feedback:
       {{failed}}
+      {{tactic_card}}
       Return at most {{top_k}} candidates.
 
   analogy_rescue:
-    version: analogy-rescue-v4
+    version: analogy-rescue-v8
     system: >-
-      Use one concrete structural analogy to escape a stuck Lean 4 proof state, then translate it back into
-      exactly one tactic. You have both the proof state and the analogy; Lean is the sole judge. Return only
-      strict JSON.
+      Use one concrete analogy to escape this Lean 4 proof state, then return one tactic. Lean is the judge.
+      JSON only.
     user: |-
       Overall target:
       {{overall_target}}
@@ -31,13 +29,25 @@ prompts:
       Current goals:
       {{current_goals}}
 
+      Semantic recovery:
+      {{semantic_guidance}}
+
+      Countermodel dependency table:
+      {{dependency_table}}
+
       Accepted prefix:
       {{accepted}}
 
-      Previously rejected tactics and Lean feedback:
-      {{failed}}
+      OPEN tactics (Lean accepted and left goals):
+      {{open_tactics}}
 
-      Return exactly "analogy", "predicted_state", and singular "tactic". The analogy must briefly name
-      the corresponding objects and relation. predicted_state must describe the immediate Lean goals expected
-      after the tactic. tactic must be exactly one complete single-line Lean 4 command; combine ordered atomic
-      operations into that one command with Lean's sequencing syntax when necessary.
+      REJECTED tactics (Lean errors or unusable results):
+      {{rejected_tactics}}
+
+      {{tactic_card}}
+
+      Return exactly "analogy", "predicted_state", and "tactic". The analogy must explicitly map
+      the countermodel-side dependency when a table is present.
+      predicted_state must be literal SOLVED or the exact full focused Lean state expected immediately after the tactic,
+      including its visible context and goal. Never predict the unchanged current state. tactic is one complete Lean 4 line;
+      use ; or <;> to sequence.

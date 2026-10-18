@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "source": {"repository": "https://github.com/Trequetrum/lean4game-logic", "license": "MIT"},
+  "problems": [
+    {"id":"or_intro_05","title":"Carry On Effects","binders":"(C J R : Prop) (h1 : C → J) (h2 : C ∨ R)","target":"J ∨ R","source_path":"Game/Levels/OrIntro/L05.lean","source_level":"OrIntro/5","connective":"or","difficulty":4},
+    {"id":"or_intro_06","title":"Or Distributes Over And","binders":"(G H U : Prop) (h : G ∨ H ∧ U)","target":"(G ∨ H) ∧ (G ∨ U)","source_path":"Game/Levels/OrIntro/L06.lean","source_level":"OrIntro/6","connective":"or","difficulty":5},
+    {"id":"not_intro_05","title":"Modus Tollens","binders":"(B S : Prop) (h1 : B → S) (h2 : ¬S)","target":"¬B","source_path":"Game/Levels/NotIntro/L05.lean","source_level":"NotIntro/5","connective":"not","difficulty":5}
+  ]
+}

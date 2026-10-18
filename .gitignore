@@ -6,6 +6,16 @@ node_modules/
 .worktrees/
 data/
 .artifacts/
+!.artifacts/
+.artifacts/*
+!.artifacts/experiment-configs/
+.artifacts/experiment-configs/*
+!.artifacts/experiment-configs/hardest3/
+.artifacts/experiment-configs/hardest3/*
+!.artifacts/experiment-configs/hardest3/config.yaml
+!.artifacts/experiment-configs/hardest3/problems.json
+!.artifacts/experiment-configs/hardest3/run_comparison.py
+!.artifacts/experiment-configs/hardest3/render_detailed_report.py
 .venv/
 __pycache__/
 *.py[cod]

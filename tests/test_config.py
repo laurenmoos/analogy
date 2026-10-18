@@ -25,6 +25,31 @@ def test_runtime_config_has_one_analogy_boolean_and_schema_call_budget():
     assert config.analogy.enabled is True
     assert config.analogy.max_model_calls == 3
     assert set(config.analogy.__dataclass_fields__) == {"enabled", "max_model_calls"}
+    assert config.benchmark.selection == "previous_failures"
+    assert config.run.seed == 0
+
+
+@pytest.mark.parametrize("selection", ["exhaustive", "previous_failures"])
+def test_config_accepts_problem_selection_modes(tmp_path, selection):
+    payload = _payload()
+    payload["benchmark"]["selection"] = selection
+
+    assert load_config(_write(tmp_path, payload)).benchmark.selection == selection
+
+
+def test_config_rejects_unknown_problem_selection(tmp_path):
+    payload = _payload()
+    payload["benchmark"]["selection"] = "recent"
+
+    with pytest.raises(ConfigError, match="benchmark.selection"):
+        load_config(_write(tmp_path, payload))
+
+
+def test_legacy_config_without_selection_uses_previous_failures(tmp_path):
+    payload = _payload()
+    del payload["benchmark"]["selection"]
+
+    assert load_config(_write(tmp_path, payload)).benchmark.selection == "previous_failures"
 
 
 @pytest.mark.parametrize(

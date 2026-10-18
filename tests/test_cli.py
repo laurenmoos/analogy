@@ -36,12 +36,17 @@ def test_cli_has_one_solve_entry_point_and_boolean_override():
     default = parser.parse_args(["solve"])
     enabled = parser.parse_args(["solve", "--analogy"])
     disabled = parser.parse_args(["solve", "--no-analogy"])
+    exhaustive = parser.parse_args(["solve", "--all-problems"])
+    failures = parser.parse_args(["solve", "--previous-failures"])
 
     assert (default.command, default.handler) == ("solve", run_solve)
     assert default.config == Path("config.yaml")
     assert default.analogy_enabled is None
     assert enabled.analogy_enabled is True
     assert disabled.analogy_enabled is False
+    assert default.problem_selection is None
+    assert exhaustive.problem_selection == "exhaustive"
+    assert failures.problem_selection == "previous_failures"
 
 
 def test_retired_activation_command_is_rejected():
@@ -77,13 +82,28 @@ def test_report_describes_one_runtime_run():
     )
 
 
+def test_report_names_semantic_failure_distinctly():
+    inference_run = InferenceRun(
+        "analogy-on",
+        (_result("false-root", InferenceStatus.SEMANTIC_FAILURE),),
+        0.2,
+    )
+    run = SolveRun("run-2", True, inference_run, 0.2, Path("/tmp/run-2"))
+
+    assert render_report(run).startswith(
+        "SEMANTIC_FAILURE false-root: lean_calls=1, analogy_fallbacks=0"
+    )
+
+
 def test_solve_runs_shared_runtime_once(tmp_path, monkeypatch):
     configured = load_config(ROOT / "config.yaml")
     configured = replace(configured, run=replace(configured.run, output_dir=tmp_path))
     calls = []
 
-    def fake_runtime(config, problems, generator, verifier, *, run_directory):
-        calls.append((config, problems, generator, verifier, run_directory))
+    def fake_runtime(
+        config, problems, generator, verifier, *, run_directory, problem_index=None
+    ):
+        calls.append((config, problems, generator, verifier, run_directory, problem_index))
         return InferenceRun("analogy-on", (), 0.0), [], {}
 
     monkeypatch.setattr(inference, "_run_runtime", fake_runtime)
@@ -91,5 +111,6 @@ def test_solve_runs_shared_runtime_once(tmp_path, monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][0] is configured
+    assert calls[0][5] is None
     assert run.analogy_enabled is True
     assert run.inference.results == ()

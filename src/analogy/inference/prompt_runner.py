@@ -38,6 +38,7 @@ class PromptRunner:
         cancellation: Any = None,
         initial_repair: bool = False,
         schema_errors: tuple[type[Exception], ...] = (ValueError,),
+        repair_errors: tuple[type[Exception], ...] | None = None,
     ) -> PromptRun[T]:
         if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts <= 0:
             raise ValueError("max_attempts must be a positive integer")
@@ -71,7 +72,12 @@ class PromptRunner:
                 if previous_invalid_raw == raw:
                     return PromptRun(None, tuple(attempts), error)
                 previous_invalid_raw = raw
-                if repair_messages is None or index + 1 >= max_attempts:
+                retryable = repair_errors or schema_errors
+                if (
+                    not isinstance(error, retryable)
+                    or repair_messages is None
+                    or index + 1 >= max_attempts
+                ):
                     return PromptRun(None, tuple(attempts), error)
                 active_messages = repair_messages(messages, raw, error)
                 continue

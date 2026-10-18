@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,28 @@ from .proof_views import ProofStructure, ProofViewError
 
 if TYPE_CHECKING:
     from .proof_inventory import LocalProofInventory
+
+
+_UNRESOLVED_METAVARIABLE = re.compile(r"\?[A-Za-z_][A-Za-z0-9_.✝]*")
+_LEAN_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+_LEAN_CHARACTER = re.compile(r"'(?:\\.|[^'\\])'")
+_LEAN_QUOTED_IDENTIFIER = re.compile(r"«[^»]*»")
+_MAX_FAILURE_FEEDBACK = 8
+_MAX_FAILURE_ENTRY_CHARS = 120
+
+
+@dataclass(frozen=True, slots=True)
+class _FailureFeedback:
+    state_id: str
+    prefix: tuple[str, ...]
+    text: str
+
+
+def _has_unresolved_metavariable(proof_state: str) -> bool:
+    unquoted = _LEAN_STRING.sub("", proof_state)
+    unquoted = _LEAN_CHARACTER.sub("", unquoted)
+    unquoted = _LEAN_QUOTED_IDENTIFIER.sub("", unquoted)
+    return _UNRESOLVED_METAVARIABLE.search(unquoted) is not None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -45,7 +68,7 @@ class LeanGymAdapter:
         self.problem = problem
         self.verifier = verifier
         self._prefixes: dict[str, tuple[str, ...]] = {}
-        self._failed: dict[str, list[str]] = {}
+        self._failed: list[_FailureFeedback] = []
 
     def initial_state(self) -> SymbolicState:
         result = self.verifier.initial_state(self.problem)
@@ -55,7 +78,23 @@ class LeanGymAdapter:
         return self._register(result.proof_state.normalized, ())
 
     def failed_tactics_for(self, state_id: str) -> tuple[str, ...]:
-        return tuple(self._failed.get(state_id, ()))
+        try:
+            prefix = self._prefixes[state_id]
+        except KeyError:
+            return ()
+        eligible: list[str] = []
+        for failure in self._failed:
+            if failure.state_id == state_id:
+                scope = "current"
+            elif (
+                len(failure.prefix) <= len(prefix)
+                and prefix[: len(failure.prefix)] == failure.prefix
+            ):
+                scope = "ancestor"
+            else:
+                continue
+            eligible.append(f"{scope} state — {failure.text}")
+        return tuple(eligible[-_MAX_FAILURE_FEEDBACK:])
 
     def proof_structure_for(self, state: SymbolicState) -> ProofStructure:
         try:
@@ -106,6 +145,14 @@ class LeanGymAdapter:
             and result.accepted
             and result.proof_state is not None
         ):
+            if _has_unresolved_metavariable(result.proof_state.normalized):
+                diagnostic = "unresolved metavariables"
+                self._record_failure(state, candidate.source, diagnostic)
+                return TacticResult(
+                    candidate,
+                    TacticStatus.ERROR,
+                    diagnostics=diagnostics + (diagnostic,),
+                )
             successor = self._register(
                 result.proof_state.normalized, prefix + (candidate.source,)
             )
@@ -125,11 +172,25 @@ class LeanGymAdapter:
                 diagnostics=diagnostics or (result.status.value,),
                 verification_status=result.status,
             )
-        self._failed.setdefault(state.id, []).append(candidate.source)
+        self._record_failure(
+            state,
+            candidate.source,
+            next((item.splitlines()[0] for item in diagnostics if item.strip()), result.status.value),
+        )
         return TacticResult(
             candidate,
             TacticStatus.ERROR,
             diagnostics=diagnostics or (result.status.value,),
+        )
+
+    def _record_failure(
+        self, state: SymbolicState, tactic: str, diagnostic: str
+    ) -> None:
+        tactic_summary = " ".join(tactic.split())[:48]
+        diagnostic_summary = " ".join(diagnostic.split())[:48]
+        text = f"{tactic_summary}: {diagnostic_summary}"[:_MAX_FAILURE_ENTRY_CHARS]
+        self._failed.append(
+            _FailureFeedback(state.id, self._prefixes[state.id], text)
         )
 
     def _register(self, proof_state: str, prefix: tuple[str, ...]) -> SymbolicState:

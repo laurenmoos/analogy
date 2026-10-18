@@ -273,6 +273,7 @@ class TacticStatus(str, Enum):
 class DiscardReason(str, Enum):
     REPEATED_STATE = "repeated_state"
     NO_PROGRESS = "no_progress"
+    SEMANTIC_REFUTED = "semantic_refuted"
 
 
 class StuckReason(str, Enum):
@@ -287,6 +288,7 @@ class SearchStatus(str, Enum):
     EXHAUSTED = "exhausted"
     BUDGET_EXHAUSTED = "budget_exhausted"
     CANCELLED = "cancelled"
+    SEMANTIC_FAILURE = "semantic_failure"
 
 
 class InferenceStatus(str, Enum):
@@ -295,6 +297,7 @@ class InferenceStatus(str, Enum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     MODEL_FAILURE = "model_failure"
     VERIFIER_FAILURE = "verifier_failure"
+    SEMANTIC_FAILURE = "semantic_failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +350,7 @@ class SearchNode:
     score: float
     parent_state_id: str | None = None
     tactic: str | None = None
+    depth: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, SymbolicState):
@@ -356,6 +360,8 @@ class SearchNode:
             _require_text(self.parent_state_id, "parent_state_id")
         if self.tactic is not None:
             _require_text(self.tactic, "tactic")
+        if isinstance(self.depth, bool) or not isinstance(self.depth, int) or self.depth < 0:
+            raise ValueError("depth must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +379,17 @@ class DiscardedSuccessor:
 
 
 @dataclass(frozen=True, slots=True)
+class SkippedCandidate:
+    candidate: TacticCandidate
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate, TacticCandidate):
+            raise ValueError("candidate must be a TacticCandidate")
+        _require_text(self.reason, "reason")
+
+
+@dataclass(frozen=True, slots=True)
 class ExpansionOutcome:
     node: SearchNode
     attempts: tuple[TacticResult, ...] = ()
@@ -380,6 +397,7 @@ class ExpansionOutcome:
     discarded: tuple[DiscardedSuccessor, ...] = ()
     completed_proof: str | None = None
     candidate_pool: tuple[TacticCandidate, ...] = ()
+    skipped_candidates: tuple[SkippedCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.node, SearchNode):
@@ -403,6 +421,11 @@ class ExpansionOutcome:
             self,
             "candidate_pool",
             _typed_tuple(self.candidate_pool, TacticCandidate, "candidate_pool"),
+        )
+        object.__setattr__(
+            self,
+            "skipped_candidates",
+            _typed_tuple(self.skipped_candidates, SkippedCandidate, "skipped_candidates"),
         )
 
 

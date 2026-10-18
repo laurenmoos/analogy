@@ -7,6 +7,7 @@ from typing import Protocol, Sequence
 
 from .diversity import DiversityObservation
 from .rescue import RescueRollout
+from .semantic import ForcedMoveEvent, SemanticPrune, SemanticRecoveryEvent
 from ..records import (
     CancellationToken,
     DiscardReason,
@@ -32,6 +33,9 @@ class SearchResult:
     stuckness_decisions: tuple[StucknessDecision, ...] = ()
     rescue_rollouts: tuple[RescueRollout, ...] = ()
     diversity_observations: tuple[DiversityObservation, ...] = ()
+    semantic_recoveries: tuple[SemanticRecoveryEvent, ...] = ()
+    semantic_prunes: tuple[SemanticPrune, ...] = ()
+    forced_moves: tuple[ForcedMoveEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, SearchStatus):
@@ -52,10 +56,35 @@ class SearchResult:
                 "diversity_observations",
             ),
         )
+        object.__setattr__(
+            self,
+            "semantic_recoveries",
+            _typed_tuple(
+                self.semantic_recoveries,
+                SemanticRecoveryEvent,
+                "semantic_recoveries",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "semantic_prunes",
+            _typed_tuple(self.semantic_prunes, SemanticPrune, "semantic_prunes"),
+        )
+        object.__setattr__(
+            self,
+            "forced_moves",
+            _typed_tuple(self.forced_moves, ForcedMoveEvent, "forced_moves"),
+        )
 
 
 class TacticRanker(Protocol):
-    def rank(self, state: SymbolicState, goal: SymbolicState) -> Sequence[TacticCandidate]: ...
+    def rank(
+        self,
+        state: SymbolicState,
+        goal: SymbolicState,
+        *,
+        excluded_tactics: set[str] | frozenset[str] = frozenset(),
+    ) -> Sequence[TacticCandidate]: ...
 
 
 class LeanVerifier(Protocol):

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from analogy.inference import prompts as prompts_module
-from analogy.inference.prompts import (
+from analogy.model import prompts as prompts_module
+from analogy.model.prompts import (
     PromptCatalog,
     PromptError,
     lean_tactic_card,

@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from analogy.config import load_config
-from analogy.inference import model_provider
+from analogy.model import model_provider
 from analogy.solver.model_policy import TacticRanker, TacticRankingError
 from analogy.solver.analogy_state import AnalogyScratchpad, AnalogyState
-from analogy.inference.prompts import configure_prompt_catalog
+from analogy.model.prompts import configure_prompt_catalog
 
 
 ROOT = Path(__file__).parents[1]

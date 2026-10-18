@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from ..inference.prompts import prompt_catalog
+from ..model.prompts import prompt_catalog
 
 
 _BLOCK = re.compile(r"<analogy>\s*\n(?P<body>.*?)\n\s*</analogy>", re.DOTALL)

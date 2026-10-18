@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..config import AppConfig
-from ..inference.model_provider import TextGenerator
-from ..inference.prompts import configure_prompt_catalog
+from ..model.model_provider import TextGenerator
+from ..model.prompts import configure_prompt_catalog
 from ..lean_gym.models import Problem
 from ..lean_gym.verifier import Verifier
 from ..problem_index import ProblemIndex

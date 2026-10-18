@@ -1,5 +1,5 @@
-from analogy.inference import prompts as prompts_module
-from analogy.inference.prompts import PromptCatalog
+from analogy.model import prompts as prompts_module
+from analogy.model.prompts import PromptCatalog
 from analogy.records import (
     CandidateOrigin,
     DiscardReason,

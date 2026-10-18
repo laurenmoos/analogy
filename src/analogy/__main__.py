@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .config import ConfigError
-from .inference.model_provider import ModelConfigurationError
+from .model.model_provider import ModelConfigurationError
 from .runtime import get_runtime
 from .solver.inference import SolveRun, solve_problems
 

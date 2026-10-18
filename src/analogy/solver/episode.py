@@ -8,7 +8,7 @@ from inspect import Parameter, signature
 from itertools import count
 from typing import Iterable
 
-from ..inference.parser import candidate_rejection_reason, normalize_lean4_tactic
+from ..model.parser import candidate_rejection_reason, normalize_lean4_tactic
 from ..records import (
     CancellationToken,
     CandidateOrigin,

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from analogy.inference.prompt_runner import PromptRunner
+from analogy.model.prompt_runner import PromptRunner
 from analogy.records import Message
 from analogy.solver.rescue import GenerationStatus
 

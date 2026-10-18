@@ -8,7 +8,7 @@ from itertools import product
 import re
 from typing import Protocol, TypeAlias
 
-from ..inference.prompts import prompt_catalog
+from ..model.prompts import prompt_catalog
 from ..records import SymbolicState, TacticResult
 from .proof_inventory import InventoryError, ProofGoal, proof_goals, proposition_root
 
@@ -335,7 +335,7 @@ def forced_disjunction_tactic(
             except (InventoryError, KeyError):
                 continue
         if {"left", "right"}.issubset(labels[hypothesis]):
-            from ..inference.parser import normalize_lean4_tactic
+            from ..model.parser import normalize_lean4_tactic
 
             tactic = normalize_lean4_tactic(
                 f"rcases {hypothesis} with left | right",

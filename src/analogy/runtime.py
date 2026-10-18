@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig, load_config
-from .inference.model_provider import get_model_provider
-from .inference.prompts import PromptCatalog, configure_prompt_catalog
+from .model.model_provider import get_model_provider
+from .model.prompts import PromptCatalog, configure_prompt_catalog
 from .lean_gym.corpus import load_problems
 from .lean_gym.models import Problem
 from .lean_gym.resources import LEAN_PROJECT_ROOT

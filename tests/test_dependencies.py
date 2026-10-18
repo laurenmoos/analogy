@@ -17,6 +17,8 @@ def test_retired_execution_packages_are_absent():
     assert _find_spec_or_none("analogy.experiments.activation_cli") is None
     assert _find_spec_or_none("analogy.transfer.generated_loop") is None
     assert _find_spec_or_none("analogy.training.trainer") is None
+    assert _find_spec_or_none("analogy.inference") is None
+    assert _find_spec_or_none("analogy.model") is not None
 
 
 def test_no_secondary_runtime_entry_points_exist():

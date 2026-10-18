@@ -1,7 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 
-from analogy.inference.prompts import configure_prompt_catalog
+from analogy.model.prompts import configure_prompt_catalog
 from analogy.config import load_config
 from analogy.lean_gym.models import Problem
 

@@ -2,14 +2,14 @@ import json
 
 import pytest
 
-from analogy.inference.parser import (
+from analogy.model.parser import (
     FilteredCandidatePool,
     IncompleteCandidatePool,
     candidate_rejection_reason,
     normalize_lean4_tactic,
     parse_tactic_candidates,
 )
-from analogy.inference.mlx_model import _mlx_import_diagnostic
+from analogy.model.mlx_model import _mlx_import_diagnostic
 
 
 @pytest.mark.parametrize("source,expected", [

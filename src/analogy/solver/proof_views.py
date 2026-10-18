@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..records import Embedding
-from ..inference.prompts import prompt_catalog
+from ..model.prompts import prompt_catalog
 from .rescue import ProofRepresentation, ProofRescueContext, zero_embedding_like
 
 if TYPE_CHECKING:

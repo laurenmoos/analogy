@@ -664,7 +664,7 @@ def _create_model_provider(config: ModelConfig) -> ModelProvider:
     if config.backend == "transformers":
         return QwenGenerator.from_config(config)
     try:
-        module = import_module("analogy.inference.mlx_model")
+        module = import_module("analogy.model.mlx_model")
     except ImportError as error:
         raise ModelConfigurationError(
             "the MLX extra is not installed; install analogy[mlx]"

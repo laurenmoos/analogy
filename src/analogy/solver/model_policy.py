@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..inference.model_provider import TextGenerator
-from ..inference.parser import (
+from ..model.model_provider import TextGenerator
+from ..model.parser import (
     FilteredCandidatePool,
     IncompleteCandidatePool,
     ModelOutputError,
     parse_tactic_candidates,
 )
-from ..inference.prompt_runner import PromptRunner
-from ..inference.prompts import (
+from ..model.prompt_runner import PromptRunner
+from ..model.prompts import (
     focused_lean_goal,
     lean_tactic_card,
     prompt_catalog,

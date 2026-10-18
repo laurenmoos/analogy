@@ -8,12 +8,12 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Protocol
 
-from ..inference.parser import (
+from ..model.parser import (
     candidate_rejection_reason,
     normalize_lean4_tactic,
     tactic_is_incomplete,
 )
-from ..inference.prompts import (
+from ..model.prompts import (
     focused_lean_goal,
     lean_tactic_card,
     prompt_catalog,

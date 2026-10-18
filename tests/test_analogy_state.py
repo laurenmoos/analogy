@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from analogy.inference import prompts as prompts_module
-from analogy.inference.prompts import PromptCatalog
+from analogy.model import prompts as prompts_module
+from analogy.model.prompts import PromptCatalog
 from analogy.solver.analogy_state import (
     AnalogyScratchpad,
     AnalogyState,

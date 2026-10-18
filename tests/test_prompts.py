@@ -359,3 +359,20 @@ bad : Q
 
     assert "h : P" in focused and "⊢ P" in focused
     assert "case right" not in focused and "bad : Q" not in focused
+
+
+def test_analogy_initialization_requests_one_standalone_analogy_block():
+    catalog = PromptCatalog.load(ROOT / "prompts.yaml")
+    prompt = "\n".join(
+        message.content
+        for message in catalog.messages(
+            "analogy_initialize",
+            overall_target="⊢ P",
+            current_goals="h : P\n⊢ P",
+            excluded_domains="- lock",
+        )
+    )
+
+    assert "exactly one <analogy> block" in prompt
+    assert "no text before or after" in prompt
+    assert "- lock" in prompt

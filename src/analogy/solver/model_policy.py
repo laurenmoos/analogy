@@ -65,6 +65,12 @@ class TacticRanker:
         self._trace_sink = trace_sink
         self._analogy_scratchpad = analogy_scratchpad
 
+    @property
+    def analogy_scratchpad(self) -> AnalogyScratchpad | None:
+        """Return the externally owned analogy state bound to this policy."""
+
+        return self._analogy_scratchpad
+
     def rank(
         self,
         state: Any,

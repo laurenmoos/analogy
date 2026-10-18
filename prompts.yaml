@@ -38,6 +38,23 @@ prompts:
       If a current analogy block was supplied, repeat it unchanged; ordinary search must not revise it.
       Then return at most {{top_k}} candidates after the block.
 
+  analogy_initialize:
+    version: analogy-initialize-v1
+    system: >-
+      Create one concrete analogy for planning this Lean 4 proof. Return exactly one <analogy> block
+      with domain, mapping, numbered steps, and abandoned domains, with no text before or after it.
+    user: |-
+      Overall target:
+      {{overall_target}}
+
+      Current goals:
+      {{current_goals}}
+
+      Do not use any of these already selected domains:
+      {{excluded_domains}}
+
+      Return exactly one <analogy> block and no text before or after it.
+
   analogy_rescue:
     version: analogy-rescue-v9
     system: >-

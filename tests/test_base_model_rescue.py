@@ -389,6 +389,54 @@ def test_scored_but_unsubmitted_revisions_remain_in_generation_records(monkeypat
     )
 
 
+def test_cancellation_during_batch_keeps_already_scored_revision(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+
+    class Token:
+        checks = 0
+
+        def is_cancelled(self):
+            self.checks += 1
+            return self.checks >= 3
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return _mental_response("navigation", "candidate", "exact h")
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder, *, layer: SimpleNamespace(
+            distance=0.1, coupling=((1.0,),)
+        ),
+    )
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=2,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+        embedding_layer=-1,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("cancelled batch must not reach Lean")
+        ),
+        Token(),
+        "guidance",
+        proof_belief=_proof_belief(),
+    )
+
+    assert outcome.cancelled is True
+    assert len(outcome.rollouts) == 1
+    assert outcome.rollouts[0].termination is RescueTermination.SCORED
+
+
 def test_stuck_search_can_revise_only_steps_and_commits_on_lean_progress():
     initial = AnalogyState("locksmithing", ("P -> lock",), ("Inspect it.",))
     scratchpad = AnalogyScratchpad(initial)

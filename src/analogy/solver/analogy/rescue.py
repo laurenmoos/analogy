@@ -730,6 +730,11 @@ class AnalogyFallback:
         ranked: list[_ScoredRevision] = []
         for index in range(self._max_model_calls):
             if cancellation.is_cancelled():
+                _append_unsubmitted_rollouts(
+                    rollouts,
+                    state.id,
+                    sorted(ranked, key=lambda item: item.generation_index),
+                )
                 return AnalogyRescueOutcome(
                     rollouts=tuple(rollouts), cancelled=True
                 )

@@ -77,9 +77,9 @@
 - Consumes: the scoring package and existing model/search state machines.
 - Produces: `generate_and_score_tactics_with_model_policy(search) -> TacticBatch` and `update_search_with_scored_proof_states(search, submitted) -> None` as the only public names for these operations.
 
-- [ ] Add failing AST assertions that both run recipes call `generate_and_score_tactics_with_model_policy`, `submit_tactics_to_lean`, and `update_search_with_scored_proof_states`, and never call the retired operation names.
-- [ ] Add a dependency assertion that `solver.scoring` imports neither `solver.search` nor `solver.model_policy`.
-- [ ] Run the architecture assertions and confirm they fail against the old public operation names.
-- [ ] Rename the model-policy and search operations, update both ordinary loops and the analogy-rescue update, and remove the old exports without aliases.
-- [ ] Run focused tests, the full suite, and `git diff --check`.
-- [ ] Inspect both visible recipes and commit the naming/guardrail change directly to `main`.
+- [x] Add failing AST assertions that both run recipes call `generate_and_score_tactics_with_model_policy`, `submit_tactics_to_lean`, and `update_search_with_scored_proof_states`, and never call the retired operation names.
+- [x] Add a dependency assertion that `solver.scoring` imports neither `solver.search` nor `solver.model_policy`.
+- [x] Run the architecture assertions and confirm they fail against the old public operation names.
+- [x] Rename the model-policy and search operations, update both ordinary loops and the analogy-rescue update, and remove the old exports without aliases.
+- [x] Run focused tests, the full suite, and `git diff --check`.
+- [x] Inspect both visible recipes and commit the naming/guardrail change directly to `main`.

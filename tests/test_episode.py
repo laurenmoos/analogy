@@ -30,8 +30,13 @@ from analogy.solver.search import (
     submit_tactics_to_lean,
 )
 from analogy.solver.scoring import DiversityObservation
-from analogy.solver.search import start_search, update_search
-from analogy.solver.model_policy import generate_tactics_with_model_policy
+from analogy.solver.search import (
+    start_search,
+    update_search_with_scored_proof_states,
+)
+from analogy.solver.model_policy import (
+    generate_and_score_tactics_with_model_policy,
+)
 from analogy.solver.proof.semantic import (
     ExhaustiveSemanticChecker,
     SemanticAssessment,
@@ -56,15 +61,15 @@ def _run_incremental(context, initial=START, goal=GOAL, *, analogy=False):
         context.analogy_fallback.scratchpad = scratchpad
     search = start_search(context, initial, goal)
     while search.has_work():
-        tactics = generate_tactics_with_model_policy(search)
+        tactics = generate_and_score_tactics_with_model_policy(search)
         results = submit_tactics_to_lean(verifier, tactics)
-        update_search(search, results)
+        update_search_with_scored_proof_states(search, results)
         if search.is_stuck():
             assert scratchpad is not None
             scratchpad = update_analogy(search, scratchpad)
             rescue = generate_analogy_rescue(search, scratchpad)
             result = submit_analogy_rescue_to_lean(verifier, rescue)
-            update_search(search, result)
+            update_search_with_scored_proof_states(search, result)
     return search.result
 
 

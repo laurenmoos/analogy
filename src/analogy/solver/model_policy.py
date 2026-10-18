@@ -247,8 +247,10 @@ class TacticRanker:
         return candidates
 
 
-def generate_tactics_with_model_policy(search: SearchSession) -> TacticBatch:
-    """Generate the next ordinary batch for the active search node."""
+def generate_and_score_tactics_with_model_policy(
+    search: SearchSession,
+) -> TacticBatch:
+    """Generate and score the next ordinary batch for the active search node."""
 
     if search.pending_batch is not None:
         return search.next_tactic_batch()
@@ -344,6 +346,6 @@ def _replacement_repair(
 __all__ = [
     "TacticRanker",
     "TacticRankingError",
-    "generate_tactics_with_model_policy",
+    "generate_and_score_tactics_with_model_policy",
     "initialize_model_policy",
 ]

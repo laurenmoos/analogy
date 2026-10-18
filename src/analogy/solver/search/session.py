@@ -311,7 +311,7 @@ def start_search(
     )
 
 
-def update_search(
+def update_search_with_scored_proof_states(
     search: SearchSession,
     submitted: TacticBatchResult | AnalogyRescueResult,
 ) -> None:
@@ -750,5 +750,5 @@ __all__ = [
     "TacticBatchResult",
     "submit_tactics_to_lean",
     "start_search",
-    "update_search",
+    "update_search_with_scored_proof_states",
 ]

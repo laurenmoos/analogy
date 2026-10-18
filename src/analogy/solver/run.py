@@ -16,7 +16,7 @@ from .analogy.rescue import (
 )
 from .analogy.state import initialize_analogy_scratchpad, update_analogy
 from .model_policy import (
-    generate_tactics_with_model_policy,
+    generate_and_score_tactics_with_model_policy,
     initialize_model_policy,
     initialize_model_protocol,
 )
@@ -29,7 +29,11 @@ from .report import (
     write_problem_record,
     write_run_record,
 )
-from .search import initialize_search, submit_tactics_to_lean, update_search
+from .search import (
+    initialize_search,
+    submit_tactics_to_lean,
+    update_search_with_scored_proof_states,
+)
 
 
 def run_vanilla(
@@ -57,9 +61,9 @@ def run_vanilla(
             search = initialize_search(config, generator, proof, model_policy)
 
             while search.has_work():
-                tactics = generate_tactics_with_model_policy(search)
+                tactics = generate_and_score_tactics_with_model_policy(search)
                 results = submit_tactics_to_lean(proof, tactics)
-                update_search(search, results)
+                update_search_with_scored_proof_states(search, results)
         except Exception as error:
             failure = error
 
@@ -112,15 +116,15 @@ def run_analogy_assisted(
             )
 
             while search.has_work():
-                tactics = generate_tactics_with_model_policy(search)
+                tactics = generate_and_score_tactics_with_model_policy(search)
                 results = submit_tactics_to_lean(proof, tactics)
-                update_search(search, results)
+                update_search_with_scored_proof_states(search, results)
 
                 if search.is_stuck():
                     analogy = update_analogy(search, analogy)
                     rescue = generate_analogy_rescue(search, analogy)
                     result = submit_analogy_rescue_to_lean(proof, rescue)
-                    update_search(search, result)
+                    update_search_with_scored_proof_states(search, result)
         except Exception as error:
             failure = error
 

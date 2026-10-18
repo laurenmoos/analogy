@@ -20,7 +20,7 @@ from .session import (
     TacticBatchResult,
     start_search,
     submit_tactics_to_lean,
-    update_search,
+    update_search_with_scored_proof_states,
 )
 from .setup import initialize_search
 
@@ -43,5 +43,5 @@ __all__ = [
     "initialize_search",
     "start_search",
     "submit_tactics_to_lean",
-    "update_search",
+    "update_search_with_scored_proof_states",
 ]

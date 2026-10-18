@@ -168,7 +168,11 @@ def test_run_uses_search_facade_and_proof_does_not_depend_on_search() -> None:
 
     assert {
         alias.name for node in search_imports for alias in node.names
-    } >= {"initialize_search", "submit_tactics_to_lean", "update_search"}
+    } >= {
+        "initialize_search",
+        "submit_tactics_to_lean",
+        "update_search_with_scored_proof_states",
+    }
     assert not any(
         isinstance(node, ast.ImportFrom)
         and node.module in {"episode", "search_setup", "search.session"}
@@ -194,3 +198,46 @@ def test_run_uses_search_facade_and_proof_does_not_depend_on_search() -> None:
                         reverse_dependencies.append((path.name, node.lineno))
 
     assert reverse_dependencies == []
+
+
+def test_both_run_recipes_name_general_search_scoring_explicitly() -> None:
+    tree = ast.parse((PACKAGE / "solver" / "run.py").read_text(encoding="utf-8"))
+    recipes = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    for name in ("run_vanilla", "run_analogy_assisted"):
+        calls = [
+            node.func.id
+            for node in ast.walk(recipes[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert "generate_and_score_tactics_with_model_policy" in calls
+        assert "submit_tactics_to_lean" in calls
+        assert "update_search_with_scored_proof_states" in calls
+        assert "generate_tactics_with_model_policy" not in calls
+        assert "update_search" not in calls
+
+
+def test_scoring_package_does_not_import_search_or_model_policy() -> None:
+    forbidden = ("analogy.solver.search", "analogy.solver.model_policy")
+    dependencies = []
+    for path in (PACKAGE / "solver" / "scoring").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                targets = _resolved_import_targets(path, node)
+            elif isinstance(node, ast.Import):
+                targets = {alias.name for alias in node.names}
+            else:
+                continue
+            for target in targets:
+                if any(
+                    target == blocked or target.startswith(f"{blocked}.")
+                    for blocked in forbidden
+                ):
+                    dependencies.append((path.name, node.lineno, target))
+
+    assert dependencies == []

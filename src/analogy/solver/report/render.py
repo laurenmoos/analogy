@@ -297,7 +297,7 @@ def render_run_report(
 
 
 def render_cli_report(run: Any) -> str:
-    """Render one runtime invocation for the command line."""
+    """Render one solve session for the command line."""
 
     lines: list[str] = []
     for result in run.summary.results:

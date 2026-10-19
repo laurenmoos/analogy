@@ -1,6 +1,6 @@
 # Analogy-guided Lean proof search
 
-This repository has one proof-search runtime. Conventional tactic generation owns the frontier,
+This repository has one proof-search session. Conventional tactic generation owns the frontier,
 verification, progress checks, budgets, and ordinary backtracking. Every Lean-accepted OPEN
 successor in the supported propositional fragment receives a deterministic SAT check before it can
 enter the frontier. Countermodel-refuted successors are pruned; quantified or otherwise unsupported

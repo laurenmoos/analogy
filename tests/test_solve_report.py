@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.lean_gym.models import Problem
 from analogy.model.prompts import PromptError
 from analogy.utils.records import SearchStatus, SolveStatus, SolveSummary, SymbolicState
@@ -72,7 +72,7 @@ def test_vanilla_run_has_no_analogy_state_or_fallback(
     monkeypatch.setattr(run_module, "initialize_proof", FakeLean)
     monkeypatch.setattr(
         run_module,
-        "initialize_model_policy",
+        "initialize_tactic_generator",
         lambda *args, **kwargs: policies.append(kwargs.get("analogy_scratchpad")) or object(),
     )
     monkeypatch.setattr(
@@ -129,7 +129,7 @@ def test_analogy_assisted_run_initializes_and_selects_an_isolated_cohort_per_pro
 
     def initialize_harness(*_args):
         track = SimpleNamespace(
-            model_policy=object(), fallback=object(), scratchpad=object()
+            tactic_generator=object(), fallback=object(), scratchpad=object()
         )
         harness = SimpleNamespace(tracks=(track,))
         harnesses.append(harness)
@@ -177,7 +177,7 @@ def test_analogy_assisted_run_initializes_and_selects_an_isolated_cohort_per_pro
     assert len(pairs) == 2
     first_ranker, first_fallback, first_initial, first_goal = pairs[0]
     second_ranker, _, _, _ = pairs[1]
-    assert first_ranker is harnesses[0].tracks[0].model_policy
+    assert first_ranker is harnesses[0].tracks[0].tactic_generator
     assert first_fallback is harnesses[0].tracks[0].fallback
     assert first_ranker is not second_ranker
     assert first_initial.id == "p0:initial"
@@ -189,10 +189,10 @@ def test_assisted_stuck_loop_updates_scores_selects_and_submits_only_one_track(
 ) -> None:
     calls = []
     first = SimpleNamespace(
-        id="first", scratchpad=object(), model_policy=object(), fallback=object()
+        id="first", scratchpad=object(), tactic_generator=object(), fallback=object()
     )
     selected = SimpleNamespace(
-        id="selected", scratchpad=object(), model_policy=object(), fallback=object()
+        id="selected", scratchpad=object(), tactic_generator=object(), fallback=object()
     )
     harness = SimpleNamespace(tracks=(first, selected))
 
@@ -241,7 +241,7 @@ def test_assisted_stuck_loop_updates_scores_selects_and_submits_only_one_track(
     )
     monkeypatch.setattr(
         run_module,
-        "generate_and_score_tactics_with_model_policy",
+        "generate_and_score_tactics",
         lambda search: object(),
     )
     monkeypatch.setattr(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.lean_gym.models import Problem
 from analogy.utils.checkpoint import load_checkpoint, record_status, select_problems
 

@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from analogy.model.prompts import configure_prompt_catalog
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.lean_gym.models import Problem
 from analogy.utils.checkpoint import record_status
 
@@ -17,10 +17,10 @@ def test_prompt_catalog_is_loaded_once_per_path():
     assert first is second
 
 
-def test_runtime_builds_shared_dependencies_once(monkeypatch, tmp_path):
-    import analogy.runtime as runtime
+def test_session_builds_shared_dependencies_once(monkeypatch, tmp_path):
+    import analogy.main as main_module
 
-    runtime.get_runtime.cache_clear()
+    main_module.get_session.cache_clear()
     created = []
     config = load_config(ROOT / "config.yaml")
     config = replace(
@@ -32,15 +32,15 @@ def test_runtime_builds_shared_dependencies_once(monkeypatch, tmp_path):
     verifier = object()
     problems = (Problem("p", "P", "", "P", "p.lean", "p", "test", 1),)
 
-    monkeypatch.setattr(runtime, "load_config", lambda _path: created.append("config") or config)
-    monkeypatch.setattr(runtime, "configure_prompt_catalog", lambda _path: created.append("prompts") or object())
-    monkeypatch.setattr(runtime, "get_model_provider", lambda _config: created.append("model") or model)
-    monkeypatch.setattr(runtime, "LeanSubprocessVerifier", lambda _root: created.append("lean") or verifier)
-    monkeypatch.setattr(runtime, "load_problems", lambda _path: created.append("problems") or problems)
-    monkeypatch.setattr(runtime, "runtime_config", lambda _config: config)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: created.append("config") or config)
+    monkeypatch.setattr(main_module, "configure_prompt_catalog", lambda _path: created.append("prompts") or object())
+    monkeypatch.setattr(main_module, "get_model_provider", lambda _config: created.append("model") or model)
+    monkeypatch.setattr(main_module, "LeanSubprocessVerifier", lambda _root: created.append("lean") or verifier)
+    monkeypatch.setattr(main_module, "load_problems", lambda _path: created.append("problems") or problems)
+    monkeypatch.setattr(main_module, "session_config", lambda _config: config)
 
-    first = runtime.get_runtime(Path("config.yaml"))
-    second = runtime.get_runtime(Path("config.yaml"))
+    first = main_module.get_session(Path("config.yaml"))
+    second = main_module.get_session(Path("config.yaml"))
 
     assert first is second
     assert (first.model, first.verifier, first.problems) == (
@@ -49,12 +49,12 @@ def test_runtime_builds_shared_dependencies_once(monkeypatch, tmp_path):
     assert created == ["config", "problems", "prompts", "model", "lean"]
 
 
-def test_runtime_skips_mlx_and_lean_when_previous_failures_are_resolved(
+def test_session_skips_mlx_and_lean_when_previous_failures_are_resolved(
     monkeypatch, tmp_path
 ):
-    import analogy.runtime as runtime
+    import analogy.main as main_module
 
-    runtime.get_runtime.cache_clear()
+    main_module.get_session.cache_clear()
     configured = load_config(ROOT / "config.yaml")
     configured = replace(
         configured,
@@ -62,27 +62,27 @@ def test_runtime_skips_mlx_and_lean_when_previous_failures_are_resolved(
         run=replace(configured.run, output_dir=tmp_path / "runs"),
     )
     problem = Problem("done", "Done", "", "P", "done.lean", "done", "test", 1)
-    checkpoint = runtime.load_checkpoint(configured, (problem,))
+    checkpoint = main_module.load_checkpoint(configured, (problem,))
     record_status(checkpoint, "done", "complete")
-    monkeypatch.setattr(runtime, "load_config", lambda _path: configured)
-    monkeypatch.setattr(runtime, "load_problems", lambda _path: (problem,))
+    monkeypatch.setattr(main_module, "load_config", lambda _path: configured)
+    monkeypatch.setattr(main_module, "load_problems", lambda _path: (problem,))
     monkeypatch.setattr(
-        runtime,
+        main_module,
         "configure_prompt_catalog",
         lambda _path: (_ for _ in ()).throw(AssertionError("prompts loaded")),
     )
     monkeypatch.setattr(
-        runtime,
+        main_module,
         "get_model_provider",
         lambda _config: (_ for _ in ()).throw(AssertionError("model loaded")),
     )
     monkeypatch.setattr(
-        runtime,
+        main_module,
         "LeanSubprocessVerifier",
         lambda _root: (_ for _ in ()).throw(AssertionError("Lean loaded")),
     )
 
-    result = runtime.get_runtime(Path("config.yaml"))
+    result = main_module.get_session(Path("config.yaml"))
 
     assert result.problems == ()
     assert result.model is None

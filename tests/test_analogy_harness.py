@@ -1,15 +1,17 @@
+import math
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.model.prompts import configure_prompt_catalog
 from analogy.solver.analogy.harness import (
     AnalogyHarnessInitializationError,
     AnalogyScoreError,
     EqualAnalogyScorer,
+    StructuralAnalogyScorer,
     activate_analogy,
     initialize_analogy_harness,
     score_analogies,
@@ -17,6 +19,10 @@ from analogy.solver.analogy.harness import (
     update_analogies,
 )
 from analogy.solver.analogy.state import AnalogyState, AnalogyUpdateAction
+from analogy.solver.analogy.structural_scoring import (
+    StructuralScoringError,
+    UnscorableMentalModelError,
+)
 from analogy.solver.proof.semantic import (
     ExhaustiveSemanticChecker,
     SemanticRecoveryEvent,
@@ -31,7 +37,7 @@ from analogy.solver.search import (
     WhitespaceTacticCanonicalizer,
     start_search,
 )
-from analogy.utils.records import SymbolicState
+from analogy.utils.records import SearchNode, SymbolicState
 
 
 ROOT = Path(__file__).parents[1]
@@ -106,11 +112,113 @@ def test_initialization_builds_isolated_tracks_with_distinct_prompts_and_seeds()
     assert "Everyday-domain card:" in calls[0][0][1].content
     assert "Lean card:" in calls[0][0][1].content
     assert len({id(track.scratchpad) for track in harness.tracks}) == 3
-    assert len({id(track.model_policy) for track in harness.tracks}) == 3
+    assert len({id(track.tactic_generator) for track in harness.tracks}) == 3
     assert len({id(track.fallback) for track in harness.tracks}) == 3
-    assert all(track.model_policy.analogy_scratchpad is track.scratchpad for track in harness.tracks)
+    assert all(
+        track.tactic_generator.analogy_scratchpad is track.scratchpad
+        for track in harness.tracks
+    )
     assert all(track.fallback.scratchpad is track.scratchpad for track in harness.tracks)
     assert [event["status"] for event in events] == ["valid", "valid", "valid"]
+    assert isinstance(harness.scorer, StructuralAnalogyScorer)
+
+
+def test_runtime_analogy_scoring_uses_frozen_structural_distance(monkeypatch):
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return _analogy("lock")
+
+    harness = _harness(Generator(), count=1)
+    root = SearchNode(SymbolicState("root", "P → P", "lean4"), 1.0)
+    child = SearchNode(
+        SymbolicState("child", "h : P\n⊢ P", "lean4"),
+        0.8,
+        parent_state_id="root",
+        tactic="intro h",
+        depth=1,
+    )
+    search = SimpleNamespace(nodes_by_id={"root": root, "child": child})
+    observed = []
+
+    def score(model, belief, embedder):
+        observed.append((model.domain, belief.graph.elements, embedder))
+        return SimpleNamespace(distance=0.25)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.harness.score_mental_model_revision", score
+    )
+
+    scored = score_analogies(search, harness)
+
+    assert scored[0].score == pytest.approx(-0.25)
+    assert observed[0][0] == "lock"
+    assert [item.role for item in observed[0][1]] == [
+        "proof-state",
+        "proof-tactic",
+        "proof-state",
+    ]
+    assert observed[0][2].__class__ is Generator
+
+
+def test_unscorable_track_is_penalized_without_aborting_the_cohort(monkeypatch):
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return _analogy(("lock", "bridge")[self.calls - 1])
+
+    harness = _harness(Generator(), count=2)
+    root = SearchNode(SymbolicState("root", "P → P", "lean4"), 1.0)
+    child = SearchNode(
+        SymbolicState("child", "h : P\n⊢ P", "lean4"),
+        0.8,
+        parent_state_id="root",
+        tactic="intro h",
+        depth=1,
+    )
+    search = SimpleNamespace(nodes_by_id={"root": root, "child": child})
+
+    def score(model, _belief, _embedder):
+        if model.domain == "lock":
+            raise UnscorableMentalModelError("zero change")
+        return SimpleNamespace(distance=0.25)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.harness.score_mental_model_revision", score
+    )
+
+    scored = score_analogies(search, harness)
+
+    assert math.isfinite(scored[0].score)
+    assert scored[0].score < scored[1].score == pytest.approx(-0.25)
+    assert select_analogy(scored) is harness.tracks[1]
+
+
+def test_global_structural_scorer_failure_is_not_silently_ranked(monkeypatch):
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return _analogy("lock")
+
+    harness = _harness(Generator(), count=1)
+    root = SearchNode(SymbolicState("root", "P → P", "lean4"), 1.0)
+    child = SearchNode(
+        SymbolicState("child", "h : P\n⊢ P", "lean4"),
+        0.8,
+        parent_state_id="root",
+        tactic="intro h",
+        depth=1,
+    )
+    search = SimpleNamespace(nodes_by_id={"root": root, "child": child})
+    monkeypatch.setattr(
+        "analogy.solver.analogy.harness.score_mental_model_revision",
+        lambda *_args: (_ for _ in ()).throw(
+            StructuralScoringError("calibration metadata mismatch")
+        ),
+    )
+
+    with pytest.raises(StructuralScoringError, match="calibration metadata"):
+        score_analogies(search, harness)
 
 
 def test_initialization_skips_invalid_candidates_but_requires_one_valid_track():
@@ -182,7 +290,7 @@ def test_scoring_rejects_nonfinite_or_nonreal_values(bad_score):
 def _search_for(harness, result):
     selected = harness.tracks[0]
     context = EpisodeContext(
-        tactic_ranker=selected.model_policy,
+        tactic_ranker=selected.tactic_generator,
         stuckness_policy=ObservableStucknessPolicy(),
         state_fingerprinter=CanonicalStateFingerprinter(),
         tactic_canonicalizer=WhitespaceTacticCanonicalizer(),
@@ -262,7 +370,7 @@ def test_activate_analogy_replaces_only_policy_and_fallback():
 
     activate_analogy(search, harness.tracks[1])
 
-    assert search.context.tactic_ranker is harness.tracks[1].model_policy
+    assert search.context.tactic_ranker is harness.tracks[1].tactic_generator
     assert search.context.analogy_fallback is harness.tracks[1].fallback
     for field in before.__dataclass_fields__:
         if field not in {"tactic_ranker", "analogy_fallback"}:
@@ -286,7 +394,7 @@ def test_activate_analogy_rejects_mismatched_track_ownership():
     mismatched = SimpleNamespace(
         id="bad",
         scratchpad=first.scratchpad,
-        model_policy=first.model_policy,
+        tactic_generator=first.tactic_generator,
         fallback=second.fallback,
     )
 

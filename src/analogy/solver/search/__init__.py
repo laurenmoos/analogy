@@ -23,6 +23,13 @@ from .session import (
     update_search_with_scored_proof_states,
 )
 from .setup import initialize_search
+from .tactic_generator import (
+    TacticGenerationError,
+    TacticGenerator,
+    generate_and_score_tactics,
+    initialize_model_protocol,
+    initialize_tactic_generator,
+)
 
 __all__ = [
     "AcceptNovelState",
@@ -38,9 +45,14 @@ __all__ = [
     "StucknessPolicy",
     "TacticBatch",
     "TacticBatchResult",
+    "TacticGenerationError",
+    "TacticGenerator",
     "TacticRanker",
     "WhitespaceTacticCanonicalizer",
+    "generate_and_score_tactics",
+    "initialize_model_protocol",
     "initialize_search",
+    "initialize_tactic_generator",
     "start_search",
     "submit_tactics_to_lean",
     "update_search_with_scored_proof_states",

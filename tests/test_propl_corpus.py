@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.lean_gym.corpus import load_problems, load_reference_proofs, validate_reference_coverage
 from analogy.lean_gym.models import VerificationStatus
 from analogy.lean_gym.verifier import LeanSubprocessVerifier

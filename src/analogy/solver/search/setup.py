@@ -6,7 +6,6 @@ from ...config import AppConfig
 from ...model.model_provider import TextGenerator
 from ...utils.records import SymbolicState
 from ..analogy.rescue import AnalogyFallback
-from ..model_policy import TacticRanker
 from ..proof.adapter import LeanGymAdapter
 from ..scoring import FrozenEmbeddingDiversity
 from ..proof.semantic import ExhaustiveSemanticChecker
@@ -18,13 +17,14 @@ from .policies import (
     WhitespaceTacticCanonicalizer,
 )
 from .session import EpisodeContext, SearchSession, start_search
+from .tactic_generator import TacticGenerator
 
 
 def initialize_search(
     config: AppConfig,
     generator: TextGenerator,
     proof: LeanGymAdapter,
-    model_policy: TacticRanker,
+    tactic_generator: TacticGenerator,
     *,
     analogy_fallback: AnalogyFallback | None = None,
     initial_state: SymbolicState | None = None,
@@ -33,7 +33,7 @@ def initialize_search(
     """Create a search session without running any search steps."""
 
     context = EpisodeContext(
-        tactic_ranker=model_policy,
+        tactic_ranker=tactic_generator,
         stuckness_policy=ObservableStucknessPolicy(),
         state_fingerprinter=CanonicalStateFingerprinter(),
         tactic_canonicalizer=WhitespaceTacticCanonicalizer(),

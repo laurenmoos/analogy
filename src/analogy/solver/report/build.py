@@ -15,7 +15,7 @@ from ...utils.records import (
     SolveSummary,
     TacticStatus,
 )
-from ..model_policy import TacticRankingError
+from ..search.tactic_generator import TacticGenerationError
 from .records import ProblemRunRecord, RunState, SolveRunRecord
 from .render import render_problem_trace
 
@@ -75,7 +75,7 @@ def _failed_problem_result(
 ) -> ProblemResult:
     status = (
         SolveStatus.MODEL_FAILURE
-        if isinstance(error, TacticRankingError)
+        if isinstance(error, TacticGenerationError)
         else SolveStatus.VERIFIER_FAILURE
     )
     failure = str(error) if status is SolveStatus.MODEL_FAILURE else f"{type(error).__name__}: {error}"

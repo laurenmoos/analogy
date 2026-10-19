@@ -4,9 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.model import model_provider
-from analogy.solver.model_policy import TacticRanker, TacticRankingError
+from analogy.solver.search.tactic_generator import (
+    TacticGenerationError,
+    TacticGenerator,
+)
 from analogy.solver.analogy.protocol import render_analogy_state
 from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
 from analogy.model.prompts import configure_prompt_catalog
@@ -16,7 +19,7 @@ ROOT = Path(__file__).parents[1]
 
 
 def _ranker(generator, *, top_k, seed, trace_sink=None, analogy_scratchpad=None):
-    return TacticRanker(
+    return TacticGenerator(
         generator,
         top_k=top_k,
         seed=seed,
@@ -41,7 +44,7 @@ def test_tactic_ranker_wraps_provider_failures_in_its_loop_exception():
     configure_prompt_catalog(ROOT / "prompts.yaml")
     ranker = _ranker(BrokenProvider(), top_k=3, seed=7)
 
-    with pytest.raises(TacticRankingError, match="generation failed at seed 7"):
+    with pytest.raises(TacticGenerationError, match="generation failed at seed 7"):
         ranker.rank(
             SimpleNamespace(id="state", context=(), expression="P"),
             SimpleNamespace(expression="P"),
@@ -218,7 +221,7 @@ abandoned domains:
         Provider(), top_k=1, seed=7, analogy_scratchpad=scratchpad
     )
 
-    with pytest.raises(TacticRankingError, match="must remain unchanged"):
+    with pytest.raises(TacticGenerationError, match="must remain unchanged"):
         ranker.rank(
             SimpleNamespace(id="state", context=(), expression="h : P\n⊢ P"),
             SimpleNamespace(expression="P"),
@@ -308,7 +311,7 @@ def test_tactic_ranker_does_not_retry_unrelated_malformed_json():
     configure_prompt_catalog(ROOT / "prompts.yaml")
     ranker = _ranker(Provider(), top_k=2, seed=7)
 
-    with pytest.raises(TacticRankingError, match="valid JSON"):
+    with pytest.raises(TacticGenerationError, match="valid JSON"):
         ranker.rank(
             SimpleNamespace(id="state", context=(), expression="P"),
             SimpleNamespace(expression="P"),

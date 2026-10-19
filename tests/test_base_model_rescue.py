@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from analogy.model import prompts as prompts_module
 from analogy.model.prompt_runner import GenerationStatus
 from analogy.model.prompts import PromptCatalog
@@ -38,6 +40,7 @@ from analogy.solver.analogy.structural_scoring import (
     ProofBelief,
     StructuralElement,
     StructuralGraph,
+    StructuralScoringError,
 )
 from analogy.solver.search import NeverCancelled
 from analogy.solver.proof.semantic import (
@@ -168,7 +171,7 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
 
     distances = {"middle": 0.2, "best": 0.1, "worst": 0.3}
 
-    def score(model, belief, embedder, *, layer):
+    def score(model, belief, embedder):
         transition = model.correspondences[0].domain_transition
         events.append(("score", transition))
         return SimpleNamespace(
@@ -194,7 +197,6 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
         max_model_calls=3,
         seed=7,
         analogy_scratchpad=scratchpad,
-        embedding_layer=-1,
     ).search(
         STATE,
         GOAL,
@@ -214,6 +216,42 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
     ]
     assert outcome.completed_proof == "done"
     assert scratchpad.current.correspondences[0].domain_transition == "middle"
+
+
+def test_global_structural_scorer_failure_aborts_revision_ranking(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return _mental_response("navigation", "new", "exact new")
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda *_args: (_ for _ in ()).throw(
+            StructuralScoringError("calibration metadata mismatch")
+        ),
+    )
+
+    with pytest.raises(StructuralScoringError, match="calibration metadata"):
+        AnalogyFallback(
+            Generator(),
+            max_model_calls=1,
+            seed=7,
+            analogy_scratchpad=scratchpad,
+        ).search(
+            STATE,
+            GOAL,
+            (),
+            lambda _candidate: pytest.fail("Lean must not run"),
+            NeverCancelled(),
+            "guidance",
+            proof_belief=_proof_belief(),
+        )
 
 
 def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
@@ -239,7 +277,7 @@ def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
 
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.score_mental_model_revision",
-        lambda model, belief, embedder, *, layer: SimpleNamespace(
+        lambda model, belief, embedder: SimpleNamespace(
             distance=0.1, coupling=((1.0,),)
         ),
     )
@@ -254,7 +292,6 @@ def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
         max_model_calls=2,
         seed=7,
         analogy_scratchpad=scratchpad,
-        embedding_layer=-1,
     ).search(
         STATE,
         GOAL,
@@ -298,7 +335,7 @@ def test_rejected_scored_revisions_leave_model_and_history_unchanged(monkeypatch
 
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.score_mental_model_revision",
-        lambda model, belief, embedder, *, layer: SimpleNamespace(
+        lambda model, belief, embedder: SimpleNamespace(
             distance=0.1, coupling=((1.0,),)
         ),
     )
@@ -307,7 +344,6 @@ def test_rejected_scored_revisions_leave_model_and_history_unchanged(monkeypatch
         max_model_calls=2,
         seed=7,
         analogy_scratchpad=scratchpad,
-        embedding_layer=-1,
     ).search(
         STATE,
         GOAL,
@@ -349,7 +385,7 @@ def test_scored_but_unsubmitted_revisions_remain_in_generation_records(monkeypat
 
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.score_mental_model_revision",
-        lambda model, belief, embedder, *, layer: SimpleNamespace(
+        lambda model, belief, embedder: SimpleNamespace(
             distance=(
                 0.1
                 if model.correspondences[0].domain_transition == "best"
@@ -368,7 +404,6 @@ def test_scored_but_unsubmitted_revisions_remain_in_generation_records(monkeypat
         max_model_calls=2,
         seed=7,
         analogy_scratchpad=scratchpad,
-        embedding_layer=-1,
     ).search(
         STATE,
         GOAL,
@@ -410,7 +445,7 @@ def test_cancellation_during_batch_keeps_already_scored_revision(monkeypatch):
 
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.score_mental_model_revision",
-        lambda model, belief, embedder, *, layer: SimpleNamespace(
+        lambda model, belief, embedder: SimpleNamespace(
             distance=0.1, coupling=((1.0,),)
         ),
     )
@@ -419,7 +454,6 @@ def test_cancellation_during_batch_keeps_already_scored_revision(monkeypatch):
         max_model_calls=2,
         seed=7,
         analogy_scratchpad=scratchpad,
-        embedding_layer=-1,
     ).search(
         STATE,
         GOAL,

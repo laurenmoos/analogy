@@ -1,49 +1,50 @@
-"""Model-backed proof-state encoding and tactic ranking."""
+"""Model-backed tactic generation for proof search."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from ..config import AppConfig
-from ..model.model_provider import TextGenerator
-from ..model.parser import (
+from ...config import AppConfig
+from ...model.model_provider import TextGenerator
+from ...model.parser import (
     candidate_rejection_reason,
     FilteredCandidatePool,
     IncompleteCandidatePool,
     ModelOutputError,
     normalize_lean4_tactic,
 )
-from ..model.prompt_runner import PromptRunner
-from ..model.prompts import (
+from ...model.prompt_runner import PromptRunner
+from ...model.prompts import (
     configure_prompt_catalog,
     focused_lean_goal,
     lean_tactic_card,
     prompt_catalog,
     render_lean_goal_for_model,
 )
-from ..utils.records import CandidateOrigin, Message, TacticCandidate
-from .analogy.protocol import (
+from ...utils.records import CandidateOrigin, Message, TacticCandidate
+from ..analogy.protocol import (
     extract_working_model_block,
     record_model_history,
     render_working_model,
 )
-from .analogy.state import (
+from ..analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
     AnalogyStateError,
 )
-from .scoring import normalize_tactic_scores, parse_scored_tactic_candidates
+from ..scoring import normalize_tactic_scores, parse_scored_tactic_candidates
 
 if TYPE_CHECKING:
-    from .search import SearchSession, TacticBatch
-    from .proof.adapter import LeanGymAdapter
+    from ..proof.adapter import LeanGymAdapter
+    from .session import SearchSession, TacticBatch
 
-class TacticRankingError(RuntimeError):
+
+class TacticGenerationError(RuntimeError):
     """Raised when the conventional model cannot produce a candidate pool."""
 
 
-class TacticRanker:
+class TacticGenerator:
     """Generate a normalized conventional tactic pool for one proof state."""
 
     def __init__(
@@ -67,7 +68,7 @@ class TacticRanker:
 
     @property
     def analogy_scratchpad(self) -> AnalogyScratchpad | None:
-        """Return the externally owned analogy state bound to this policy."""
+        """Return the externally owned analogy state bound to this generator."""
 
         return self._analogy_scratchpad
 
@@ -188,7 +189,7 @@ class TacticRanker:
         )
         if value is not None:
             return value
-        raise TacticRankingError(f"{type(error).__name__}: {error}") from error
+        raise TacticGenerationError(f"{type(error).__name__}: {error}") from error
 
     def _scratchpad_messages(
         self,
@@ -254,7 +255,7 @@ class TacticRanker:
         return candidates
 
 
-def generate_and_score_tactics_with_model_policy(
+def generate_and_score_tactics(
     search: SearchSession,
 ) -> TacticBatch:
     """Generate and score the next ordinary batch for the active search node."""
@@ -283,7 +284,7 @@ def generate_and_score_tactics_with_model_policy(
         for candidate in ranked:
             if candidate.origin is not CandidateOrigin.ORDINARY:
                 raise ValueError(
-                    "conventional tactic policy must return ordinary candidates"
+                    "conventional tactic generator must return ordinary candidates"
                 )
             normalized = normalize_lean4_tactic(
                 candidate.source, search.node.state.expression
@@ -303,17 +304,17 @@ def generate_and_score_tactics_with_model_policy(
     return search.next_tactic_batch()
 
 
-def initialize_model_policy(
+def initialize_tactic_generator(
     config: AppConfig,
     generator: TextGenerator,
     proof: LeanGymAdapter,
     model_events: list[dict[str, Any]],
     *,
     analogy_scratchpad: AnalogyScratchpad | None = None,
-) -> TacticRanker:
-    """Create the ordinary tactic policy used by one problem search."""
+) -> TacticGenerator:
+    """Create the model-backed tactic generator used by one problem search."""
 
-    return TacticRanker(
+    return TacticGenerator(
         generator,
         top_k=config.search.top_k,
         seed=config.run.seed,
@@ -351,8 +352,9 @@ def _replacement_repair(
 
 
 __all__ = [
-    "TacticRanker",
-    "TacticRankingError",
-    "generate_and_score_tactics_with_model_policy",
-    "initialize_model_policy",
+    "TacticGenerationError",
+    "TacticGenerator",
+    "generate_and_score_tactics",
+    "initialize_model_protocol",
+    "initialize_tactic_generator",
 ]

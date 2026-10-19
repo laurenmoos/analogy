@@ -40,6 +40,7 @@ def test_retired_execution_packages_are_absent():
     assert _find_spec_or_none("analogy.solver.inference") is None
     assert _find_spec_or_none("analogy.solver.run") is not None
     assert _find_spec_or_none("analogy.records") is None
+    assert _find_spec_or_none("analogy.runtime") is None
     assert _find_spec_or_none("analogy.utils.records") is not None
     assert _find_spec_or_none("analogy.problem_index") is None
     assert _find_spec_or_none("analogy.utils.checkpoint") is not None
@@ -58,11 +59,13 @@ def test_retired_execution_packages_are_absent():
     assert search_spec.submodule_search_locations is not None
     for module in ("policies", "result", "session", "setup"):
         assert _find_spec_or_none(f"analogy.solver.search.{module}") is not None
+    assert _find_spec_or_none("analogy.solver.search.tactic_generator") is not None
+    assert _find_spec_or_none("analogy.solver.model_policy") is None
     assert _find_spec_or_none("analogy.solver.episode") is None
     assert _find_spec_or_none("analogy.solver.search_setup") is None
 
 
-def test_no_secondary_runtime_entry_points_exist():
+def test_no_secondary_session_entry_points_exist():
     retired = (
         "experiments/activation_runner.py",
         "experiments/activation_generation.py",
@@ -73,6 +76,16 @@ def test_no_secondary_runtime_entry_points_exist():
     )
 
     assert [name for name in retired if (PACKAGE / name).exists()] == []
+
+
+def test_package_main_is_only_the_module_execution_wrapper():
+    tree = ast.parse((PACKAGE / "__main__.py").read_text(encoding="utf-8"))
+
+    assert [node.name for node in tree.body if isinstance(node, ast.FunctionDef)] == []
+    imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
+    assert len(imports) == 1
+    assert imports[0].module == "main"
+    assert [alias.name for alias in imports[0].names] == ["main"]
 
 
 def test_run_module_contains_only_two_visible_recipes():
@@ -106,7 +119,7 @@ def test_live_solver_types_do_not_expose_retired_hooks() -> None:
     from analogy.solver.analogy import rescue
     from analogy.solver.analogy.state import AnalogyScratchpad, AnalogyState
     from analogy.solver.search import EpisodeContext
-    from analogy.solver.model_policy import TacticRanker
+    from analogy.solver.search.tactic_generator import TacticGenerator
     from analogy.solver.proof.adapter import LeanGymAdapter
 
     assert not hasattr(LeanGymAdapter, "proof_structure_for")
@@ -114,7 +127,7 @@ def test_live_solver_types_do_not_expose_retired_hooks() -> None:
     assert not hasattr(LeanGymAdapter, "register_replay_state")
     assert "stuck_state_sink" not in EpisodeContext.__dataclass_fields__
     assert "verifier" not in EpisodeContext.__dataclass_fields__
-    ranker_parameters = inspect.signature(TacticRanker).parameters
+    ranker_parameters = inspect.signature(TacticGenerator).parameters
     assert "tolerate_failure" not in ranker_parameters
     assert ranker_parameters["failed_tactics_for"].default is inspect.Parameter.empty
     assert ranker_parameters["trace_sink"].default is inspect.Parameter.empty
@@ -214,9 +227,10 @@ def test_both_run_recipes_name_general_search_scoring_explicitly() -> None:
             for node in ast.walk(recipes[name])
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         ]
-        assert "generate_and_score_tactics_with_model_policy" in calls
+        assert "generate_and_score_tactics" in calls
         assert "submit_tactics_to_lean" in calls
         assert "update_search_with_scored_proof_states" in calls
+        assert "generate_and_score_tactics_with_model_policy" not in calls
         assert "generate_tactics_with_model_policy" not in calls
         assert "update_search" not in calls
 
@@ -288,8 +302,8 @@ def test_run_module_has_only_two_functions_and_exposes_the_assisted_lifecycle() 
     ]
 
 
-def test_scoring_package_does_not_import_search_or_model_policy() -> None:
-    forbidden = ("analogy.solver.search", "analogy.solver.model_policy")
+def test_scoring_package_does_not_import_search() -> None:
+    forbidden = ("analogy.solver.search",)
     dependencies = []
     for path in (PACKAGE / "solver" / "scoring").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))

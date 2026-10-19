@@ -122,6 +122,8 @@ class ModelProvider(TextGenerator, Protocol):
 
     def embed_text(self, text: str, *, layer: int) -> Embedding: ...
 
+    def embed_mean_text(self, text: str, *, layer: int) -> Embedding: ...
+
     def embed_text_with_usage(self, text: str, *, layer: int) -> tuple[Embedding, int]: ...
 
     def score_completions(
@@ -535,6 +537,14 @@ class QwenGenerator:
         return self._tokenizer.decode(new_tokens, skip_special_tokens=True)
 
     def embed_text(self, text: str, *, layer: int) -> Embedding:
+        return self._embed_text_pooled(text, layer=layer, pooling="last")
+
+    def embed_mean_text(self, text: str, *, layer: int) -> Embedding:
+        return self._embed_text_pooled(text, layer=layer, pooling="mean")
+
+    def _embed_text_pooled(
+        self, text: str, *, layer: int, pooling: str
+    ) -> Embedding:
         if not isinstance(text, str) or not text.strip():
             raise ModelConfigurationError("embedding text must be nonblank")
         if isinstance(layer, bool) or not isinstance(layer, int):
@@ -561,7 +571,12 @@ class QwenGenerator:
         token_count = int(attention_mask[0].sum().item())
         if token_count <= 0 or token_count > hidden.shape[1]:
             raise ModelConfigurationError("attention mask selects no valid final token")
-        vector = hidden[0, token_count - 1].detach().float()
+        if pooling == "mean":
+            vector = hidden[0, :token_count].detach().float().mean(dim=0)
+            token_index = None
+        else:
+            vector = hidden[0, token_count - 1].detach().float()
+            token_index = token_count - 1
         norm = self._torch.linalg.vector_norm(vector)
         finite_vector = bool(self._torch.isfinite(vector).all().item())
         finite_norm = bool(self._torch.isfinite(norm).item())
@@ -569,11 +584,11 @@ class QwenGenerator:
             raise ModelConfigurationError("embedding must be finite and nonzero")
         values = tuple(float(item) for item in (vector / norm).cpu().tolist())
         return Embedding(
-            f"{self.model_revision}:layer={resolved}:final-nonpadding",
+            f"{self.model_revision}:layer={resolved}:{pooling}-nonpadding",
             values,
             model_revision=self.model_revision,
             layer=resolved,
-            token_index=token_count - 1,
+            token_index=token_index,
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 

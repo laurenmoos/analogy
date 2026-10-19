@@ -57,6 +57,7 @@ from .state import (
 from .structural_scoring import (
     ProofBelief,
     StructuralScoringError,
+    UnscorableMentalModelError,
     build_proof_belief,
     score_mental_model_revision,
 )
@@ -302,7 +303,6 @@ def initialize_analogy_fallback(
         seed=config.run.seed,
         trace_sink=model_events.append,
         analogy_scratchpad=scratchpad,
-        embedding_layer=config.model.hidden_layer,
     )
 
 
@@ -422,7 +422,6 @@ class AnalogyFallback:
         seed: int,
         analogy_scratchpad: AnalogyScratchpad,
         trace_sink: Any | None = None,
-        embedding_layer: int | None = None,
     ) -> None:
         if isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls <= 0:
             raise ValueError("max_model_calls must be a positive integer")
@@ -434,7 +433,6 @@ class AnalogyFallback:
         self._max_model_calls = max_model_calls
         self._seed = seed
         self._trace_sink = trace_sink
-        self._embedding_layer = embedding_layer
         self.scratchpad = analogy_scratchpad
 
     def search(
@@ -497,10 +495,6 @@ class AnalogyFallback:
             user,
         )
         if proof_belief is not None:
-            if self._embedding_layer is None:
-                raise ValueError(
-                    "embedding_layer is required for structural mental-model scoring"
-                )
             return self._search_ranked_mental_models(
                 state,
                 evaluator,
@@ -810,7 +804,6 @@ class AnalogyFallback:
                     candidate_model,
                     proof_belief,
                     self._generator,
-                    layer=self._embedding_layer,
                 )
                 generation = AnalogyGenerationAttempt(
                     seed,
@@ -853,7 +846,7 @@ class AnalogyFallback:
                         generations=(generation,),
                     )
                 )
-            except StructuralScoringError as error:
+            except UnscorableMentalModelError as error:
                 generation = AnalogyGenerationAttempt(
                     seed,
                     raw,
@@ -872,6 +865,8 @@ class AnalogyFallback:
                         generations=(generation,),
                     )
                 )
+            except StructuralScoringError:
+                raise
             except Exception as error:
                 self._trace(state.id, messages, seed, raw, error=error)
                 generation = AnalogyGenerationAttempt(

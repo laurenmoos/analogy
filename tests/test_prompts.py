@@ -15,7 +15,7 @@ from analogy.model.prompts import (
     render_lean_goal_for_model,
 )
 from analogy.utils.records import Message
-from analogy.solver.model_policy import _replacement_repair
+from analogy.solver.search.tactic_generator import _replacement_repair
 from analogy.solver.analogy.protocol import extract_mental_model_block
 
 

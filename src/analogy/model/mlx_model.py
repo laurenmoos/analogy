@@ -269,6 +269,14 @@ class MLXQwenGenerator:
             layers[resolved] = original
 
     def embed_text(self, text: str, *, layer: int) -> Embedding:
+        return self._embed_text_pooled(text, layer=layer, pooling="last")
+
+    def embed_mean_text(self, text: str, *, layer: int) -> Embedding:
+        return self._embed_text_pooled(text, layer=layer, pooling="mean")
+
+    def _embed_text_pooled(
+        self, text: str, *, layer: int, pooling: str
+    ) -> Embedding:
         if not isinstance(text, str) or not text.strip():
             raise ModelConfigurationError("embedding text must be nonblank")
         token_ids = tuple(
@@ -293,7 +301,12 @@ class MLXQwenGenerator:
             if norm is None:
                 raise ModelConfigurationError("MLX model does not expose final norm")
             hidden = norm(hidden)
-        vector = hidden[0, -1]
+        if pooling == "mean":
+            vector = hidden[0].mean(axis=0)
+            token_index = None
+        else:
+            vector = hidden[0, -1]
+            token_index = len(token_ids) - 1
         vector = (
             vector.astype(self.mx.float32)
             if hasattr(vector, "astype")
@@ -310,11 +323,11 @@ class MLXQwenGenerator:
         if not values or not all(math.isfinite(item) for item in values):
             raise ModelConfigurationError("embedding must be finite and nonzero")
         return Embedding(
-            f"{self.model_revision}:layer={resolved}:final-nonpadding",
+            f"{self.model_revision}:layer={resolved}:{pooling}-nonpadding",
             values,
             model_revision=self.model_revision,
             layer=resolved,
-            token_index=len(token_ids) - 1,
+            token_index=token_index,
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 

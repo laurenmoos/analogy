@@ -30,7 +30,7 @@ from analogy.solver.search import (
     submit_tactics_to_lean,
     initialize_search,
 )
-from analogy.config import load_config
+from analogy.main import load_config
 from analogy.utils.records import Embedding
 from pathlib import Path
 from analogy.solver.scoring import DiversityObservation
@@ -38,9 +38,7 @@ from analogy.solver.search import (
     start_search,
     update_search_with_scored_proof_states,
 )
-from analogy.solver.model_policy import (
-    generate_and_score_tactics_with_model_policy,
-)
+from analogy.solver.search import generate_and_score_tactics
 from analogy.solver.proof.semantic import (
     ExhaustiveSemanticChecker,
     SemanticAssessment,
@@ -66,7 +64,7 @@ def _run_incremental(context, initial=START, goal=GOAL, *, analogy=False):
         context.analogy_fallback.scratchpad = scratchpad
     search = start_search(context, initial, goal)
     while search.has_work():
-        tactics = generate_and_score_tactics_with_model_policy(search)
+        tactics = generate_and_score_tactics(search)
         results = submit_tactics_to_lean(verifier, tactics)
         update_search_with_scored_proof_states(search, results)
         if search.is_stuck():

@@ -4,10 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from analogy.__main__ import build_parser, main, run_solve
-from analogy.config import load_config
+from analogy.main import (
+    build_parser,
+    load_config,
+    main,
+    run_solve,
+    with_analogy_enabled,
+)
 from analogy.utils.records import ProblemResult, SolveSummary, SolveStatus
-from analogy.runtime import with_analogy_enabled
 from analogy.solver.report import SolveRunRecord
 from analogy.solver.report.render import render_cli_report
 
@@ -65,7 +69,7 @@ def test_boolean_override_changes_only_analogy_enabled():
     assert replace(disabled, analogy=configured.analogy) == configured
 
 
-def test_report_describes_one_runtime_run():
+def test_report_describes_one_session_run():
     summary = SolveSummary(
         "analogy-on",
         (
@@ -111,7 +115,7 @@ def test_solve_selects_explicit_run_recipe(
     )
 
     calls = []
-    runtime = SimpleNamespace(
+    session = SimpleNamespace(
         config=configured,
         problems=(object(),),
         model=object(),
@@ -128,10 +132,10 @@ def test_solve_selects_explicit_run_recipe(
 
         return run
 
-    monkeypatch.setattr("analogy.__main__.get_runtime", lambda *args: runtime)
-    monkeypatch.setattr("analogy.__main__.run_vanilla", recipe("vanilla"))
+    monkeypatch.setattr("analogy.main.get_session", lambda *args: session)
+    monkeypatch.setattr("analogy.main.run_vanilla", recipe("vanilla"))
     monkeypatch.setattr(
-        "analogy.__main__.run_analogy_assisted", recipe("analogy-assisted")
+        "analogy.main.run_analogy_assisted", recipe("analogy-assisted")
     )
 
     assert run_solve(SimpleNamespace(config=ROOT / "config.yaml", analogy_enabled=None, problem_selection=None)) == 0

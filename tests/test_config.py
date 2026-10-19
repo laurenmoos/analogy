@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from analogy.config import ConfigError, load_config
+from analogy import config as config_module
+from analogy.main import load_config
 
 
 ROOT = Path(__file__).parents[1]
@@ -19,7 +20,7 @@ def _write(tmp_path: Path, payload: dict) -> Path:
     return path
 
 
-def test_runtime_config_has_one_analogy_boolean_and_schema_call_budget():
+def test_session_config_has_one_analogy_boolean_and_schema_call_budget():
     config = load_config(ROOT / "config.yaml")
 
     assert config.analogy.enabled is True
@@ -27,6 +28,7 @@ def test_runtime_config_has_one_analogy_boolean_and_schema_call_budget():
     assert set(config.analogy.__dataclass_fields__) == {"enabled", "max_model_calls"}
     assert config.benchmark.selection == "exhaustive"
     assert config.run.seed == 0
+    assert not hasattr(config_module, "load_config")
 
 
 @pytest.mark.parametrize("selection", ["exhaustive", "previous_failures"])
@@ -41,7 +43,7 @@ def test_config_rejects_unknown_problem_selection(tmp_path):
     payload = _payload()
     payload["benchmark"]["selection"] = "recent"
 
-    with pytest.raises(ConfigError, match="benchmark.selection"):
+    with pytest.raises(ValueError, match="benchmark.selection"):
         load_config(_write(tmp_path, payload))
 
 
@@ -65,13 +67,13 @@ def test_config_rejects_retired_analogy_selectors(tmp_path, key, value):
     payload = _payload()
     payload["analogy"][key] = value
 
-    with pytest.raises(ConfigError, match=rf"analogy\.{key} is unknown"):
+    with pytest.raises(TypeError, match=key):
         load_config(_write(tmp_path, payload))
 
 
-def test_config_rejects_non_boolean_runtime_gate(tmp_path):
+def test_config_rejects_non_boolean_session_gate(tmp_path):
     payload = _payload()
     payload["analogy"]["enabled"] = "yes"
 
-    with pytest.raises(ConfigError, match="analogy.enabled must be a boolean"):
+    with pytest.raises(ValueError, match="analogy.enabled must be a boolean"):
         load_config(_write(tmp_path, payload))

@@ -20,11 +20,6 @@ from .analogy.rescue import (
     generate_analogy_rescue,
     submit_analogy_rescue_to_lean,
 )
-from .model_policy import (
-    generate_and_score_tactics_with_model_policy,
-    initialize_model_policy,
-    initialize_model_protocol,
-)
 from .proof.adapter import initialize_proof
 from .report import (
     SolveRunRecord,
@@ -35,7 +30,10 @@ from .report import (
     write_run_record,
 )
 from .search import (
+    generate_and_score_tactics,
+    initialize_model_protocol,
     initialize_search,
+    initialize_tactic_generator,
     submit_tactics_to_lean,
     update_search_with_scored_proof_states,
 )
@@ -49,7 +47,7 @@ def run_vanilla(
     *,
     checkpoint: Checkpoint | None = None,
 ) -> SolveRunRecord:
-    """Run the ordinary model-policy and Lean search recipe."""
+    """Run the ordinary tactic-generation and Lean search recipe."""
 
     initialize_model_protocol(config)
     run_state = start_run(config, checkpoint)
@@ -60,13 +58,15 @@ def run_vanilla(
         failure = None
         try:
             proof = initialize_proof(problem, verifier)
-            model_policy = initialize_model_policy(
+            tactic_generator = initialize_tactic_generator(
                 config, generator, proof, model_events
             )
-            search = initialize_search(config, generator, proof, model_policy)
+            search = initialize_search(
+                config, generator, proof, tactic_generator
+            )
 
             while search.has_work():
-                tactics = generate_and_score_tactics_with_model_policy(search)
+                tactics = generate_and_score_tactics(search)
                 results = submit_tactics_to_lean(proof, tactics)
                 update_search_with_scored_proof_states(search, results)
         except Exception as error:
@@ -112,14 +112,14 @@ def run_analogy_assisted(
                 config,
                 generator,
                 proof,
-                analogy.model_policy,
+                analogy.tactic_generator,
                 analogy_fallback=analogy.fallback,
                 initial_state=initial_state,
                 goal_state=goal_state,
             )
 
             while search.has_work():
-                tactics = generate_and_score_tactics_with_model_policy(search)
+                tactics = generate_and_score_tactics(search)
                 results = submit_tactics_to_lean(proof, tactics)
                 update_search_with_scored_proof_states(search, results)
 

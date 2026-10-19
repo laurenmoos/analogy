@@ -16,11 +16,16 @@ from ...model.prompts import (
     render_lean_goal_for_model,
 )
 from ...utils.records import SymbolicState
-from ..model_policy import TacticRanker, initialize_model_policy
 from ..proof.semantic import SemanticResult
+from ..search.tactic_generator import TacticGenerator, initialize_tactic_generator
 from .protocol import extract_mental_model_block
 from .rescue import AnalogyFallback, initialize_analogy_fallback
-from .state import AnalogyScratchpad
+from .state import AnalogyScratchpad, MentalModel
+from .structural_scoring import (
+    UnscorableMentalModelError,
+    build_proof_belief,
+    score_mental_model_revision,
+)
 
 if TYPE_CHECKING:
     from ..proof.adapter import LeanGymAdapter
@@ -33,6 +38,9 @@ class AnalogyHarnessInitializationError(RuntimeError):
 
 class AnalogyScoreError(ValueError):
     """Raised when the opaque scorer violates its finite-real contract."""
+
+
+UNSCORABLE_ANALOGY_SCORE = -float.fromhex("0x1.fffffffffffffp+1023")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,13 +56,13 @@ class AnalogyInitializationTrace:
 class AnalogyTrack:
     id: str
     scratchpad: AnalogyScratchpad
-    model_policy: TacticRanker
+    tactic_generator: TacticGenerator
     fallback: AnalogyFallback
     initialization: AnalogyInitializationTrace
 
     def __post_init__(self) -> None:
-        if self.model_policy.analogy_scratchpad is not self.scratchpad:
-            raise ValueError("analogy model policy must own the track scratchpad")
+        if self.tactic_generator.analogy_scratchpad is not self.scratchpad:
+            raise ValueError("analogy tactic generator must own the track scratchpad")
         if self.fallback.scratchpad is not self.scratchpad:
             raise ValueError("analogy fallback must own the track scratchpad")
 
@@ -72,6 +80,33 @@ class EqualAnalogyScorer:
         self, track: AnalogyTrack, search: SearchSession | None
     ) -> float:
         return 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralAnalogyScorer:
+    """Rank active tracks by the frozen ordered-transition fit score."""
+
+    embedder: Any
+
+    def score(
+        self, track: AnalogyTrack, search: SearchSession | None
+    ) -> float:
+        if search is None:
+            return 0.0
+        model = track.scratchpad.current
+        if not isinstance(model, MentalModel):
+            raise AnalogyScoreError(
+                "structural analogy scoring requires a mental model"
+            )
+        try:
+            fit = score_mental_model_revision(
+                model,
+                build_proof_belief(search),
+                self.embedder,
+            )
+        except UnscorableMentalModelError:
+            return UNSCORABLE_ANALOGY_SCORE
+        return -fit.distance
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +175,7 @@ def initialize_analogy_harness(
             continue
 
         scratchpad = AnalogyScratchpad(state)
-        model_policy = initialize_model_policy(
+        tactic_generator = initialize_tactic_generator(
             config,
             generator,
             proof,
@@ -154,7 +189,7 @@ def initialize_analogy_harness(
         track = AnalogyTrack(
             f"analogy-{index + 1}",
             scratchpad,
-            model_policy,
+            tactic_generator,
             fallback,
             trace,
         )
@@ -164,7 +199,9 @@ def initialize_analogy_harness(
 
     if not tracks:
         raise AnalogyHarnessInitializationError("no valid analogies were generated")
-    return AnalogyHarness(tuple(tracks), scorer or EqualAnalogyScorer())
+    return AnalogyHarness(
+        tuple(tracks), scorer or StructuralAnalogyScorer(generator)
+    )
 
 
 def score_analogies(
@@ -216,13 +253,15 @@ def activate_analogy(search: SearchSession, analogy: AnalogyTrack) -> None:
     """Use one track without changing the shared search state."""
 
     if (
-        analogy.model_policy.analogy_scratchpad is not analogy.scratchpad
+        analogy.tactic_generator.analogy_scratchpad is not analogy.scratchpad
         or analogy.fallback.scratchpad is not analogy.scratchpad
     ):
-        raise ValueError("analogy policy and fallback must share the same scratchpad")
+        raise ValueError(
+            "analogy tactic generator and fallback must share the same scratchpad"
+        )
     search.context = replace(
         search.context,
-        tactic_ranker=analogy.model_policy,
+        tactic_ranker=analogy.tactic_generator,
         analogy_fallback=analogy.fallback,
     )
 
@@ -250,6 +289,7 @@ __all__ = [
     "AnalogyTrack",
     "EqualAnalogyScorer",
     "ScoredAnalogy",
+    "StructuralAnalogyScorer",
     "activate_analogy",
     "initialize_analogy_harness",
     "score_analogies",

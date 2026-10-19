@@ -1,16 +1,30 @@
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from analogy.solver.analogy.state import MentalModel, MentalModelCorrespondence
 from analogy.solver.analogy.structural_scoring import (
+    FROZEN_EMBEDDING_LAYER,
+    FROZEN_EMBEDDING_MODEL,
+    FROZEN_EMBEDDING_REVISION,
+    FROZEN_MATRIX_SIZE,
+    EmbeddingCalibration,
     ProofBelief,
     StructuralElement,
     StructuralGraph,
     StructuralScoringError,
+    build_cosine_step_distance_matrix,
     build_proof_belief,
+    compute_state_change_vectors,
+    load_frozen_embedding_calibration,
+    ordered_mental_model_state_texts,
+    ordered_proof_state_texts,
+    remove_embedding_anisotropy,
+    resize_step_distance_matrix,
     score_mental_model_revision,
+    upper_triangle_correlation_distance,
 )
 from analogy.utils.records import Embedding, SearchNode, SymbolicState
 
@@ -42,23 +56,30 @@ def _belief():
     )
 
 
-class _SemanticEmbedder:
+class _MeanSemanticEmbedder:
     def __init__(self):
         self.inputs = []
         self.values = {
-            "shore": (1.0, 0.0, 0.0),
-            "sail": (0.8, 0.2, 0.0),
-            "island": (0.4, 0.6, 0.0),
-            "read map": (0.0, 1.0, 0.0),
-            "cave": (0.0, 0.6, 0.4),
-            "open chest": (0.0, 0.2, 0.8),
-            "treasure": (0.0, 0.0, 1.0),
+            "shore": (1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            "island": (0.5, 0.5, 0.0, 0.0, 0.0, 0.0),
+            "cave": (0.0, 0.5, 0.5, 0.0, 0.0, 0.0),
+            "treasure": (0.0, 0.0, 0.5, 0.5, 0.0, 0.0),
         }
 
-    def embed_text(self, text, *, layer):
+    def embed_mean_text(self, text, *, layer):
         self.inputs.append((text, layer))
         value = next(vector for label, vector in self.values.items() if text.endswith(label))
-        return Embedding("semantic", value, layer=layer)
+        return Embedding("semantic-mean", value, layer=layer)
+
+
+def _calibration():
+    return EmbeddingCalibration(
+        mean=(0.0,) * 6,
+        principal_components=(
+            (0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        ),
+    )
 
 
 def test_build_proof_belief_contains_accepted_states_and_connecting_tactics():
@@ -79,60 +100,163 @@ def test_build_proof_belief_contains_accepted_states_and_connecting_tactics():
         ("proof-tactic", "intro h"),
         ("proof-state", "h : P\n⊢ P"),
     ]
-    assert belief.graph.edges == (
-        ("proof-state:root", "proof-tactic:child"),
-        ("proof-tactic:child", "proof-state:child"),
+
+
+def test_build_proof_belief_follows_only_the_active_rescue_ancestry():
+    root = SearchNode(SymbolicState("root", "root state", "lean4"), 1.0)
+    left = SearchNode(
+        SymbolicState("left", "left sibling", "lean4"),
+        0.8,
+        parent_state_id="root",
+        tactic="left tactic",
+        depth=1,
+    )
+    right = SearchNode(
+        SymbolicState("right", "right state", "lean4"),
+        0.7,
+        parent_state_id="root",
+        tactic="right tactic",
+        depth=1,
+    )
+    active = SearchNode(
+        SymbolicState("active", "active state", "lean4"),
+        0.6,
+        parent_state_id="right",
+        tactic="active tactic",
+        depth=2,
+    )
+    search = SimpleNamespace(
+        nodes_by_id={node.state.id: node for node in (root, left, right, active)},
+        rescue_node=active,
+    )
+
+    belief = build_proof_belief(search)
+
+    assert [(item.role, item.text) for item in belief.graph.elements] == [
+        ("proof-state", "root state"),
+        ("proof-tactic", "right tactic"),
+        ("proof-state", "right state"),
+        ("proof-tactic", "active tactic"),
+        ("proof-state", "active state"),
+    ]
+
+
+def test_ordered_state_texts_exclude_transition_labels_but_keep_runtime_prefixes():
+    assert ordered_mental_model_state_texts(_model()) == (
+        "domain=treasure hunt\nrole=domain-state\nshore",
+        "domain=treasure hunt\nrole=domain-state\nisland",
+        "domain=treasure hunt\nrole=domain-state\ncave",
+        "domain=treasure hunt\nrole=domain-state\ntreasure",
+    )
+    assert ordered_proof_state_texts(_belief()) == (
+        "role=proof-state\nshore",
+        "role=proof-state\nisland",
+        "role=proof-state\ncave",
+        "role=proof-state\ntreasure",
     )
 
 
-def test_structural_score_embeds_roles_and_prefers_matching_narrative_order():
-    embedder = _SemanticEmbedder()
-
-    matching = score_mental_model_revision(_model(), _belief(), embedder, layer=4)
-    shuffled = score_mental_model_revision(
-        _model((2, 0, 1)), _belief(), embedder, layer=4
-    )
-    repeated = score_mental_model_revision(_model(), _belief(), embedder, layer=4)
-
-    assert matching.distance < shuffled.distance
-    assert matching.distance == pytest.approx(repeated.distance)
-    assert math.isfinite(matching.distance)
-    assert all(layer == 4 for _, layer in embedder.inputs)
-    assert any("role=domain-state" in text for text, _ in embedder.inputs)
-    assert any("role=proof-tactic" in text for text, _ in embedder.inputs)
-    assert sum(sum(row) for row in matching.coupling) == pytest.approx(1.0)
-
-
-def test_structural_score_is_finite_for_singleton_disconnected_and_unequal_graphs():
-    belief = ProofBelief(
-        StructuralGraph(
-            (StructuralElement("only", "proof-state", "shore", 0.0),), ()
-        )
-    )
+def test_mental_model_states_must_form_one_continuous_sequence():
     model = MentalModel(
-        "treasure hunt",
+        "journey",
         (
-            MentalModelCorrespondence("shore", "sail", "island"),
-            MentalModelCorrespondence("cave", "open chest", "treasure"),
+            MentalModelCorrespondence("station", "board train", "city"),
+            MentalModelCorrespondence("airport", "board plane", "island"),
         ),
     )
 
-    fit = score_mental_model_revision(model, belief, _SemanticEmbedder(), layer=0)
-
-    assert 0.0 <= fit.distance < float("inf")
-    assert len(fit.coupling) == len(fit.mental_model_graph.elements)
-    assert len(fit.coupling[0]) == 1
+    with pytest.raises(StructuralScoringError, match="continuous"):
+        ordered_mental_model_state_texts(model)
 
 
-@pytest.mark.parametrize("vectors", [((0.0, 0.0),), ((1.0, 0.0), (1.0, 0.0, 0.0))])
-def test_structural_score_rejects_zero_norm_or_dimension_mismatched_embeddings(vectors):
-    class BadEmbedder:
-        calls = 0
+def test_remove_embedding_anisotropy_subtracts_mean_and_top_two_components():
+    calibration = EmbeddingCalibration(
+        mean=(1.0, 1.0, 1.0),
+        principal_components=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+    cleaned = remove_embedding_anisotropy(((4.0, 5.0, 7.0),), calibration)
+    np.testing.assert_allclose(cleaned, ((0.0, 0.0, 6.0),))
 
-        def embed_text(self, text, *, layer):
-            value = vectors[min(self.calls, len(vectors) - 1)]
-            self.calls += 1
-            return Embedding("bad", value)
 
-    with pytest.raises(StructuralScoringError, match="embedding"):
-        score_mental_model_revision(_model(), _belief(), BadEmbedder(), layer=0)
+def test_transition_and_matrix_helpers_preserve_order_and_fixed_size():
+    states = ((1.0, 1.0), (3.0, 2.0), (2.0, 5.0))
+    changes = compute_state_change_vectors(states)
+    assert changes == ((2.0, 1.0), (-1.0, 3.0))
+    distances = build_cosine_step_distance_matrix(changes)
+    assert distances[0][0] == pytest.approx(0.0)
+    assert distances[0][1] == pytest.approx(distances[1][0])
+    resized = resize_step_distance_matrix(distances, size=3)
+    assert len(resized) == 3 and all(len(row) == 3 for row in resized)
+
+
+def test_upper_triangle_correlation_is_zero_for_identical_structure():
+    matrix = ((0.0, 0.2, 0.9), (0.2, 0.0, 0.5), (0.9, 0.5, 0.0))
+    assert upper_triangle_correlation_distance(matrix, matrix) == pytest.approx(0.0)
+
+
+def test_runtime_score_uses_frozen_mean_layer_and_prefers_matching_order():
+    embedder = _MeanSemanticEmbedder()
+    different_structure = MentalModel(
+        "treasure hunt",
+        (
+            MentalModelCorrespondence("shore", "enter cave", "cave"),
+            MentalModelCorrespondence("cave", "reach island", "island"),
+            MentalModelCorrespondence("island", "open chest", "treasure"),
+        ),
+    )
+
+    matching = score_mental_model_revision(_model(), _belief(), embedder, calibration=_calibration())
+    shuffled = score_mental_model_revision(
+        different_structure, _belief(), embedder, calibration=_calibration()
+    )
+
+    assert matching.distance < shuffled.distance
+    assert math.isfinite(matching.distance)
+    assert all(layer == FROZEN_EMBEDDING_LAYER for _, layer in embedder.inputs)
+    assert len(matching.coupling) == FROZEN_MATRIX_SIZE
+    assert sum(sum(row) for row in matching.coupling) == pytest.approx(1.0)
+
+
+def test_runtime_score_is_neutral_until_the_proof_has_a_transition():
+    belief = ProofBelief(
+        StructuralGraph((StructuralElement("only", "proof-state", "shore", 0.0),), ())
+    )
+    fit = score_mental_model_revision(
+        _model(), belief, _MeanSemanticEmbedder(), calibration=_calibration()
+    )
+    assert fit.distance == 0.0
+
+
+def test_frozen_calibration_matches_runtime_embedding_dimension():
+    calibration = EmbeddingCalibration(
+        mean=(0.0, 0.0),
+        principal_components=((1.0, 0.0), (0.0, 1.0)),
+    )
+    with pytest.raises(StructuralScoringError, match="calibration dimension"):
+        remove_embedding_anisotropy(((1.0, 2.0, 3.0),), calibration)
+
+
+def test_packaged_calibration_is_bound_to_the_frozen_embedding_model():
+    calibration = load_frozen_embedding_calibration()
+
+    assert calibration.model_id == FROZEN_EMBEDDING_MODEL
+    assert calibration.model_revision == FROZEN_EMBEDDING_REVISION
+    assert len(calibration.mean) == 4096
+    assert len(calibration.principal_components) == 2
+
+
+def test_runtime_score_rejects_embeddings_from_a_different_model():
+    calibration = EmbeddingCalibration(
+        mean=(0.0,) * 6,
+        principal_components=(
+            (0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        ),
+        model_id="mlx-community/Qwen3-8B-4bit",
+        model_revision="mlx-community/Qwen3-8B-4bit@expected-revision",
+    )
+
+    with pytest.raises(StructuralScoringError, match="calibration model"):
+        score_mental_model_revision(
+            _model(), _belief(), _MeanSemanticEmbedder(), calibration=calibration
+        )

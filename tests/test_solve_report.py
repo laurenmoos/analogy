@@ -63,6 +63,9 @@ def test_vanilla_run_has_no_analogy_state_or_fallback(
         def initial_state(self):
             return SymbolicState(f"{self.problem.id}:initial", "P : Prop\n⊢ P", "lean4")
 
+        def goal_state(self):
+            return SymbolicState(f"{self.problem.id}:goal", "⊢ P", "lean4")
+
     class FakeSearch:
         result = SearchResult(SearchStatus.EXHAUSTED, None)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from ..config import AppConfig
 from ..lean_gym.models import Problem
@@ -10,6 +11,7 @@ from ..lean_gym.verifier import Verifier
 from ..model.model_provider import TextGenerator
 from ..utils.checkpoint import Checkpoint
 from .analogy.harness import (
+    AnalogyHarness,
     activate_analogy,
     initialize_analogy_harness,
     score_analogies,
@@ -20,7 +22,7 @@ from .analogy.rescue import (
     generate_analogy_rescue,
     submit_analogy_rescue_to_lean,
 )
-from .proof.adapter import initialize_proof
+from .proof.adapter import LeanGymAdapter, initialize_proof
 from .report import (
     SolveRunRecord,
     build_problem_record,
@@ -30,6 +32,7 @@ from .report import (
     write_run_record,
 )
 from .search import (
+    SearchSession,
     generate_and_score_tactics,
     initialize_model_protocol,
     initialize_search,
@@ -37,6 +40,55 @@ from .search import (
     submit_tactics_to_lean,
     update_search_with_scored_proof_states,
 )
+
+
+def _initialize_problem(
+    config: AppConfig,
+    problem: Problem,
+    generator: TextGenerator,
+    verifier: Verifier,
+    model_events: list[dict[str, Any]],
+    *,
+    with_analogies: bool,
+) -> tuple[LeanGymAdapter, SearchSession, AnalogyHarness | None]:
+    """Initialize the proof, search, and optional analogy cohort."""
+
+    proof = initialize_proof(problem, verifier)
+    initial_state = proof.initial_state()
+    goal_state = proof.goal_state()
+
+    analogies = None
+    analogy_fallback = None
+    if with_analogies:
+        analogies = initialize_analogy_harness(
+            config,
+            generator,
+            proof,
+            model_events,
+            initial_state,
+            goal_state,
+        )
+        analogy = select_analogy(score_analogies(None, analogies))
+        tactic_generator = analogy.tactic_generator
+        analogy_fallback = analogy.fallback
+    else:
+        tactic_generator = initialize_tactic_generator(
+            config,
+            generator,
+            proof,
+            model_events,
+        )
+
+    search = initialize_search(
+        config,
+        generator,
+        proof,
+        tactic_generator,
+        analogy_fallback=analogy_fallback,
+        initial_state=initial_state,
+        goal_state=goal_state,
+    )
+    return proof, search, analogies
 
 
 def run_vanilla(
@@ -57,12 +109,13 @@ def run_vanilla(
         search = None
         failure = None
         try:
-            proof = initialize_proof(problem, verifier)
-            tactic_generator = initialize_tactic_generator(
-                config, generator, proof, model_events
-            )
-            search = initialize_search(
-                config, generator, proof, tactic_generator
+            proof, search, _ = _initialize_problem(
+                config,
+                problem,
+                generator,
+                verifier,
+                model_events,
+                with_analogies=False,
             )
 
             while search.has_work():
@@ -100,23 +153,15 @@ def run_analogy_assisted(
         search = None
         failure = None
         try:
-            proof = initialize_proof(problem, verifier)
-            initial_state = proof.initial_state()
-            goal_state = proof.goal_state()
-            analogies = initialize_analogy_harness(
-                config, generator, proof, model_events, initial_state, goal_state
-            )
-            scored_analogies = score_analogies(None, analogies)
-            analogy = select_analogy(scored_analogies)
-            search = initialize_search(
+            proof, search, analogies = _initialize_problem(
                 config,
+                problem,
                 generator,
-                proof,
-                analogy.tactic_generator,
-                analogy_fallback=analogy.fallback,
-                initial_state=initial_state,
-                goal_state=goal_state,
+                verifier,
+                model_events,
+                with_analogies=True,
             )
+            assert analogies is not None
 
             while search.has_work():
                 tactics = generate_and_score_tactics(search)

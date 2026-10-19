@@ -88,18 +88,24 @@ def test_package_main_is_only_the_module_execution_wrapper():
     assert [alias.name for alias in imports[0].names] == ["main"]
 
 
-def test_run_module_contains_only_two_visible_recipes():
+def test_run_module_contains_two_recipes_and_shared_problem_initialization():
     tree = ast.parse((PACKAGE / "solver" / "run.py").read_text(encoding="utf-8"))
     functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
 
     assert {node.name for node in functions} == {
+        "_initialize_problem",
         "run_vanilla",
         "run_analogy_assisted",
     }
-    assert len(functions) == 2
+    assert len(functions) == 3
     assert not any(isinstance(node, ast.ClassDef) for node in ast.walk(tree))
 
-    for function in functions:
+    recipes = [
+        function
+        for function in functions
+        if function.name in {"run_vanilla", "run_analogy_assisted"}
+    ]
+    for function in recipes:
         assert any(
             isinstance(node, ast.For)
             and isinstance(node.target, ast.Name)
@@ -235,23 +241,40 @@ def test_both_run_recipes_name_general_search_scoring_explicitly() -> None:
         assert "update_search" not in calls
 
 
-def test_run_module_has_only_two_functions_and_exposes_the_assisted_lifecycle() -> None:
+def test_run_module_shares_initialization_and_exposes_the_assisted_lifecycle() -> None:
     tree = ast.parse((PACKAGE / "solver" / "run.py").read_text(encoding="utf-8"))
     recipes = {
         node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
     }
-    assert list(recipes) == ["run_vanilla", "run_analogy_assisted"]
+    assert list(recipes) == [
+        "_initialize_problem",
+        "run_vanilla",
+        "run_analogy_assisted",
+    ]
+
+    initialization_calls = {
+        node.func.id
+        for node in ast.walk(recipes["_initialize_problem"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert initialization_calls >= {
+        "initialize_proof",
+        "initialize_tactic_generator",
+        "initialize_analogy_harness",
+        "score_analogies",
+        "select_analogy",
+        "initialize_search",
+    }
 
     assisted_calls = [
         node.func.id
         for node in ast.walk(recipes["run_analogy_assisted"])
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     ]
+    assert "_initialize_problem" in assisted_calls
     for expected in (
-        "initialize_analogy_harness",
         "score_analogies",
         "select_analogy",
-        "initialize_search",
         "update_analogies",
         "activate_analogy",
         "generate_analogy_rescue",
@@ -264,6 +287,7 @@ def test_run_module_has_only_two_functions_and_exposes_the_assisted_lifecycle() 
         for node in ast.walk(recipes["run_vanilla"])
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
+    assert "_initialize_problem" in vanilla_calls
     assert vanilla_calls.isdisjoint(
         {
             "initialize_analogy_harness",

@@ -32,7 +32,7 @@ hypothesis operational.
 
 ## Basic control flow
 
-Both experimental conditions start with the same vanilla solver. They differ in what happens
+All three evaluation conditions start with the same vanilla solver. They differ in what happens
 after that solver runs out of useful tactics at a state.
 
 ```text
@@ -45,15 +45,13 @@ problem
        -> deterministic move available: try it, then resume vanilla search
        -> model intervention required:
             deliberation control -> direct proof plan -> tactic -> Lean
-            analogy condition    -> story revisions -> structural rank -> tactic -> Lean
+            random analogy       -> shared story revisions -> seeded order -> tactic -> Lean
+            ranked analogy       -> shared story revisions -> structural order -> tactic -> Lean
 ```
 
 Any intervention tactic accepted by Lean produces an ordinary proof state and returns control to the
 same vanilla search loop. Ordinary search, intervention, and Lean verification run in sequence, with
 Lean verifying every tactic.
-
-In the first five-trial branch-choice evaluation, analogy solved **4/5** while the matched
-direct-deliberation control solved **2/5**.
 
 ## Problems
 
@@ -66,10 +64,6 @@ exact corpus and selection record are in
 [`problems.json`](src/analogy/lean_gym/corpus/problems.json) and
 [`benchmark_metadata.json`](src/analogy/lean_gym/corpus/benchmark_metadata.json). The model receives
 the theorem and live search context; selection uses the reference proofs and metadata.
-
-The capability suite freezes five trials where vanilla search exhausts its candidates at a
-meaningful disjunction: OOD 09 seed 0, OOD 19 seed 1, OOD 26 seeds 0 and 1, and OOD 18 seed 0. These
-trials test whether analogy can move the proof forward from those states.
 
 ## Vanilla solver
 
@@ -234,7 +228,7 @@ embeddings. The structural scorer uses the packaged layer-12 calibration from th
 revision `a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4`. [`config.yaml`](config.yaml) provides a complete
 14B default setup, and [`prompts.yaml`](prompts.yaml) contains every model-facing prompt.
 
-Both conditions share ordinary search, deterministic moves, SAT checks, Lean verification, and the
+All three evaluation conditions share ordinary search, deterministic moves, SAT checks, Lean verification, and the
 intervention-generation envelope. Analogy also performs structural embedding and ranking; later
 search work varies with the proof states produced by each intervention. Run both conditions on the
 30-problem corpus with:
@@ -247,3 +241,27 @@ uv run python -m analogy solve --analogy --all-problems
 Each command writes `report.md`, `run.json`, and per-problem records under
 `.artifacts/runs/solve/<run-id>/`. Current run records retain the effective configuration, model
 revisions, file hashes, run seed, and individual generation seeds.
+
+## Run the three-condition probe
+
+The probe runs three fixed PropL cases under direct deliberation, seeded-random analogy, and
+structurally ranked analogy. It is a plumbing and reproducibility check rather than an efficacy
+estimate. Every condition uses seed `0`, the same Qwen3-14B-4bit instance, the same Lean verifier,
+and the same ordered problems.
+
+At a recoverable stuck state, each condition has at most two planning slots. An invalid direct plan
+or story consumes its slot. Each valid plan or story receives at most one tactic call, and Lean
+checks every submitted tactic. Random and ranked analogy reuse byte-identical raw story candidates;
+they differ only in seeded-random versus structural ordering. Realized model and verifier calls are
+reported because a successful candidate can end an intervention early.
+
+Run or safely resume the nine trials with:
+
+```bash
+uv run python -m analogy evaluate --phase probe --config config.yaml
+```
+
+The combined `manifest.json` and `report.md` appear under
+`.artifacts/evaluations/<evaluation-id>/`. Each manifest references the nine ordinary solve-run
+directories, records input and environment hashes, and refuses completion when the three arms have
+different ordinary prefixes or the two analogy arms have different story-candidate hashes.

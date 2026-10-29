@@ -11,46 +11,12 @@ from typing import Any, Callable
 
 from ..config import ModelConfig
 from .model_provider import (
-    CompletionActivationTrace, CompletionScore, LayerActivation, ModelConfigurationError,
-    _encode_completion, _finite_delta_values, _render_completion_prompt,
-    _resolve_decoder_layers, _validate_capture_layers,
+    CompletionScore,
+    ModelConfigurationError,
+    _encode_completion,
+    _render_completion_prompt,
 )
 from ..utils.records import Embedding, Message
-
-
-class _DeltaLayer:
-    def __init__(
-        self, inner: Any, delta: Any, mx: Any, *, prompt_tokens: int
-    ) -> None:
-        self.inner = inner
-        self.delta = delta
-        self.mx = mx
-        self.prompt_tokens = prompt_tokens
-        self.tokens_seen = 0
-        self.applied = False
-
-    def __call__(self, hidden: Any, mask: Any = None, cache: Any = None) -> Any:
-        output = self.inner(hidden, mask, cache)
-        width = int(hidden.shape[1])
-        start = self.tokens_seen
-        self.tokens_seen += width
-        if not self.applied and start < self.prompt_tokens <= self.tokens_seen:
-            index = self.prompt_tokens - start - 1
-            delta = (
-                self.delta.astype(output.dtype)
-                if hasattr(self.delta, "astype")
-                else self.delta.to(dtype=output.dtype)
-            )
-            output = self.mx.concatenate(
-                [
-                    output[:, :index, :],
-                    output[:, index : index + 1, :] + delta,
-                    output[:, index + 1 :, :],
-                ],
-                axis=1,
-            )
-            self.applied = True
-        return output
 
 
 def _load_exact_model(
@@ -187,106 +153,12 @@ class MLXQwenGenerator:
             layers[0] = original
         return GenerationResult(text, counter.positions or None, None if counter.positions else "no measured decoder steps")
 
-    @property
-    def decoder_layer_count(self) -> int:
-        return len(self._layers())
-
-    def resolve_decoder_layers(self, count: int, *, through: int) -> tuple[int, ...]:
-        return _resolve_decoder_layers(count, through=through, depth=self.decoder_layer_count)
-
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int:
         prompt_ids, completion_ids = _encode_completion(self.tokenizer, messages, completion, allow_empty=True)
         return len(prompt_ids) + len(completion_ids)
 
     def estimate_generation_positions(self, messages: tuple[Message, ...]) -> int:
         return len(self._generation_prompt_tokens(messages)) + self.max_new_tokens
-
-    def capture_completion_trace(
-        self, messages: tuple[Message, ...], completion: str, *, layers: tuple[int, ...]
-    ) -> CompletionActivationTrace:
-        layers = _validate_capture_layers(layers, self.decoder_layer_count)
-        prompt_ids, completion_ids = _encode_completion(self.tokenizer, messages, completion)
-        width = len(prompt_ids) + len(completion_ids)
-        core = self.model.model
-        embed_tokens = getattr(core, "embed_tokens", None)
-        if embed_tokens is None:
-            raise ModelConfigurationError("MLX model does not expose token embeddings")
-        started = time.monotonic()
-        hidden = embed_tokens(self.mx.array([prompt_ids + completion_ids]))
-        mask = self._create_attention_mask(hidden, None)
-        pooled = {}
-        for index, decoder_layer in enumerate(self._layers()):
-            hidden = decoder_layer(hidden, mask, None)
-            if index in layers:
-                if hidden.ndim != 3 or tuple(hidden.shape) != (1, width, self.hidden_size):
-                    raise ModelConfigurationError("decoder output has invalid activation dimensions")
-                completion_hidden = hidden[0, len(prompt_ids):width]
-                completion_hidden = (
-                    completion_hidden.astype(self.mx.float32)
-                    if hasattr(completion_hidden, "astype") else completion_hidden.float()
-                )
-                pooled[index] = completion_hidden.mean(axis=0)
-        # Force the entire manual decoder walk, including blocks after the last
-        # requested output, before charging it as one full sequence pass.
-        self.mx.eval(hidden, *pooled.values())
-        activations = tuple(LayerActivation(index, tuple(pooled[index].tolist())) for index in layers)
-        # A separate logit pass preserves the backend's native final norm/head.
-        score = self.score_completions(messages, (completion,))[0]
-        if time.monotonic() - started >= self.timeout_seconds:
-            raise TimeoutError(f"completion capture exceeded {self.timeout_seconds:g} seconds")
-        return CompletionActivationTrace(score, activations, len(completion_ids), 2 * width)
-
-    def score_completion_with_delta(
-        self, messages: tuple[Message, ...], completion: str, *, delta: tuple[float, ...], layer: int
-    ) -> CompletionScore:
-        values = _finite_delta_values(delta, size=self.hidden_size)
-        layers = self._layers()
-        resolved = _resolve_layer(layer, len(layers))
-        prompt_ids, _ = _encode_completion(self.tokenizer, messages, completion)
-        original = layers[resolved]
-        # The existing wrapper tracks absolute positions across calls. On this
-        # full teacher-forced call it patches only len(prompt_ids) - 1, even
-        # though completion inputs are present in the same sequence.
-        wrapper = _DeltaLayer(original, self.mx.array(values), self.mx, prompt_tokens=len(prompt_ids))
-        layers[resolved] = wrapper
-        try:
-            score = self.score_completions(messages, (completion,))[0]
-            if not wrapper.applied:
-                raise ModelConfigurationError("model did not execute intervention layer")
-            return score
-        finally:
-            layers[resolved] = original
-
-    def generate_with_delta(
-        self,
-        messages: tuple[Message, ...],
-        *,
-        delta: Any,
-        layer: int,
-        seed: int,
-    ) -> str:
-        values = self._delta_values(delta)
-        prompt_tokens = self._generation_prompt_tokens(messages)
-        layers = self._layers()
-        resolved = _resolve_layer(layer, len(layers))
-        mlx_delta = self.mx.array(values)
-        original = layers[resolved]
-        wrapper = _DeltaLayer(
-            original,
-            mlx_delta,
-            self.mx,
-            prompt_tokens=len(prompt_tokens),
-        )
-        layers[resolved] = wrapper
-        try:
-            output = self._run_generation(prompt_tokens, seed=seed)
-            if not wrapper.applied:
-                raise ModelConfigurationError(
-                    "MLX generation did not reach the final prompt token"
-                )
-            return output
-        finally:
-            layers[resolved] = original
 
     def embed_text(self, text: str, *, layer: int) -> Embedding:
         return self._embed_text_pooled(text, layer=layer, pooling="last")
@@ -486,26 +358,6 @@ class MLXQwenGenerator:
                 "MLX model does not expose mutable decoder layers"
             )
         return layers
-
-    def _delta_values(self, delta: Any) -> tuple[float, ...]:
-        ndim = getattr(delta, "ndim", None)
-        if ndim != 1:
-            raise ModelConfigurationError(
-                "latent delta must be a one-dimensional tensor"
-            )
-        detached = delta.detach() if hasattr(delta, "detach") else delta
-        if hasattr(detached, "cpu"):
-            detached = detached.cpu()
-        raw = detached.tolist() if hasattr(detached, "tolist") else list(detached)
-        values = tuple(float(item) for item in raw)
-        if len(values) != self.hidden_size:
-            raise ModelConfigurationError(
-                "latent delta dimension must match model hidden size"
-            )
-        if not all(math.isfinite(item) for item in values):
-            raise ModelConfigurationError("latent delta must be finite")
-        return values
-
 
 def _resolve_layer(layer: int, count: int) -> int:
     if isinstance(layer, bool) or not isinstance(layer, int):

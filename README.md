@@ -32,7 +32,7 @@ hypothesis operational.
 
 ## Basic control flow
 
-All three evaluation conditions start with the same vanilla solver. They differ in what happens
+Both evaluation conditions start with the same vanilla solver. They differ in what happens
 after that solver runs out of useful tactics at a state.
 
 ```text
@@ -45,8 +45,7 @@ problem
        -> deterministic move available: try it, then resume vanilla search
        -> model intervention required:
             deliberation control -> direct proof plan -> tactic -> Lean
-            random analogy       -> shared story revisions -> seeded order -> tactic -> Lean
-            ranked analogy       -> shared story revisions -> structural order -> tactic -> Lean
+            ranked analogy       -> several story revisions -> structural ranking -> tactic -> Lean
 ```
 
 Any intervention tactic accepted by Lean produces an ordinary proof state and returns control to the
@@ -228,7 +227,7 @@ embeddings. The structural scorer uses the packaged layer-12 calibration from th
 revision `a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4`. [`config.yaml`](config.yaml) provides a complete
 14B default setup, and [`prompts.yaml`](prompts.yaml) contains every model-facing prompt.
 
-All three evaluation conditions share ordinary search, deterministic moves, SAT checks, Lean verification, and the
+Both evaluation conditions share ordinary search, deterministic moves, SAT checks, Lean verification, and the
 intervention-generation envelope. Analogy also performs structural embedding and ranking; later
 search work varies with the proof states produced by each intervention. Run both conditions on the
 30-problem corpus with:
@@ -242,26 +241,26 @@ Each command writes `report.md`, `run.json`, and per-problem records under
 `.artifacts/runs/solve/<run-id>/`. Current run records retain the effective configuration, model
 revisions, file hashes, run seed, and individual generation seeds.
 
-## Run the three-condition probe
+## Run the two-condition probe
 
-The probe runs three fixed PropL cases under direct deliberation, seeded-random analogy, and
-structurally ranked analogy. It is a plumbing and reproducibility check rather than an efficacy
-estimate. Every condition uses seed `0`, the same Qwen3-14B-4bit instance, the same Lean verifier,
-and the same ordered problems.
+The probe runs three fixed PropL cases under direct deliberation and structurally ranked analogy. It
+is a plumbing and reproducibility check rather than an efficacy estimate. Both conditions use seed
+`0`, the same Qwen3-14B-4bit instance, the same Lean verifier, and the same ordered problems.
 
-At a recoverable stuck state, each condition has at most two planning slots. An invalid direct plan
-or story consumes its slot. Each valid plan or story receives at most one tactic call, and Lean
-checks every submitted tactic. Random and ranked analogy reuse byte-identical raw story candidates;
-they differ only in seeded-random versus structural ordering. Realized model and verifier calls are
-reported because a successful candidate can end an intervention early.
+At the first recoverable stuck state, the analogy condition uses its planning slots to generate
+several story revisions, scores their transition structures, and submits the tactic from the
+highest-ranked valid story to the live search. Tactics implied by the unused stories are checked in
+isolation and logged as counterfactual evidence; they never change the search. The direct condition
+uses the same ordinary solver and intervention envelope without a story. Realized model calls,
+verifier calls, selected scores, and counterfactual outcomes are recorded.
 
-Run or safely resume the nine trials with:
+Run or safely resume the six trials with:
 
 ```bash
 uv run python -m analogy evaluate --phase probe --config config.yaml
 ```
 
 The combined `manifest.json` and `report.md` appear under
-`.artifacts/evaluations/<evaluation-id>/`. Each manifest references the nine ordinary solve-run
-directories, records input and environment hashes, and refuses completion when the three arms have
-different ordinary prefixes or the two analogy arms have different story-candidate hashes.
+`.artifacts/evaluations/<evaluation-id>/`. Each manifest references the six ordinary solve-run
+directories, records input and environment hashes, and refuses completion when the two arms have
+different ordinary prefixes or the analogy arm lacks its initial candidate and selection evidence.

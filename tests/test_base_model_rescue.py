@@ -45,7 +45,11 @@ from analogy.solver.analogy.protocol import (
     render_mental_model,
     render_scratchpad_context,
 )
-from analogy.solver.analogy.harness import initialize_story_model
+from analogy.solver.analogy.harness import (
+    EqualAnalogyScorer,
+    initialize_analogy_harness,
+    initialize_story_model,
+)
 from analogy.solver.analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
@@ -352,6 +356,54 @@ def test_initial_story_generation_reuses_raw_candidate_across_conditions(tmp_pat
     assert first_cache["cache_hit"] is False
     assert second_cache["cache_hit"] is True
     assert first_cache["candidate_sha256"] == second_cache["candidate_sha256"]
+
+
+def test_initial_harness_keeps_every_valid_story_candidate(tmp_path):
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    base = load_config(ROOT / "config.yaml")
+    config = replace(
+        base,
+        analogy=replace(base.analogy, max_model_calls=2),
+        run=replace(base.run, output_dir=tmp_path),
+    )
+
+    class Generator:
+        model_revision = "shared@abc"
+
+        def generate(self, messages, *, seed):
+            if "Current focused Lean proof state" in messages[-1].content:
+                return _tactic_response("exact h")
+            transition = "the cook opens the first container"
+            if seed == config.run.seed + 1:
+                transition = "the cook follows the shorter preparation route"
+            return _mental_response(
+                "cooking or restaurant preparation", transition, "exact h"
+            )
+
+    class Proof:
+        def failed_tactics_for(self, _state_id):
+            return ()
+
+    harness = initialize_analogy_harness(
+        config,
+        Generator(),
+        Proof(),
+        [],
+        SymbolicState("stuck", "P : Prop\nh : P\n⊢ P", "lean4"),
+        SymbolicState("goal", "⊢ P", "lean4"),
+        proof_belief=_proof_belief(),
+        scorer=EqualAnalogyScorer(),
+        max_story_attempts=2,
+    )
+
+    assert [track.id for track in harness.tracks] == ["analogy-1", "analogy-2"]
+    assert [
+        track.scratchpad.current.correspondences[0].domain_transition
+        for track in harness.tracks
+    ] == [
+        "the cook opens the first container",
+        "the cook follows the shorter preparation route",
+    ]
 
 
 def test_recovery_story_cache_shares_candidates_but_never_tactics(

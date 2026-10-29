@@ -62,34 +62,47 @@ def _write_probe_trial_artifact(
         winning_analogy = 0
         winning_deliberation = 1
     else:
-        cache_hit = condition == "random_analogy"
         events.extend(
             (
                 {
                     "kind": "analogy_story_candidate_cache",
-                    "phase": "recovery",
+                    "phase": "initialization",
                     "state_id": f"{problem_id}:stuck",
                     "generation_index": 0,
-                    "cache_hit": cache_hit,
+                    "cache_hit": False,
                     "candidate_sha256": candidate_hashes[0],
                 },
                 {
-                    "kind": "analogy_recovery_story_call",
+                    "kind": "analogy_initialization_call",
                     "seed": 1,
                 },
                 {
                     "kind": "analogy_story_candidate_cache",
-                    "phase": "recovery",
+                    "phase": "initialization",
                     "state_id": f"{problem_id}:stuck",
                     "generation_index": 1,
-                    "cache_hit": cache_hit,
+                    "cache_hit": False,
                     "candidate_sha256": candidate_hashes[1],
                 },
                 {
-                    "kind": "analogy_recovery_story_call",
+                    "kind": "analogy_initialization_call",
                     "seed": 2,
                 },
-                {"kind": "analogy_recovery_tactic_call", "seed": 3},
+                {"kind": "analogy_initial_tactic_call", "seed": 3},
+                {
+                    "kind": "analogy_initial_selection",
+                    "state_id": f"{problem_id}:stuck",
+                    "selected_track_id": "analogy-2",
+                    "scores": [
+                        {"track_id": "analogy-1", "score": -0.4},
+                        {"track_id": "analogy-2", "score": -0.2},
+                    ],
+                },
+                {
+                    "kind": "analogy_initial_counterfactual",
+                    "track_id": "analogy-1",
+                    "accepted": True,
+                },
             )
         )
         analogy_count = 1
@@ -331,14 +344,33 @@ def test_assisted_stuck_loop_initializes_for_exact_rescue_state(
     tmp_path, monkeypatch
 ) -> None:
     calls = []
+    verifier_calls = []
     first = SimpleNamespace(
-        id="first", scratchpad=object(), tactic_generator=object(), fallback=object()
+        id="first",
+        scratchpad=object(),
+        tactic_generator=object(),
+        fallback=object(),
+        initial_proposal=SimpleNamespace(
+            candidate=SimpleNamespace(source="left"), predicted_state="left state"
+        ),
     )
-    harness = SimpleNamespace(tracks=(first,))
+    second = SimpleNamespace(
+        id="second",
+        scratchpad=object(),
+        tactic_generator=object(),
+        fallback=object(),
+        initial_proposal=SimpleNamespace(
+            candidate=SimpleNamespace(source="right"), predicted_state="right state"
+        ),
+    )
+    harness = SimpleNamespace(
+        tracks=(first, second), scorer=object(), prepared_recoveries=frozenset()
+    )
 
     class FakeLean:
         def __init__(self, problem, verifier):
-            pass
+            self.problem = problem
+            self.verifier = verifier
 
         def initial_state(self):
             return SymbolicState("initial", "P : Prop\n⊢ P", "lean4")
@@ -370,6 +402,15 @@ def test_assisted_stuck_loop_initializes_for_exact_rescue_state(
         return harness
 
     monkeypatch.setattr(run_module, "initialize_analogy_harness", initialize_harness)
+    monkeypatch.setattr(
+        run_module,
+        "score_analogies",
+        lambda _search, _harness: (
+            SimpleNamespace(track=first, score=-0.7),
+            SimpleNamespace(track=second, score=-0.2),
+        ),
+    )
+    monkeypatch.setattr(run_module, "select_analogy", lambda _scored: second)
     monkeypatch.setattr(
         run_module,
         "update_analogies",
@@ -421,7 +462,16 @@ def test_assisted_stuck_loop_initializes_for_exact_rescue_state(
     config = replace(config, run=replace(config.run, output_dir=tmp_path))
     problem = Problem("p", "demo", "", "P", "test", "test", "atom", 1)
 
-    run_analogy_assisted(config, (problem,), object(), object())
+    diagnostic = SimpleNamespace(to_dict=lambda: {"message": "open"})
+    verifier = SimpleNamespace(
+        try_tactic=lambda *_args: verifier_calls.append(_args) or SimpleNamespace(
+            status=SimpleNamespace(value="open"),
+            accepted=True,
+            duration_ms=1,
+            diagnostics=(diagnostic,),
+        )
+    )
+    run_analogy_assisted(config, (problem,), object(), verifier)
 
     lifecycle = {
         "activate",
@@ -435,10 +485,13 @@ def test_assisted_stuck_loop_initializes_for_exact_rescue_state(
         "submit_rescue",
     ]
     assert ("initialize_analogy", FakeSearch.rescue_node.state) in calls
-    assert ("activate", first) in calls
-    assert ("rescue", first.scratchpad, {}) in calls
+    assert ("activate", second) in calls
+    assert ("rescue", second.scratchpad, {}) in calls
+    assert [arguments[-1] for arguments in verifier_calls] == ["left"]
     assert len([item for item in calls if item[0] == "initialize_analogy"]) == 1
-    assert calls.count(("update_analogies", harness)) == 2
+    updated = [item[1] for item in calls if item[0] == "update_analogies"]
+    assert len(updated) == 2
+    assert all(value.tracks == (second,) for value in updated)
     assert len([item for item in calls if item[0] == "submit_rescue"]) == 2
 
 
@@ -680,7 +733,7 @@ def test_run_artifact_records_effective_config_hashes_and_model_revisions(
     }
 
 
-def test_probe_runs_nine_unique_trials_with_shared_order_and_resumes(
+def test_probe_runs_six_unique_trials_with_shared_order_and_resumes(
     tmp_path,
 ):
     base = load_config(ROOT / "config.yaml")
@@ -727,20 +780,20 @@ def test_probe_runs_nine_unique_trials_with_shared_order_and_resumes(
 
     assert first.complete is True
     assert second.complete is True
-    assert len(calls) == 9
-    assert len({(condition, problem) for condition, problem, *_ in calls}) == 9
+    assert len(calls) == 6
+    assert len({(condition, problem) for condition, problem, *_ in calls}) == 6
     for condition in CONDITIONS:
         assert [problem for item, problem, *_ in calls if item == condition] == list(
             PROBE_PROBLEM_IDS
         )
     assert {seed for _, _, seed, *_ in calls} == {0}
-    assert len({signature for _, _, _, signature, *_ in calls}) == 3
+    assert len({signature for _, _, _, signature, *_ in calls}) == 2
     assert {model_id for *_, model_id, _ in calls} == {id(model)}
     assert {verifier_id for *_, verifier_id in calls} == {id(verifier)}
     manifest = json.loads(
         (first.output_directory / "manifest.json").read_text(encoding="utf-8")
     )
-    assert len(manifest["trials"]) == 9
+    assert len(manifest["trials"]) == 6
 
 
 def test_probe_config_hash_ignores_machine_specific_output_path(tmp_path):
@@ -787,7 +840,7 @@ def test_probe_marks_executor_failure_incomplete_and_returns_nonzero_status(
     )
 
     def execute(condition, trial_config, problem, model, verifier, checkpoint):
-        if condition == "random_analogy" and problem.id == PROBE_PROBLEM_IDS[1]:
+        if condition == "ranked_analogy" and problem.id == PROBE_PROBLEM_IDS[1]:
             raise RuntimeError("remote process ended")
         return _write_probe_trial_artifact(
             tmp_path / "solve", condition, problem.id
@@ -893,11 +946,12 @@ def test_probe_report_validates_pairing_and_aggregates_realized_calls(tmp_path):
     assert manifest["metrics"]["ranked_analogy"]["rescued"] == 3
     assert manifest["metrics"]["ranked_analogy"]["intervention_submissions"] == 3
     assert manifest["metrics"]["ranked_analogy"]["realized_model_calls"] == 12
-    assert manifest["metrics"]["random_analogy"]["realized_model_calls"] == 6
+    assert manifest["metrics"]["ranked_analogy"]["counterfactual_tactics"] == 3
+    assert manifest["metrics"]["ranked_analogy"]["counterfactual_tactics_accepted"] == 3
     assert (record.output_directory / "report.md").is_file()
 
 
-@pytest.mark.parametrize("mismatch", ("candidate", "prefix", "missing_candidate"))
+@pytest.mark.parametrize("mismatch", ("prefix", "missing_candidate"))
 def test_probe_report_rejects_candidate_or_first_stuck_mismatch(tmp_path, mismatch):
     base = load_config(ROOT / "config.yaml")
     config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
@@ -922,19 +976,12 @@ def test_probe_report_rejects_candidate_or_first_stuck_mismatch(tmp_path, mismat
     target = next(
         trial
         for trial in manifest["trials"]
-        if trial["condition"] == "random_analogy"
+        if trial["condition"] == "ranked_analogy"
         and trial["problem_id"] == PROBE_PROBLEM_IDS[0]
     )
     artifact = Path(target["run_directory"]) / f"{PROBE_PROBLEM_IDS[0]}.json"
     payload = json.loads(artifact.read_text(encoding="utf-8"))
-    if mismatch == "candidate":
-        cache_event = next(
-            event
-            for event in payload["model_events"]
-            if event["kind"] == "analogy_story_candidate_cache"
-        )
-        cache_event["candidate_sha256"] = "f" * 64
-    elif mismatch == "missing_candidate":
+    if mismatch == "missing_candidate":
         payload["model_events"] = [
             event
             for event in payload["model_events"]

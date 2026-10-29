@@ -81,6 +81,7 @@ class AnalogyTrack:
     tactic_generator: TacticGenerator
     fallback: AnalogyFallback
     initialization: AnalogyInitializationTrace
+    initial_proposal: RescueProposal
 
     def __post_init__(self) -> None:
         if self.tactic_generator.analogy_scratchpad is not self.scratchpad:
@@ -161,6 +162,59 @@ def initialize_story_model(
 ) -> tuple[MentalModel, AnalogyInitializationTrace]:
     """Generate, validate, reconstruct, and score an identifier-blind story."""
 
+    return _initialize_story_models(
+        config,
+        generator,
+        model_events,
+        state_id,
+        proof_belief,
+        required_domain=required_domain,
+        max_story_attempts=max_story_attempts,
+        skip_expensive_score=skip_expensive_score,
+        collect_all=False,
+    )[0]
+
+
+def initialize_story_models(
+    config: AppConfig,
+    generator: TextGenerator,
+    model_events: list[dict[str, Any]],
+    state_id: str,
+    proof_belief: ProofBelief,
+    *,
+    required_domain: str = ANALOGY_DOMAINS[0],
+    max_story_attempts: int = 2,
+    skip_expensive_score: bool = False,
+) -> tuple[tuple[MentalModel, AnalogyInitializationTrace], ...]:
+    """Generate every valid initial story within the fixed call budget."""
+
+    return _initialize_story_models(
+        config,
+        generator,
+        model_events,
+        state_id,
+        proof_belief,
+        required_domain=required_domain,
+        max_story_attempts=max_story_attempts,
+        skip_expensive_score=skip_expensive_score,
+        collect_all=True,
+    )
+
+
+def _initialize_story_models(
+    config: AppConfig,
+    generator: TextGenerator,
+    model_events: list[dict[str, Any]],
+    state_id: str,
+    proof_belief: ProofBelief,
+    *,
+    required_domain: str,
+    max_story_attempts: int,
+    skip_expensive_score: bool,
+    collect_all: bool,
+) -> tuple[tuple[MentalModel, AnalogyInitializationTrace], ...]:
+    """Shared implementation for first-valid and full-cohort initialization."""
+
     if max_story_attempts not in {1, 2}:
         raise ValueError("max_story_attempts must be one or two")
     trajectory = proof_trajectory(proof_belief)
@@ -195,6 +249,7 @@ def initialize_story_model(
     )
     prompt_sha256 = file_sha256(config.prompts.path)
     corpus_sha256 = file_sha256(config.benchmark.corpus)
+    valid: list[tuple[MentalModel, AnalogyInitializationTrace]] = []
     for index in range(max_story_attempts):
         seed = config.run.seed + index
         raw_text: str | None = None
@@ -270,8 +325,15 @@ def initialize_story_model(
             state,
             proof_belief,
             skip_expensive_score=skip_expensive_score,
+            generation_index=index,
         )
-        return state, trace
+        valid.append((state, trace))
+        if not collect_all:
+            return tuple(valid)
+        active_messages = base_messages
+        previous_error_class = None
+    if valid:
+        return tuple(valid)
     raise AnalogyStoryInitializationError(
         "no valid analogies were generated"
         + (f"; last diagnostic class: {previous_error_class}" if previous_error_class else "")
@@ -291,11 +353,11 @@ def initialize_analogy_harness(
     analogy_generator: TextGenerator | None = None,
     max_story_attempts: int = 2,
 ) -> AnalogyHarness:
-    """Generate one validated analogy shared by search and recovery."""
+    """Generate a cohort of validated analogies for first-stuck selection."""
 
     analogy_generator = analogy_generator or generator
     required_domain = ANALOGY_DOMAINS[0]
-    state, valid_trace = initialize_story_model(
+    initialized = initialize_story_models(
         config,
         analogy_generator,
         model_events,
@@ -305,57 +367,74 @@ def initialize_analogy_harness(
         max_story_attempts=max_story_attempts,
         skip_expensive_score=scorer is not None,
     )
-    tactic_messages = prompt_catalog().messages(
-        "analogy_initial_tactic",
-        overall_target=render_lean_goal_for_model(goal_state.expression),
-        current_goals=render_lean_goal_for_model(
-            focused_lean_goal(initial_state.expression)
-        ),
-        mental_model=render_mental_model(state),
-        tactic_card=lean_tactic_card(initial_state.expression),
-    )
-    tactic_seed = config.run.seed + 10_000
-    raw_tactic = analogy_generator.generate(tactic_messages, seed=tactic_seed)
-    try:
-        proposal = _parse_initial_tactic(raw_tactic, initial_state.expression)
-    except Exception as error:
+    tracks: list[AnalogyTrack] = []
+    for state, valid_trace in initialized:
+        generation_index = valid_trace.seed - config.run.seed
+        track_id = f"analogy-{generation_index + 1}"
+        tactic_messages = prompt_catalog().messages(
+            "analogy_initial_tactic",
+            overall_target=render_lean_goal_for_model(goal_state.expression),
+            current_goals=render_lean_goal_for_model(
+                focused_lean_goal(initial_state.expression)
+            ),
+            mental_model=render_mental_model(state),
+            tactic_card=lean_tactic_card(initial_state.expression),
+        )
+        tactic_seed = config.run.seed + 10_000 + generation_index
+        raw_tactic = analogy_generator.generate(tactic_messages, seed=tactic_seed)
+        try:
+            proposal = _parse_initial_tactic(raw_tactic, initial_state.expression)
+        except Exception as error:
+            model_events.append({
+                "kind": "analogy_initial_tactic_call",
+                "track_id": track_id,
+                "generation_index": generation_index,
+                "state_id": initial_state.id,
+                "seed": tactic_seed,
+                "messages": _messages_payload(tactic_messages),
+                "raw_text": raw_tactic,
+                "status": "invalid",
+                "diagnostic": f"{type(error).__name__}: {error}",
+            })
+            continue
         model_events.append({
             "kind": "analogy_initial_tactic_call",
+            "track_id": track_id,
+            "generation_index": generation_index,
             "state_id": initial_state.id,
             "seed": tactic_seed,
             "messages": _messages_payload(tactic_messages),
             "raw_text": raw_tactic,
-            "status": "invalid",
-            "diagnostic": f"{type(error).__name__}: {error}",
+            "status": "valid",
+            "tactic": proposal.candidate.source,
         })
+        scratchpad = AnalogyScratchpad(state)
+        tactic_generator = initialize_tactic_generator(
+            config, generator, proof, model_events, analogy_scratchpad=scratchpad
+        )
+        fallback = initialize_analogy_fallback(
+            config,
+            analogy_generator,
+            model_events,
+            scratchpad,
+            initial_proposal=proposal,
+            initial_state_id=initial_state.id,
+        )
+        tracks.append(AnalogyTrack(
+            track_id,
+            scratchpad,
+            tactic_generator,
+            fallback,
+            valid_trace,
+            proposal,
+        ))
+    if not tracks:
         raise AnalogyHarnessInitializationError(
-            f"initial analogy tactic was invalid: {error}"
-        ) from error
-    model_events.append({
-        "kind": "analogy_initial_tactic_call",
-        "state_id": initial_state.id,
-        "seed": tactic_seed,
-        "messages": _messages_payload(tactic_messages),
-        "raw_text": raw_tactic,
-        "status": "valid",
-        "tactic": proposal.candidate.source,
-    })
-    scratchpad = AnalogyScratchpad(state)
-    tactic_generator = initialize_tactic_generator(
-        config, generator, proof, model_events, analogy_scratchpad=scratchpad
+            "no valid initial analogy tactics were generated"
+        )
+    return AnalogyHarness(
+        tuple(tracks), scorer or StructuralAnalogyScorer(generator)
     )
-    fallback = initialize_analogy_fallback(
-        config,
-        analogy_generator,
-        model_events,
-        scratchpad,
-        initial_proposal=proposal,
-        initial_state_id=initial_state.id,
-    )
-    track = AnalogyTrack(
-        "analogy-1", scratchpad, tactic_generator, fallback, valid_trace
-    )
-    return AnalogyHarness((track,), scorer or StructuralAnalogyScorer(generator))
 
 
 def score_analogies(
@@ -464,6 +543,7 @@ def _record_initial_structural_score(
     belief: ProofBelief,
     *,
     skip_expensive_score: bool,
+    generation_index: int,
 ) -> None:
     if skip_expensive_score:
         model_events.append({
@@ -471,6 +551,7 @@ def _record_initial_structural_score(
             "alignment_kind": "fixed_order",
             "phase": "initialization",
             "state_id": state_id,
+            "generation_index": generation_index,
             "domain": model.domain,
             "distance": 0.0,
             "coupling": [],
@@ -489,6 +570,7 @@ def _record_initial_structural_score(
         "alignment_kind": "fixed_order",
         "phase": "initialization",
         "state_id": state_id,
+        "generation_index": generation_index,
         "domain": model.domain,
         "distance": fit.distance,
         "discriminative": fit.discriminative,
@@ -510,6 +592,7 @@ __all__ = [
     "activate_analogy",
     "initialize_analogy_harness",
     "initialize_story_model",
+    "initialize_story_models",
     "score_analogies",
     "select_analogy",
     "update_analogies",

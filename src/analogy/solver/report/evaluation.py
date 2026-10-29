@@ -107,19 +107,11 @@ def finalize_evaluation(path: Path) -> EvaluationRecord:
                     f"first-stuck prefix mismatch for {problem_id}: {prefixes}"
                 )
         try:
-            ranked = _first_candidate_set(
+            _first_selection_evidence(
                 condition_evidence["ranked_analogy"]["problem"]
-            )
-            random = _first_candidate_set(
-                condition_evidence["random_analogy"]["problem"]
             )
         except ValueError as error:
             errors.append(f"candidate evidence missing for {problem_id}: {error}")
-        else:
-            if ranked != random:
-                errors.append(
-                    f"candidate set mismatch for {problem_id}: ranked={ranked}, random={random}"
-                )
 
     metrics = {
         condition: _condition_metrics(
@@ -187,6 +179,7 @@ def _first_candidate_set(problem: dict[str, Any]) -> tuple[tuple[int, str], ...]
         for item in events
         if isinstance(item, dict)
         and item.get("kind") == "analogy_story_candidate_cache"
+        and item.get("phase") == "initialization"
     ]
     if not candidates:
         raise ValueError("missing analogy candidate hashes")
@@ -198,10 +191,26 @@ def _first_candidate_set(problem: dict[str, Any]) -> tuple[tuple[int, str], ...]
     )
 
 
+def _first_selection_evidence(problem: dict[str, Any]) -> dict[str, Any]:
+    candidates = _first_candidate_set(problem)
+    if len(candidates) < 2:
+        raise ValueError("fewer than two initial analogy candidates")
+    selections = [
+        item
+        for item in problem.get("model_events", [])
+        if isinstance(item, dict)
+        and item.get("kind") == "analogy_initial_selection"
+    ]
+    if len(selections) != 1:
+        raise ValueError("expected exactly one initial analogy selection")
+    return selections[0]
+
+
 def _condition_metrics(
     evidence: tuple[dict[str, Any], ...], condition: str
 ) -> dict[str, Any]:
     solved = rescued = submissions = winning = verifier_calls = model_calls = 0
+    counterfactuals = counterfactual_accepts = 0
     for value in evidence:
         problem = value["problem"]
         outcome = problem.get("outcome", {})
@@ -223,6 +232,16 @@ def _condition_metrics(
             for rollout in search.get("rescue_rollouts", [])
         )
         events = problem.get("model_events", [])
+        counterfactual_events = [
+            event
+            for event in events
+            if isinstance(event, dict)
+            and event.get("kind") == "analogy_initial_counterfactual"
+        ]
+        counterfactuals += len(counterfactual_events)
+        counterfactual_accepts += sum(
+            event.get("accepted") is True for event in counterfactual_events
+        )
         model_calls += sum(
             isinstance(event, dict)
             and (
@@ -244,8 +263,10 @@ def _condition_metrics(
         "rescued": rescued,
         "intervention_submissions": submissions,
         "intervention_winning_path": winning,
-        "verifier_calls": verifier_calls,
+        "verifier_calls": verifier_calls + counterfactuals,
         "realized_model_calls": model_calls,
+        "counterfactual_tactics": counterfactuals,
+        "counterfactual_tactics_accepted": counterfactual_accepts,
     }
 
 

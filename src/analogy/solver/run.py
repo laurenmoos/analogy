@@ -16,6 +16,8 @@ from .analogy.harness import (
     AnalogyStoryInitializationError,
     activate_analogy,
     initialize_analogy_harness,
+    score_analogies,
+    select_analogy,
     update_analogies,
 )
 from .analogy.rescue import (
@@ -208,6 +210,18 @@ def run_analogy_assisted(
                                 proof_belief=build_proof_belief(search),
                                 analogy_generator=analogy_generator or generator,
                             )
+                            selected = _select_initial_analogy(
+                                search,
+                                analogies,
+                                proof,
+                                rescue_node.state,
+                                model_events,
+                            )
+                            analogies = AnalogyHarness(
+                                (selected,),
+                                analogies.scorer,
+                                analogies.prepared_recoveries,
+                            )
                         analogies = update_analogies(search, analogies)
                     except AnalogyStoryInitializationError:
                         failed_initializations.add(fingerprint)
@@ -235,6 +249,56 @@ def run_analogy_assisted(
     )
     write_run_record(run_state, run)
     return run
+
+
+def _select_initial_analogy(
+    search: SearchSession,
+    analogies: AnalogyHarness,
+    proof: LeanGymAdapter,
+    state: Any,
+    model_events: list[dict[str, Any]],
+) -> Any:
+    """Rank the initial cohort and evaluate unused tactics off the live path."""
+
+    scored = score_analogies(search, analogies)
+    selected = select_analogy(scored)
+    model_events.append({
+        "kind": "analogy_initial_selection",
+        "state_id": state.id,
+        "selected_track_id": selected.id,
+        "scores": [
+            {
+                "track_id": item.track.id,
+                "score": item.score,
+                "tactic": item.track.initial_proposal.candidate.source,
+            }
+            for item in scored
+        ],
+    })
+    for item in scored:
+        if item.track is selected:
+            continue
+        proposal = item.track.initial_proposal
+        result = proof.verifier.try_tactic(
+            proof.problem,
+            state.context,
+            proposal.candidate.source,
+        )
+        model_events.append({
+            "kind": "analogy_initial_counterfactual",
+            "state_id": state.id,
+            "track_id": item.track.id,
+            "score": item.score,
+            "tactic": proposal.candidate.source,
+            "predicted_state": proposal.predicted_state,
+            "verifier_status": result.status.value,
+            "accepted": result.accepted,
+            "duration_ms": result.duration_ms,
+            "diagnostics": [
+                diagnostic.to_dict() for diagnostic in result.diagnostics
+            ],
+        })
+    return selected
 
 
 def run_deliberation_assisted(

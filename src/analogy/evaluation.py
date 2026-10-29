@@ -1,4 +1,4 @@
-"""Three-condition probe orchestration with durable resume evidence."""
+"""Two-condition probe orchestration with durable resume evidence."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ PROBE_PROBLEM_IDS = (
 CONDITIONS = (
     "direct_deliberation",
     "ranked_analogy",
-    "random_analogy",
 )
 
 TrialExecutor = Callable[[str, AppConfig, Problem, Any, Any, Any], Any]
@@ -51,7 +50,7 @@ def execute_probe(
     evaluation_id: str | None = None,
     trial_executor: TrialExecutor | None = None,
 ) -> EvaluationRecord:
-    """Run or resume the fixed nine-trial probe."""
+    """Run or resume the fixed six-trial probe."""
 
     normalized = tuple(problems)
     problem_ids = tuple(problem.id for problem in normalized)
@@ -184,7 +183,7 @@ def _condition_config(config: AppConfig, condition: str) -> AppConfig:
     analogy = replace(
         config.analogy,
         enabled=condition != "direct_deliberation",
-        selection=("random" if condition == "random_analogy" else "structural"),
+        selection="structural",
     )
     return replace(
         config,
@@ -196,7 +195,7 @@ def _condition_config(config: AppConfig, condition: str) -> AppConfig:
 
 def _evaluation_identity(config: AppConfig, problems: tuple[Problem, ...]) -> str:
     payload = {
-        "protocol": "analogy-probe-v1",
+        "protocol": "analogy-probe-v2",
         "problem_ids": [problem.id for problem in problems],
         "conditions": CONDITIONS,
         "seed": 0,

@@ -26,52 +26,6 @@ class CompletionScore:
     token_count: int
 
 
-@dataclass(frozen=True, slots=True)
-class LayerActivation:
-    """Mean residual vector at a zero-based decoder block output (before norm)."""
-
-    layer: int
-    values: tuple[float, ...]
-
-    def __post_init__(self) -> None:
-        if isinstance(self.layer, bool) or not isinstance(self.layer, int) or self.layer < 0:
-            raise ModelConfigurationError("activation layer must be a nonnegative integer")
-        values = _finite_delta_values(self.values)
-        if not values:
-            raise ModelConfigurationError("activation vector must be nonempty")
-        object.__setattr__(self, "values", values)
-
-
-@dataclass(frozen=True, slots=True)
-class CompletionActivationTrace:
-    score: CompletionScore
-    activations: tuple[LayerActivation, ...]
-    completion_token_count: int
-    processed_token_positions: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.score, CompletionScore):
-            raise ModelConfigurationError("trace requires a completion score")
-        if not all(math.isfinite(value) for value in (self.score.total_log_likelihood, self.score.mean_log_likelihood)):
-            raise ModelConfigurationError("completion likelihood must be finite")
-        for value in (self.completion_token_count, self.processed_token_positions):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ModelConfigurationError("trace token counts must be positive integers")
-        if self.completion_token_count != self.score.token_count:
-            raise ModelConfigurationError("trace completion count must match score")
-        if self.processed_token_positions <= self.completion_token_count:
-            raise ModelConfigurationError("processed positions must include the prompt")
-        activations = tuple(self.activations)
-        if not activations or any(not isinstance(item, LayerActivation) for item in activations):
-            raise ModelConfigurationError("trace requires layer activations")
-        indices = tuple(item.layer for item in activations)
-        if indices != tuple(sorted(set(indices))):
-            raise ModelConfigurationError("activation layers must be unique and ordered")
-        if len({len(item.values) for item in activations}) != 1:
-            raise ModelConfigurationError("activation dimensions must agree")
-        object.__setattr__(self, "activations", activations)
-
-
 class TextGenerator(Protocol):
     def generate(self, messages: tuple[Message, ...], *, seed: int) -> str: ...
 
@@ -93,32 +47,12 @@ class ModelProvider(TextGenerator, Protocol):
     hidden_size: int
     model_revision: str
     timeout_seconds: float
-    decoder_layer_count: int
 
     def generate_with_usage(self, messages: tuple[Message, ...], *, seed: int) -> GenerationResult: ...
 
     def estimate_generation_positions(self, messages: tuple[Message, ...]) -> int: ...
 
-    def resolve_decoder_layers(self, count: int, *, through: int) -> tuple[int, ...]: ...
-
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int: ...
-
-    def capture_completion_trace(
-        self, messages: tuple[Message, ...], completion: str, *, layers: tuple[int, ...]
-    ) -> CompletionActivationTrace: ...
-
-    def score_completion_with_delta(
-        self, messages: tuple[Message, ...], completion: str, *, delta: tuple[float, ...], layer: int
-    ) -> CompletionScore: ...
-
-    def generate_with_delta(
-        self,
-        messages: tuple[Message, ...],
-        *,
-        delta: Any,
-        layer: int,
-        seed: int,
-    ) -> str: ...
 
     def embed_text(self, text: str, *, layer: int) -> Embedding: ...
 
@@ -264,13 +198,6 @@ class QwenGenerator:
             raise ModelConfigurationError("model does not expose decoder layers")
         return blocks
 
-    @property
-    def decoder_layer_count(self) -> int:
-        return len(self._decoder_layers())
-
-    def resolve_decoder_layers(self, count: int, *, through: int) -> tuple[int, ...]:
-        return _resolve_decoder_layers(count, through=through, depth=self.decoder_layer_count)
-
     def count_token_positions(self, messages: tuple[Message, ...], completion: str) -> int:
         prompt_ids, completion_ids = _encode_completion(self._tokenizer, messages, completion, allow_empty=True)
         return len(prompt_ids) + len(completion_ids)
@@ -280,140 +207,6 @@ class QwenGenerator:
         inputs = self._prepare_generation(messages)["input_ids"]
         width = int(inputs.shape[-1]) if hasattr(inputs, "shape") else len(inputs[0])
         return width + self._max_new_tokens
-
-    def capture_completion_trace(
-        self, messages: tuple[Message, ...], completion: str, *, layers: tuple[int, ...]
-    ) -> CompletionActivationTrace:
-        layers = _validate_capture_layers(layers, self.decoder_layer_count)
-        prompt_ids, completion_ids = _encode_completion(self._tokenizer, messages, completion)
-        width = len(prompt_ids) + len(completion_ids)
-        captured: dict[int, LayerActivation] = {}
-
-        def capture(index: int) -> Any:
-            def hook(_module: Any, _inputs: Any, output: Any) -> None:
-                hidden = output[0] if isinstance(output, tuple) else output
-                if hidden.ndim != 3 or tuple(hidden.shape) != (1, width, self.hidden_size):
-                    raise ModelConfigurationError("decoder output has invalid activation dimensions")
-                pooled = hidden[0, len(prompt_ids):width].detach().float().mean(dim=0)
-                captured[index] = LayerActivation(index, tuple(pooled.cpu().tolist()))
-            return hook
-
-        handles = []
-        started = time.monotonic()
-        try:
-            for index in layers:
-                handles.append(self._decoder_layers()[index].register_forward_hook(capture(index)))
-            inputs = self._torch.tensor([prompt_ids + completion_ids], dtype=self._torch.long, device=self._device)
-            with self._torch.no_grad():
-                output = self._model(
-                    input_ids=inputs, attention_mask=self._torch.ones_like(inputs),
-                    output_hidden_states=True, use_cache=False,
-                )
-            score = self._completion_score(output.logits, completion, prompt_ids, completion_ids)
-            if time.monotonic() - started >= self.timeout_seconds:
-                raise TimeoutError(f"completion capture exceeded {self.timeout_seconds:g} seconds")
-            if set(captured) != set(layers):
-                raise ModelConfigurationError("model did not execute all requested decoder layers")
-            return CompletionActivationTrace(score, tuple(captured[index] for index in layers), len(completion_ids), width)
-        finally:
-            for handle in handles:
-                handle.remove()
-
-    def _completion_score(
-        self, logits: Any, completion: str, prompt_ids: tuple[int, ...], completion_ids: tuple[int, ...]
-    ) -> CompletionScore:
-        if logits is None or logits.ndim != 3:
-            raise ModelConfigurationError("completion scorer requires rank-3 logits")
-        probabilities = self._torch.log_softmax(logits.float(), dim=-1)
-        scores = tuple(float(probabilities[0, len(prompt_ids) + offset - 1, token].item()) for offset, token in enumerate(completion_ids))
-        total = sum(scores)
-        return CompletionScore(completion, total, total / len(scores), len(scores))
-
-    def score_completion_with_delta(
-        self, messages: tuple[Message, ...], completion: str, *, delta: tuple[float, ...], layer: int
-    ) -> CompletionScore:
-        values = _finite_delta_values(delta, size=self.hidden_size)
-        blocks = self._decoder_layers()
-        resolved = _resolve_hidden_layer(layer, len(blocks))
-        prompt_ids, completion_ids = _encode_completion(self._tokenizer, messages, completion)
-        boundary = len(prompt_ids) - 1
-        applied = False
-
-        def inject(_module: Any, _inputs: Any, output: Any) -> Any:
-            nonlocal applied
-            if applied:
-                return output
-            hidden = output[0] if isinstance(output, tuple) else output
-            if hidden.ndim != 3 or tuple(hidden.shape) != (1, len(prompt_ids) + len(completion_ids), self.hidden_size):
-                raise ModelConfigurationError("decoder output has invalid patch dimensions")
-            changed = hidden.clone()
-            patch = self._torch.tensor(values, device=hidden.device, dtype=hidden.dtype)
-            changed[:, boundary, :] = changed[:, boundary, :] + patch
-            applied = True
-            return (changed, *output[1:]) if isinstance(output, tuple) else changed
-
-        handle = blocks[resolved].register_forward_hook(inject)
-        try:
-            score = self.score_completions(messages, (completion,))[0]
-            if not applied:
-                raise ModelConfigurationError("model did not execute intervention layer")
-            return score
-        finally:
-            handle.remove()
-
-    def generate_with_delta(
-        self,
-        messages: tuple[Message, ...],
-        *,
-        delta: Any,
-        layer: int,
-        seed: int,
-    ) -> str:
-        if not isinstance(delta, self._torch.Tensor) or delta.ndim != 1:
-            raise ModelConfigurationError(
-                "latent delta must be a one-dimensional Torch tensor"
-            )
-        if not bool(self._torch.isfinite(delta).all().item()):
-            raise ModelConfigurationError("latent delta must be finite")
-        blocks = getattr(getattr(self._model, "model", None), "layers", None)
-        if blocks is None:
-            raise ModelConfigurationError("model does not expose decoder layers")
-        resolved = _resolve_hidden_layer(layer, len(blocks))
-        hidden_size = getattr(getattr(self._model, "config", None), "hidden_size", None)
-        if hidden_size is None or int(hidden_size) != delta.numel():
-            raise ModelConfigurationError(
-                "latent delta dimension must match model hidden size"
-            )
-        model_inputs = self._prepare_generation(messages)
-        applied = False
-
-        def inject(_module: Any, _inputs: Any, output: Any) -> Any:
-            nonlocal applied
-            if applied:
-                return output
-            hidden = output[0] if isinstance(output, tuple) else output
-            if not isinstance(hidden, self._torch.Tensor) or hidden.ndim != 3:
-                raise ModelConfigurationError(
-                    "decoder layer hidden output must have rank 3"
-                )
-            if hidden.shape[0] != 1 or hidden.shape[-1] != delta.numel():
-                raise ModelConfigurationError(
-                    "latent delta batch or dimension does not match hidden output"
-                )
-            changed = hidden.clone()
-            changed[:, -1, :] = changed[:, -1, :] + delta.detach().to(
-                device=hidden.device, dtype=hidden.dtype
-            )
-            applied = True
-            if isinstance(output, tuple):
-                return (changed, *output[1:])
-            return changed
-
-        handle = blocks[resolved].register_forward_hook(inject)
-        try:
-            return self._run_generation(model_inputs, seed=seed)
-        finally:
-            handle.remove()
 
     def score_completions(
         self, messages: tuple[Message, ...], completions: tuple[str, ...]
@@ -616,40 +409,6 @@ def _resolve_hidden_layer(layer: int, count: int) -> int:
     return resolved
 
 
-def _resolve_decoder_layers(count: int, *, through: int, depth: int) -> tuple[int, ...]:
-    end = _resolve_hidden_layer(through, depth)
-    if isinstance(count, bool) or not isinstance(count, int) or count <= 0 or count > end + 1:
-        raise ModelConfigurationError("layer count must be positive and fit through the intervention layer")
-    if count == 1:
-        return (end,)
-    start = min(end // 2, end - count + 1)
-    return tuple(start + (end - start) * offset // (count - 1) for offset in range(count))
-
-
-def _validate_capture_layers(layers: tuple[int, ...], depth: int) -> tuple[int, ...]:
-    indices = tuple(layers)
-    if not indices or any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < depth for index in indices):
-        raise ModelConfigurationError("capture layers must be nonempty valid decoder indices")
-    if indices != tuple(sorted(set(indices))):
-        raise ModelConfigurationError("capture layers must be unique and ordered")
-    return indices
-
-
-def _finite_delta_values(delta: Any, *, size: int | None = None) -> tuple[float, ...]:
-    try:
-        raw = tuple(delta)
-        if any(isinstance(value, (bool, str, bytes)) for value in raw):
-            raise ValueError
-        values = tuple(float(value) for value in raw)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ModelConfigurationError("latent delta must contain finite numeric values") from error
-    if not all(math.isfinite(value) for value in values):
-        raise ModelConfigurationError("latent delta must be finite")
-    if size is not None and len(values) != size:
-        raise ModelConfigurationError("latent delta dimension must match model hidden size")
-    return values
-
-
 def _encode_completion(tokenizer: Any, messages: tuple[Message, ...], completion: str, *, allow_empty: bool = False) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if not isinstance(completion, str) or (not allow_empty and not completion.strip()):
         raise ModelConfigurationError("scoring completion must be nonempty")
@@ -696,9 +455,7 @@ def get_model_provider(config: ModelConfig) -> ModelProvider:
 
 __all__ = [
     "GenerationResult",
-    "CompletionActivationTrace",
     "CompletionScore",
-    "LayerActivation",
     "ModelConfigurationError",
     "ModelProvider",
     "QwenGenerator",

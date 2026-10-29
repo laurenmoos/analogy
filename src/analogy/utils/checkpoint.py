@@ -156,7 +156,14 @@ def load_checkpoint(
     active_condition = condition or (
         "analogy" if config.analogy.enabled else "ordinary"
     )
-    if active_condition not in {"ordinary", "deliberation", "analogy"}:
+    if active_condition not in {
+        "ordinary",
+        "deliberation",
+        "analogy",
+        "direct_deliberation",
+        "ranked_analogy",
+        "random_analogy",
+    }:
         raise ValueError(f"unknown solver condition {active_condition!r}")
     signature = _signature(config, active_condition)
     fingerprints = {

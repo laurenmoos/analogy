@@ -6,6 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from analogy.main import load_config
+from analogy.evaluation import (
+    CONDITIONS,
+    PROBE_PROBLEM_IDS,
+    execute_probe,
+    run_evaluation,
+)
 from analogy.lean_gym.models import Problem
 from analogy.model.prompts import PromptError
 from analogy.utils.checkpoint import load_checkpoint
@@ -27,9 +33,130 @@ from analogy.solver.proof.semantic import (
     SemanticRecoveryEvent,
     SemanticResult,
 )
+from analogy.solver.report.evaluation import finalize_evaluation
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def _write_probe_trial_artifact(
+    root,
+    condition,
+    problem_id,
+    *,
+    prefix="shared-prefix",
+    candidate_hashes=("a" * 64, "b" * 64),
+):
+    run_dir = root / f"{condition}-{problem_id}"
+    run_dir.mkdir(parents=True)
+    events = [{"kind": "model_call", "seed": 0}]
+    if condition == "direct_deliberation":
+        events.extend(
+            (
+                {"kind": "deliberation_plan_call", "seed": 1},
+                {"kind": "deliberation_tactic_call", "seed": 2},
+            )
+        )
+        analogy_count = 0
+        deliberation_count = 1
+        winning_analogy = 0
+        winning_deliberation = 1
+    else:
+        cache_hit = condition == "random_analogy"
+        events.extend(
+            (
+                {
+                    "kind": "analogy_story_candidate_cache",
+                    "phase": "recovery",
+                    "state_id": f"{problem_id}:stuck",
+                    "generation_index": 0,
+                    "cache_hit": cache_hit,
+                    "candidate_sha256": candidate_hashes[0],
+                },
+                {
+                    "kind": "analogy_recovery_story_call",
+                    "seed": 1,
+                },
+                {
+                    "kind": "analogy_story_candidate_cache",
+                    "phase": "recovery",
+                    "state_id": f"{problem_id}:stuck",
+                    "generation_index": 1,
+                    "cache_hit": cache_hit,
+                    "candidate_sha256": candidate_hashes[1],
+                },
+                {
+                    "kind": "analogy_recovery_story_call",
+                    "seed": 2,
+                },
+                {"kind": "analogy_recovery_tactic_call", "seed": 3},
+            )
+        )
+        analogy_count = 1
+        deliberation_count = 0
+        winning_analogy = 1
+        winning_deliberation = 0
+    outcome = {
+        "problem_id": problem_id,
+        "status": "complete",
+        "verifier_call_count": 2,
+        "stuck_state_count": 1,
+        "analogy_fallback_count": analogy_count,
+        "deliberation_fallback_count": deliberation_count,
+        "analogy_winning_path_count": winning_analogy,
+        "deliberation_winning_path_count": winning_deliberation,
+    }
+    problem_payload = {
+        "problem": {"id": problem_id},
+        "outcome": outcome,
+        "search": {
+            "ordinary_expansions": [
+                {
+                    "node": {
+                        "state": {
+                            "id": f"{problem_id}:stuck",
+                            "expression": prefix,
+                        }
+                    },
+                    "candidate_pool": [
+                        {"source": "left", "score": 0.6, "origin": "ordinary"}
+                    ],
+                    "attempts": [],
+                }
+            ],
+            "stuckness_decisions": [
+                {
+                    "state_id": f"{problem_id}:stuck",
+                    "is_stuck": True,
+                    "reasons": ["candidates_exhausted"],
+                }
+            ],
+            "rescue_rollouts": [
+                {
+                    "termination": "complete",
+                    "attempts": [{"result": {"status": "complete"}}],
+                }
+            ],
+        },
+        "model_events": events,
+    }
+    (run_dir / f"{problem_id}.json").write_text(
+        json.dumps(problem_payload), encoding="utf-8"
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "model_revision": "model@abc",
+                "analogy_model_revision": "model@abc",
+                "prompts_sha256": "1" * 64,
+                "corpus_sha256": "2" * 64,
+                "calibration_sha256": "3" * 64,
+                "summary": {"results": [outcome]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return SimpleNamespace(output_directory=run_dir)
 
 
 def test_run_module_exports_the_three_explicit_recipes() -> None:
@@ -551,6 +678,281 @@ def test_run_artifact_records_effective_config_hashes_and_model_revisions(
         "sha256": None,
         "schema_version": 1,
     }
+
+
+def test_probe_runs_nine_unique_trials_with_shared_order_and_resumes(
+    tmp_path,
+):
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
+    problems = tuple(
+        Problem(problem_id, "probe", "", "P", "test", "test", "probe", 1)
+        for problem_id in PROBE_PROBLEM_IDS
+    )
+    calls = []
+
+    def execute(condition, trial_config, problem, model, verifier, checkpoint):
+        calls.append(
+            (
+                condition,
+                problem.id,
+                trial_config.run.seed,
+                checkpoint.signature,
+                id(model),
+                id(verifier),
+            )
+        )
+        return _write_probe_trial_artifact(
+            tmp_path / "solve", condition, problem.id
+        )
+
+    model = object()
+    verifier = object()
+    first = execute_probe(
+        config,
+        problems,
+        model,
+        verifier,
+        evaluation_id="probe-test",
+        trial_executor=execute,
+    )
+    second = execute_probe(
+        config,
+        problems,
+        model,
+        verifier,
+        evaluation_id="probe-test",
+        trial_executor=execute,
+    )
+
+    assert first.complete is True
+    assert second.complete is True
+    assert len(calls) == 9
+    assert len({(condition, problem) for condition, problem, *_ in calls}) == 9
+    for condition in CONDITIONS:
+        assert [problem for item, problem, *_ in calls if item == condition] == list(
+            PROBE_PROBLEM_IDS
+        )
+    assert {seed for _, _, seed, *_ in calls} == {0}
+    assert len({signature for _, _, _, signature, *_ in calls}) == 3
+    assert {model_id for *_, model_id, _ in calls} == {id(model)}
+    assert {verifier_id for *_, verifier_id in calls} == {id(verifier)}
+    manifest = json.loads(
+        (first.output_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert len(manifest["trials"]) == 9
+
+
+def test_probe_config_hash_ignores_machine_specific_output_path(tmp_path):
+    base = load_config(ROOT / "config.yaml")
+    problems = tuple(
+        Problem(problem_id, "probe", "", "P", "test", "test", "probe", 1)
+        for problem_id in PROBE_PROBLEM_IDS
+    )
+
+    def run_at(name):
+        config = replace(
+            base, run=replace(base.run, output_dir=tmp_path / name / "runs")
+        )
+        record = execute_probe(
+            config,
+            problems,
+            object(),
+            object(),
+            evaluation_id=f"probe-{name}",
+            trial_executor=lambda condition, _config, problem, *_args: (
+                _write_probe_trial_artifact(
+                    tmp_path / name / "solve", condition, problem.id
+                )
+            ),
+        )
+        return json.loads(
+            (record.output_directory / "manifest.json").read_text(encoding="utf-8")
+        )
+
+    local = run_at("local")
+    remote = run_at("remote")
+
+    assert local["inputs"]["config_sha256"] == remote["inputs"]["config_sha256"]
+
+
+def test_probe_marks_executor_failure_incomplete_and_returns_nonzero_status(
+    tmp_path, monkeypatch
+):
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
+    problems = tuple(
+        Problem(problem_id, "probe", "", "P", "test", "test", "probe", 1)
+        for problem_id in PROBE_PROBLEM_IDS
+    )
+
+    def execute(condition, trial_config, problem, model, verifier, checkpoint):
+        if condition == "random_analogy" and problem.id == PROBE_PROBLEM_IDS[1]:
+            raise RuntimeError("remote process ended")
+        return _write_probe_trial_artifact(
+            tmp_path / "solve", condition, problem.id
+        )
+
+    record = execute_probe(
+        config,
+        problems,
+        object(),
+        object(),
+        evaluation_id="probe-incomplete",
+        trial_executor=execute,
+    )
+    manifest = json.loads(
+        (record.output_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert record.complete is False
+    failed = [trial for trial in manifest["trials"] if trial["status"] == "failed"]
+    assert len(failed) == 1
+    assert "remote process ended" in failed[0]["error"]
+
+    monkeypatch.setattr("analogy.evaluation.load_config", lambda _path: config)
+    monkeypatch.setattr("analogy.evaluation.load_problems", lambda _path: problems)
+    monkeypatch.setattr("analogy.evaluation.get_model_provider", lambda _config: object())
+    monkeypatch.setattr(
+        "analogy.evaluation.LeanSubprocessVerifier", lambda _root: object()
+    )
+    monkeypatch.setattr(
+        "analogy.evaluation.execute_probe", lambda *_args, **_kwargs: record
+    )
+    assert run_evaluation(ROOT / "config.yaml", phase="probe") == 1
+
+
+def test_evaluation_loads_one_shared_model_and_verifier(tmp_path, monkeypatch):
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
+    problems = tuple(
+        Problem(problem_id, "probe", "", "P", "test", "test", "probe", 1)
+        for problem_id in PROBE_PROBLEM_IDS
+    )
+    model_calls = []
+    verifier_calls = []
+    captured = []
+    record = SimpleNamespace(
+        complete=True,
+        status="complete",
+        output_directory=tmp_path / "evaluations" / "probe",
+    )
+
+    monkeypatch.setattr("analogy.evaluation.load_config", lambda _path: config)
+    monkeypatch.setattr("analogy.evaluation.load_problems", lambda _path: problems)
+    monkeypatch.setattr(
+        "analogy.evaluation.get_model_provider",
+        lambda _config: model_calls.append(object()) or model_calls[-1],
+    )
+    monkeypatch.setattr(
+        "analogy.evaluation.LeanSubprocessVerifier",
+        lambda _root: verifier_calls.append(object()) or verifier_calls[-1],
+    )
+    monkeypatch.setattr(
+        "analogy.evaluation.execute_probe",
+        lambda config, problems, model, verifier: captured.append(
+            (config, problems, model, verifier)
+        )
+        or record,
+    )
+
+    assert run_evaluation(ROOT / "config.yaml", phase="probe") == 0
+    assert len(model_calls) == len(verifier_calls) == 1
+    assert captured[0][2:] == (model_calls[0], verifier_calls[0])
+
+
+def test_probe_report_validates_pairing_and_aggregates_realized_calls(tmp_path):
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
+    problems = tuple(
+        Problem(problem_id, "probe", "", "P", "test", "test", "probe", 1)
+        for problem_id in PROBE_PROBLEM_IDS
+    )
+
+    record = execute_probe(
+        config,
+        problems,
+        object(),
+        object(),
+        evaluation_id="probe-report",
+        trial_executor=lambda condition, _config, problem, *_args: (
+            _write_probe_trial_artifact(
+                tmp_path / "solve", condition, problem.id
+            )
+        ),
+    )
+    manifest = json.loads(
+        (record.output_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["status"] == "complete"
+    assert manifest["validation"]["errors"] == []
+    assert len(manifest["environment"]["sha256"]) == 64
+    assert manifest["inputs"]["model_revision"] == config.model.revision
+    assert manifest["metrics"]["direct_deliberation"]["solved"] == 3
+    assert manifest["metrics"]["ranked_analogy"]["rescued"] == 3
+    assert manifest["metrics"]["ranked_analogy"]["intervention_submissions"] == 3
+    assert manifest["metrics"]["ranked_analogy"]["realized_model_calls"] == 12
+    assert manifest["metrics"]["random_analogy"]["realized_model_calls"] == 6
+    assert (record.output_directory / "report.md").is_file()
+
+
+@pytest.mark.parametrize("mismatch", ("candidate", "prefix", "missing_candidate"))
+def test_probe_report_rejects_candidate_or_first_stuck_mismatch(tmp_path, mismatch):
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
+    problems = tuple(
+        Problem(problem_id, "probe", "", "P", "test", "test", "probe", 1)
+        for problem_id in PROBE_PROBLEM_IDS
+    )
+    record = execute_probe(
+        config,
+        problems,
+        object(),
+        object(),
+        evaluation_id=f"probe-{mismatch}",
+        trial_executor=lambda condition, _config, problem, *_args: (
+            _write_probe_trial_artifact(
+                tmp_path / "solve", condition, problem.id
+            )
+        ),
+    )
+    manifest_path = record.output_directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = next(
+        trial
+        for trial in manifest["trials"]
+        if trial["condition"] == "random_analogy"
+        and trial["problem_id"] == PROBE_PROBLEM_IDS[0]
+    )
+    artifact = Path(target["run_directory"]) / f"{PROBE_PROBLEM_IDS[0]}.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    if mismatch == "candidate":
+        cache_event = next(
+            event
+            for event in payload["model_events"]
+            if event["kind"] == "analogy_story_candidate_cache"
+        )
+        cache_event["candidate_sha256"] = "f" * 64
+    elif mismatch == "missing_candidate":
+        payload["model_events"] = [
+            event
+            for event in payload["model_events"]
+            if event["kind"] != "analogy_story_candidate_cache"
+        ]
+    else:
+        payload["search"]["ordinary_expansions"][0]["node"]["state"][
+            "expression"
+        ] = "different-prefix"
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+    rejected = finalize_evaluation(manifest_path)
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert rejected.complete is False
+    assert refreshed["status"] == "incomplete"
+    expected = "prefix" if mismatch == "prefix" else "candidate"
+    assert any(expected in error for error in refreshed["validation"]["errors"])
 
 
 def test_problem_report_shows_analogy_as_one_fallback_inside_shared_search():

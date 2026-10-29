@@ -9,6 +9,7 @@ from analogy.main import (
     build_parser,
     load_config,
     main,
+    run_evaluate,
     run_solve,
     with_analogy_enabled,
 )
@@ -55,6 +56,22 @@ def test_cli_has_one_solve_entry_point_and_boolean_override():
     assert default.problem_selection is None
     assert exhaustive.problem_selection == "exhaustive"
     assert failures.problem_selection == "previous_failures"
+
+
+def test_cli_exposes_exact_probe_evaluation_command():
+    parsed = build_parser().parse_args(
+        ["evaluate", "--phase", "probe", "--config", "custom.yaml"]
+    )
+
+    assert parsed.command == "evaluate"
+    assert parsed.phase == "probe"
+    assert parsed.config == Path("custom.yaml")
+    assert parsed.handler is run_evaluate
+
+
+def test_cli_rejects_unsupported_evaluation_phase():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["evaluate", "--phase", "small"])
 
 
 def test_condition_banner_names_direct_deliberation_instead_of_disabled_analogy():

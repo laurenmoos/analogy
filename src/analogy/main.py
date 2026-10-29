@@ -234,6 +234,14 @@ def run_solve(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_evaluate(args: argparse.Namespace) -> int:
+    """Run one explicitly supported evaluation phase."""
+
+    from .evaluation import run_evaluation
+
+    return run_evaluation(args.config, phase=args.phase)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Lean proof model runner")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -284,6 +292,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     command.set_defaults(problem_selection=None)
     command.set_defaults(handler=run_solve)
+    evaluation = commands.add_parser(
+        "evaluate", help="run a frozen multi-condition evaluation"
+    )
+    evaluation.add_argument(
+        "--phase",
+        required=True,
+        choices=("probe",),
+        help="evaluation phase",
+    )
+    evaluation.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="configuration file (default: config.yaml)",
+    )
+    evaluation.set_defaults(handler=run_evaluate)
     return parser
 
 
@@ -313,6 +337,7 @@ __all__ = [
     "load_config",
     "main",
     "run_solve",
+    "run_evaluate",
     "with_analogy_enabled",
     "with_problem_selection",
 ]

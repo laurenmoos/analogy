@@ -6,7 +6,6 @@ node_modules/
 .worktrees/
 data/
 .artifacts/
-experiments/compute-matched-5/reruns/
 .venv/
 __pycache__/
 *.py[cod]

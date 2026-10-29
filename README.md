@@ -220,7 +220,7 @@ stuck state -> exact path -> abstract actions -> story revisions
             -> structural ranking -> current-goal tactic -> Lean
 ```
 
-## Reproduce the experiment
+## Run the solver
 
 The MLX backend requires Python 3.11+, Apple Silicon, and Lean 4/Lake. Install the environment:
 
@@ -234,14 +234,10 @@ embeddings. The structural scorer uses the packaged layer-12 calibration from th
 revision `a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4`. [`config.yaml`](config.yaml) provides a complete
 14B default setup, and [`prompts.yaml`](prompts.yaml) contains every model-facing prompt.
 
-The frozen suite, exact commands, four run configurations, seed-specific theorem sets, complete
-prompt/response traces, run summaries, and verified proofs live in
-[`experiments/compute-matched-5`](experiments/compute-matched-5/README.md). Both conditions share
-ordinary search, deterministic moves, SAT checks, Lean verification, and the intervention-generation
-envelope. Analogy also performs structural embedding and ranking; later search work varies with the
-proof states produced by each intervention.
-
-For a fresh 30-problem run with the main configuration:
+Both conditions share ordinary search, deterministic moves, SAT checks, Lean verification, and the
+intervention-generation envelope. Analogy also performs structural embedding and ranking; later
+search work varies with the proof states produced by each intervention. Run both conditions on the
+30-problem corpus with:
 
 ```bash
 uv run python -m analogy solve --deliberation --all-problems
@@ -251,11 +247,3 @@ uv run python -m analogy solve --analogy --all-problems
 Each command writes `report.md`, `run.json`, and per-problem records under
 `.artifacts/runs/solve/<run-id>/`. Current run records retain the effective configuration, model
 revisions, file hashes, run seed, and individual generation seeds.
-
-The frozen five-trial capability suite produced:
-
-| Metric | Direct deliberation | Analogy |
-|---|---:|---:|
-| Trials solved | 2/5 | **4/5** |
-| Intervention tactics submitted to Lean | 4 | 6 |
-| Intervention tactics on winning paths | 1 | **3** |

@@ -33,6 +33,7 @@ def _problem_result(problem_id: str, search_result: Any) -> ProblemResult:
     )
     forced = tuple(event.result for event in search_result.forced_moves)
     all_attempts = ordinary + forced + fallback
+    winning_path = tuple(search_result.winning_path)
     discarded = tuple(
         item
         for expansion in search_result.ordinary_expansions
@@ -61,12 +62,27 @@ def _problem_result(problem_id: str, search_result: Any) -> ProblemResult:
         proof=search_result.proof,
         failure=failure,
         expansion_count=len(search_result.ordinary_expansions),
-        verifier_call_count=len(all_attempts),
+        verifier_call_count=sum(not item.cache_hit for item in all_attempts),
         invalid_tactic_count=sum(item.status is TacticStatus.ERROR for item in all_attempts),
         repeated_state_count=sum(item.reason is DiscardReason.REPEATED_STATE for item in discarded),
         no_progress_count=sum(item.reason is DiscardReason.NO_PROGRESS for item in discarded),
         stuck_state_count=sum(item.is_stuck for item in search_result.stuckness_decisions),
-        analogy_fallback_count=len(fallback),
+        analogy_fallback_count=sum(
+            item.candidate.origin.value == "analogical" for item in fallback
+        ),
+        tactic_submission_count=len(all_attempts),
+        analogy_winning_path_count=sum(
+            item.origin.value == "analogical" for item in winning_path
+        ),
+        winning_tactic_ranks=tuple(
+            item.model_rank for item in winning_path
+        ),
+        deliberation_fallback_count=sum(
+            item.candidate.origin.value == "deliberative" for item in fallback
+        ),
+        deliberation_winning_path_count=sum(
+            item.origin.value == "deliberative" for item in winning_path
+        ),
     )
 
 
@@ -84,6 +100,12 @@ def _failed_problem_result(
 
 def _problem_route(outcome: ProblemResult, search_result: Any | None) -> str:
     if search_result is not None and search_result.rescue_rollouts:
+        if any(
+            attempt.result.candidate.origin.value == "deliberative"
+            for rollout in search_result.rescue_rollouts
+            for attempt in rollout.attempts
+        ):
+            return "deliberation-assisted"
         return "analogy-assisted"
     if getattr(outcome.status, "value", outcome.status) == SolveStatus.COMPLETE.value:
         return "ordinary"
@@ -92,11 +114,7 @@ def _problem_route(outcome: ProblemResult, search_result: Any | None) -> str:
 
 def _public_payload(value: Any) -> Any:
     if isinstance(value, dict):
-        return {
-            key: _public_payload(item)
-            for key, item in value.items()
-            if key != "seed"
-        }
+        return {key: _public_payload(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_public_payload(item) for item in value]
     return value

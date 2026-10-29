@@ -1,0 +1,1026 @@
+{
+  "model_events": [
+    {
+      "candidate_dispositions": [
+        {
+          "disposition": "filtered",
+          "reason": "identifier is not visible in the proof state",
+          "sample": 0,
+          "tactic": "exact hp2"
+        },
+        {
+          "disposition": "duplicate",
+          "reason": "already tried at this state",
+          "sample": 1,
+          "tactic": "right"
+        },
+        {
+          "disposition": "duplicate",
+          "reason": "already tried at this state",
+          "sample": 2,
+          "tactic": "left"
+        },
+        {
+          "disposition": "duplicate",
+          "reason": "already tried at this state",
+          "sample": 2,
+          "tactic": "exact hPart"
+        },
+        {
+          "disposition": "returned",
+          "rank": 1,
+          "tactic": "apply hp1p5p4p5p2"
+        },
+        {
+          "disposition": "returned",
+          "rank": 2,
+          "tactic": "right"
+        },
+        {
+          "disposition": "returned",
+          "rank": 3,
+          "tactic": "exact hPart"
+        },
+        {
+          "disposition": "below_top_k",
+          "rank": 4,
+          "tactic": "left"
+        },
+        {
+          "disposition": "below_top_k",
+          "rank": 5,
+          "tactic": "apply hPart"
+        }
+      ],
+      "candidate_likelihoods": [
+        {
+          "completion": "[{\"tactic\":\"apply hp1p5p4p5p2\"}]",
+          "mean_log_likelihood": -1.9813194611701874,
+          "rank": 1,
+          "tactic": "apply hp1p5p4p5p2",
+          "token_count": 18,
+          "total_log_likelihood": -35.663750301063374
+        },
+        {
+          "completion": "[{\"tactic\":\"right\"}]",
+          "mean_log_likelihood": -2.648236834598336,
+          "rank": 2,
+          "tactic": "right",
+          "token_count": 8,
+          "total_log_likelihood": -21.18589467678669
+        },
+        {
+          "completion": "[{\"tactic\":\"exact hPart\"}]",
+          "mean_log_likelihood": -3.3220666434731925,
+          "rank": 3,
+          "tactic": "exact hPart",
+          "token_count": 10,
+          "total_log_likelihood": -33.220666434731925
+        },
+        {
+          "completion": "[{\"tactic\":\"left\"}]",
+          "mean_log_likelihood": -3.4687157756462312,
+          "rank": 4,
+          "tactic": "left",
+          "token_count": 8,
+          "total_log_likelihood": -27.74972620516985
+        },
+        {
+          "completion": "[{\"tactic\":\"apply hPart\"}]",
+          "mean_log_likelihood": -3.808086462152153,
+          "rank": 5,
+          "tactic": "apply hPart",
+          "token_count": 10,
+          "total_log_likelihood": -38.08086462152153
+        }
+      ],
+      "discarded_candidates": [
+        "exact hp2: identifier is not visible in the proof state",
+        "right: already tried at this state",
+        "left: already tried at this state",
+        "exact hPart: already tried at this state",
+        "left: below top_k after likelihood ranking",
+        "apply hPart: below top_k after likelihood ranking"
+      ],
+      "error": null,
+      "kind": "ordinary_model_call",
+      "messages": [
+        {
+          "content": "Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic`. Tactics are one-line strings. Use visible identifiers only. Never repeat a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.",
+          "role": "system"
+        },
+        {
+          "content": "Overall target:\nTrue ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)\nCurrent focused Lean proof state:\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2\nAccepted prefix:\nintro h\nobtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h\nintro h\nconstructor\nexact hp4\nRecent path failure feedback:\n(none)\nLean card: intro h; exact <hyp>; apply <hyp>; constructor; left/right; left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side, so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.\nReturn at most 3 candidates.",
+          "role": "user"
+        }
+      ],
+      "normalized_candidates": [
+        "apply hp1p5p4p5p2",
+        "right",
+        "exact hPart"
+      ],
+      "responses": [
+        {
+          "diagnostic": null,
+          "error_kind": null,
+          "messages": [
+            {
+              "content": "Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic`. Tactics are one-line strings. Use visible identifiers only. Never repeat a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.",
+              "role": "system"
+            },
+            {
+              "content": "Overall target:\nTrue ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)\nCurrent focused Lean proof state:\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2\nAccepted prefix:\nintro h\nobtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h\nintro h\nconstructor\nexact hp4\nRecent path failure feedback:\n(none)\nLean card: intro h; exact <hyp>; apply <hyp>; constructor; left/right; left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side, so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.\nReturn at most 3 candidates.",
+              "role": "user"
+            }
+          ],
+          "raw_text": "[{\"tactic\": \"right\"}, {\"tactic\": \"left\"}, {\"tactic\": \"exact hp2\"}]",
+          "repair": false,
+          "status": "valid"
+        },
+        {
+          "diagnostic": null,
+          "error_kind": null,
+          "messages": [
+            {
+              "content": "Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic`. Tactics are one-line strings. Use visible identifiers only. Never repeat a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.",
+              "role": "system"
+            },
+            {
+              "content": "Overall target:\nTrue ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)\nCurrent focused Lean proof state:\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2\nAccepted prefix:\nintro h\nobtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h\nintro h\nconstructor\nexact hp4\nRecent path failure feedback:\n(none)\nLean card: intro h; exact <hyp>; apply <hyp>; constructor; left/right; left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side, so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.\nReturn at most 3 candidates.",
+              "role": "user"
+            },
+            {
+              "content": "These proposals were removed before Lean:\n- exact hp2: identifier is not visible in the proof state\nReturn replacement candidates only. Do not repeat any removed or already tried tactic. Supply every operand,\nfor example `exact h2`, `apply h1`, `rw [h1]`, or `rcases h with ⟨hH,hU⟩`. Return only the requested JSON array.",
+              "role": "user"
+            }
+          ],
+          "raw_text": "[{\"tactic\": \"right\"}, {\"tactic\": \"apply hp1p5p4p5p2\"}, {\"tactic\": \"exact hPart\"}]",
+          "repair": true,
+          "status": "valid"
+        },
+        {
+          "diagnostic": null,
+          "error_kind": null,
+          "messages": [
+            {
+              "content": "Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic`. Tactics are one-line strings. Use visible identifiers only. Never repeat a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.",
+              "role": "system"
+            },
+            {
+              "content": "Overall target:\nTrue ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)\nCurrent focused Lean proof state:\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2\nAccepted prefix:\nintro h\nobtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h\nintro h\nconstructor\nexact hp4\nRecent path failure feedback:\n(none)\nLean card: intro h; exact <hyp>; apply <hyp>; constructor; left/right; left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side, so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.\nReturn at most 3 candidates.",
+              "role": "user"
+            },
+            {
+              "content": "These proposals were removed before Lean:\n- right: already tried at this state\nReturn replacement candidates only. Do not repeat any removed or already tried tactic. Supply every operand,\nfor example `exact h2`, `apply h1`, `rw [h1]`, or `rcases h with ⟨hH,hU⟩`. Return only the requested JSON array.",
+              "role": "user"
+            }
+          ],
+          "raw_text": "[{\"tactic\": \"left\"}, {\"tactic\": \"exact hPart\"}, {\"tactic\": \"apply hPart\"}]",
+          "repair": true,
+          "status": "valid"
+        }
+      ],
+      "state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541"
+    },
+    {
+      "attempt_index": 1,
+      "kind": "deliberation_initial_plan_call",
+      "messages": [
+        {
+          "content": "Analyze the current Lean 4 proof state directly. This is a proof-planning control condition:\ndo not create or mention an everyday story, analogy, metaphor, or source domain. For a\ndisjunction, compare both `left` and `right` and state the resulting proof obligation for\neach. Use only identifiers visible in the current state and do not recommend a tactic already\nattempted at this exact state.",
+          "role": "system"
+        },
+        {
+          "content": "Overall target:\nTrue ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)\n\nCurrent focused Lean proof state:\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2\n\nTactics already attempted at this exact state:\napply hp1p5p4p5p2\nexact hPart\n\nSemantic recovery:\nSAT: no countermodel; continue from this state.\n\nDependency evidence:\n(none)\n\nLean card: intro h; exact <hyp>; apply <hyp>; constructor; left/right; left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side, so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.\n\nReturn strict JSON only with exactly \"analysis\", \"branches\", and \"recommended_approach\".\nEach branches item contains exactly \"tactic\" and \"resulting_obligation\". For a disjunction,\ninclude both `left` and `right`.",
+          "role": "user"
+        }
+      ],
+      "raw_text": "{\n  \"analysis\": \"The current proof state is a disjunction: (True → p3 → p3) ∨ p2. The goal is to prove this disjunction. The available hypotheses include h : p1, hp4 : p4, and hp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2. The hypothesis hPart : True is also available, but it does not directly contribute to the current goal unless used in a specific context.\",\n  \"branches\": [\n    {\n      \"tactic\": \"left\",\n      \"resulting_obligation\": \"True → p3 → p3\"\n    },\n    {\n      \"tactic\": \"right\",\n      \"resulting_obligation\": \"p2\"\n    }\n  ],\n  \"recommended_approach\": \"Consider applying hp1p5p4p5p2 to derive p2 under the appropriate antecedent, or explore whether the left side can be derived directly from existing hypotheses.\"\n}",
+      "state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+      "status": "valid"
+    },
+    {
+      "kind": "deliberation_initial_tactic_call",
+      "messages": [
+        {
+          "content": "Select one Lean 4 tactic using direct proof reasoning only. The current proof state is\nauthoritative. Do not introduce an everyday story, analogy, metaphor, or source domain. Use\nonly visible identifiers and never select a tactic already attempted at this exact state.",
+          "role": "system"
+        },
+        {
+          "content": "Current focused Lean proof state:\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2\n\nTactics already attempted at this exact state:\napply hp1p5p4p5p2\nexact hPart\n\nSemantic recovery:\nSAT: no countermodel; continue from this state.\n\nDependency evidence:\n(none)\n\nLean card: intro h; exact <hyp>; apply <hyp>; constructor; left/right; left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side, so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.\n\nDirect proof plan:\n{\n  \"analysis\": \"The current proof state is a disjunction: (True \\u2192 p3 \\u2192 p3) \\u2228 p2. The goal is to prove this disjunction. The available hypotheses include h : p1, hp4 : p4, and hp1p5p4p5p2 : ((((p1 \\u2192 p5 \\u2228 True) \\u2192 True) \\u2192 p4) \\u2227 (True \\u2192 p5) \\u2192 False) \\u2192 p2. The hypothesis hPart : True is also available, but it does not directly contribute to the current goal unless used in a specific context.\",\n  \"branches\": [\n    {\n      \"tactic\": \"left\",\n      \"resulting_obligation\": \"True \\u2192 p3 \\u2192 p3\"\n    },\n    {\n      \"tactic\": \"right\",\n      \"resulting_obligation\": \"p2\"\n    }\n  ],\n  \"recommended_approach\": \"Consider applying hp1p5p4p5p2 to derive p2 under the appropriate antecedent, or explore whether the left side can be derived directly from existing hypotheses.\"\n}\n\nIf the goal is a disjunction, return strict JSON with exactly \"decision\", \"tactic\", and\n\"predicted_state\". decision contains exactly \"current_proof_situation\", \"options\", and\n\"selection_reason\". Each option contains exactly \"tactic\" and \"resulting_obligation\", and\noptions must compare both `left` and `right`. Otherwise return exactly \"tactic\" and\n\"predicted_state\". predicted_state is SOLVED or the exact focused state after the tactic.",
+          "role": "user"
+        }
+      ],
+      "raw_text": "{\n  \"decision\": {\n    \"current_proof_situation\": {\n      \"options\": [\n        {\n          \"tactic\": \"left\",\n          \"resulting_obligation\": \"True → p3 → p3\"\n        },\n        {\n          \"tactic\": \"right\",\n          \"resulting_obligation\": \"p2\"\n        }\n      ],\n      \"selection_reason\": \"The right branch allows direct derivation of p2 using the hypothesis hp1p5p4p5p2 if its antecedent can be satisfied. This is a more direct route given the complexity of the left side.\"\n    }\n  },\n  \"tactic\": \"right\",\n  \"predicted_state\": \"p2\"\n}",
+      "state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+      "status": "valid",
+      "tactic": "right"
+    }
+  ],
+  "outcome": {
+    "analogy_fallback_count": 0,
+    "analogy_winning_path_count": 0,
+    "deliberation_fallback_count": 1,
+    "deliberation_winning_path_count": 0,
+    "expansion_count": 6,
+    "failure": null,
+    "invalid_tactic_count": 2,
+    "no_progress_count": 0,
+    "problem_id": "propl_ood_168469097189615988227299206974",
+    "proof": null,
+    "repeated_state_count": 0,
+    "status": "exhausted",
+    "stuck_state_count": 1,
+    "tactic_submission_count": 8,
+    "verifier_call_count": 8,
+    "winning_tactic_ranks": []
+  },
+  "problem": {
+    "binders": "(p1 p2 p3 p4 p5 : Prop)",
+    "connective": "mixed",
+    "difficulty": 16,
+    "id": "propl_ood_168469097189615988227299206974",
+    "source_level": "test_ood/168469097189615988227299206974",
+    "source_path": "normal/test_ood.csv",
+    "target": "True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+    "title": "PropL OOD 26"
+  },
+  "search": {
+    "diversity_observations": [
+      {
+        "embedding_model": "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4:layer=40:last-nonpadding",
+        "neighbor_distances": [],
+        "neighbor_state_ids": [],
+        "novelty": 1.0,
+        "state_id": "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8"
+      },
+      {
+        "embedding_model": "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4:layer=40:last-nonpadding",
+        "neighbor_distances": [
+          0.5226910018336846
+        ],
+        "neighbor_state_ids": [
+          "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8"
+        ],
+        "novelty": 0.5226910018336846,
+        "state_id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753"
+      },
+      {
+        "embedding_model": "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4:layer=40:last-nonpadding",
+        "neighbor_distances": [
+          0.26320057817242726,
+          0.45412522068528227
+        ],
+        "neighbor_state_ids": [
+          "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+          "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8"
+        ],
+        "novelty": 0.35866289942885476,
+        "state_id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2"
+      },
+      {
+        "embedding_model": "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4:layer=40:last-nonpadding",
+        "neighbor_distances": [
+          0.14506993120017453,
+          0.24362077119507608,
+          0.5219046258706443
+        ],
+        "neighbor_state_ids": [
+          "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+          "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+          "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8"
+        ],
+        "novelty": 0.30353177608863163,
+        "state_id": "propl_ood_168469097189615988227299206974:730c18821011b5dc"
+      },
+      {
+        "embedding_model": "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4:layer=40:last-nonpadding",
+        "neighbor_distances": [
+          0.29739096058887915,
+          0.35195991277189986,
+          0.4612275272348778
+        ],
+        "neighbor_state_ids": [
+          "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+          "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+          "propl_ood_168469097189615988227299206974:730c18821011b5dc"
+        ],
+        "novelty": 0.37019280019855233,
+        "state_id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f"
+      },
+      {
+        "embedding_model": "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4:layer=40:last-nonpadding",
+        "neighbor_distances": [
+          0.14940446069564395,
+          0.24389095629906965,
+          0.34226090478099824
+        ],
+        "neighbor_state_ids": [
+          "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+          "propl_ood_168469097189615988227299206974:93ad3738c00b853f",
+          "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8"
+        ],
+        "novelty": 0.24518544059190395,
+        "state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541"
+      }
+    ],
+    "forced_moves": [],
+    "ordinary_expansions": [
+      {
+        "attempts": [
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "intro h"
+            },
+            "diagnostics": [
+              "p1 p2 p3 p4 p5 : Prop\nh : True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "declaration uses `sorry`"
+            ],
+            "proof": null,
+            "state": {
+              "context": [
+                "intro h"
+              ],
+              "expression": "p1 p2 p3 p4 p5 : Prop\nh : True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+              "language": "lean4"
+            },
+            "status": "accepted"
+          }
+        ],
+        "candidate_pool": [
+          {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "intro h"
+          }
+        ],
+        "completed_proof": null,
+        "discarded": [],
+        "node": {
+          "cache_hit": false,
+          "depth": 0,
+          "incoming_candidate": null,
+          "parent_state_id": null,
+          "score": 1.0,
+          "state": {
+            "context": [],
+            "expression": "p1 p2 p3 p4 p5 : Prop\n⊢ True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+            "id": "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8",
+            "language": "lean4"
+          },
+          "tactic": null
+        },
+        "skipped_candidates": [],
+        "successors": [
+          {
+            "cache_hit": false,
+            "depth": 1,
+            "incoming_candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "intro h"
+            },
+            "parent_state_id": "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8",
+            "score": 1.0,
+            "state": {
+              "context": [
+                "intro h"
+              ],
+              "expression": "p1 p2 p3 p4 p5 : Prop\nh : True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+              "language": "lean4"
+            },
+            "tactic": "intro h"
+          }
+        ]
+      },
+      {
+        "attempts": [
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+            },
+            "diagnostics": [
+              "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "declaration uses `sorry`"
+            ],
+            "proof": null,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+              ],
+              "expression": "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+              "language": "lean4"
+            },
+            "status": "accepted"
+          }
+        ],
+        "candidate_pool": [
+          {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+          }
+        ],
+        "completed_proof": null,
+        "discarded": [],
+        "node": {
+          "cache_hit": false,
+          "depth": 1,
+          "incoming_candidate": {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "intro h"
+          },
+          "parent_state_id": "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8",
+          "score": 1.0,
+          "state": {
+            "context": [
+              "intro h"
+            ],
+            "expression": "p1 p2 p3 p4 p5 : Prop\nh : True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+            "id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+            "language": "lean4"
+          },
+          "tactic": "intro h"
+        },
+        "skipped_candidates": [],
+        "successors": [
+          {
+            "cache_hit": false,
+            "depth": 2,
+            "incoming_candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+            },
+            "parent_state_id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+            "score": 1.0,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+              ],
+              "expression": "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+              "language": "lean4"
+            },
+            "tactic": "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+          }
+        ]
+      },
+      {
+        "attempts": [
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "intro h"
+            },
+            "diagnostics": [
+              "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "declaration uses `sorry`"
+            ],
+            "proof": null,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                "intro h"
+              ],
+              "expression": "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "id": "propl_ood_168469097189615988227299206974:730c18821011b5dc",
+              "language": "lean4"
+            },
+            "status": "accepted"
+          }
+        ],
+        "candidate_pool": [
+          {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "intro h"
+          }
+        ],
+        "completed_proof": null,
+        "discarded": [],
+        "node": {
+          "cache_hit": false,
+          "depth": 2,
+          "incoming_candidate": {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+          },
+          "parent_state_id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753",
+          "score": 1.0,
+          "state": {
+            "context": [
+              "intro h",
+              "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+            ],
+            "expression": "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\n⊢ p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+            "id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+            "language": "lean4"
+          },
+          "tactic": "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h"
+        },
+        "skipped_candidates": [],
+        "successors": [
+          {
+            "cache_hit": false,
+            "depth": 3,
+            "incoming_candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "intro h"
+            },
+            "parent_state_id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+            "score": 1.0,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                "intro h"
+              ],
+              "expression": "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4 ∧ ((True → p3 → p3) ∨ p2)",
+              "id": "propl_ood_168469097189615988227299206974:730c18821011b5dc",
+              "language": "lean4"
+            },
+            "tactic": "intro h"
+          }
+        ]
+      },
+      {
+        "attempts": [
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "constructor"
+            },
+            "diagnostics": [
+              "case left\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4\n\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+              "declaration uses `sorry`"
+            ],
+            "proof": null,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                "intro h",
+                "constructor"
+              ],
+              "expression": "case left\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4\n\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+              "id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f",
+              "language": "lean4"
+            },
+            "status": "accepted"
+          }
+        ],
+        "candidate_pool": [
+          {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "constructor"
+          }
+        ],
+        "completed_proof": null,
+        "discarded": [],
+        "node": {
+          "cache_hit": false,
+          "depth": 3,
+          "incoming_candidate": {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "intro h"
+          },
+          "parent_state_id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2",
+          "score": 1.0,
+          "state": {
+            "context": [
+              "intro h",
+              "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+              "intro h"
+            ],
+            "expression": "p1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4 ∧ ((True → p3 → p3) ∨ p2)",
+            "id": "propl_ood_168469097189615988227299206974:730c18821011b5dc",
+            "language": "lean4"
+          },
+          "tactic": "intro h"
+        },
+        "skipped_candidates": [],
+        "successors": [
+          {
+            "cache_hit": false,
+            "depth": 4,
+            "incoming_candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "constructor"
+            },
+            "parent_state_id": "propl_ood_168469097189615988227299206974:730c18821011b5dc",
+            "score": 1.0,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                "intro h",
+                "constructor"
+              ],
+              "expression": "case left\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4\n\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+              "id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f",
+              "language": "lean4"
+            },
+            "tactic": "constructor"
+          }
+        ]
+      },
+      {
+        "attempts": [
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "exact hp4"
+            },
+            "diagnostics": [
+              "case right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+              "declaration uses `sorry`"
+            ],
+            "proof": null,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                "intro h",
+                "constructor",
+                "exact hp4"
+              ],
+              "expression": "case right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+              "id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+              "language": "lean4"
+            },
+            "status": "accepted"
+          }
+        ],
+        "candidate_pool": [
+          {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "exact hp4"
+          }
+        ],
+        "completed_proof": null,
+        "discarded": [],
+        "node": {
+          "cache_hit": false,
+          "depth": 4,
+          "incoming_candidate": {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "constructor"
+          },
+          "parent_state_id": "propl_ood_168469097189615988227299206974:730c18821011b5dc",
+          "score": 1.0,
+          "state": {
+            "context": [
+              "intro h",
+              "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+              "intro h",
+              "constructor"
+            ],
+            "expression": "case left\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p4\n\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+            "id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f",
+            "language": "lean4"
+          },
+          "tactic": "constructor"
+        },
+        "skipped_candidates": [],
+        "successors": [
+          {
+            "cache_hit": false,
+            "depth": 5,
+            "incoming_candidate": {
+              "model_rank": null,
+              "origin": "ordinary",
+              "score": 1.0,
+              "source": "exact hp4"
+            },
+            "parent_state_id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f",
+            "score": 1.0,
+            "state": {
+              "context": [
+                "intro h",
+                "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                "intro h",
+                "constructor",
+                "exact hp4"
+              ],
+              "expression": "case right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+              "id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+              "language": "lean4"
+            },
+            "tactic": "exact hp4"
+          }
+        ]
+      },
+      {
+        "attempts": [
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": 1,
+              "origin": "ordinary",
+              "score": 0.46257068657333417,
+              "source": "apply hp1p5p4p5p2"
+            },
+            "diagnostics": [
+              "Tactic `apply` failed: could not unify the conclusion of `hp1p5p4p5p2`\n  p2\nwith the goal\n  (True → p3 → p3) ∨ p2\n\nNote: The full type of `hp1p5p4p5p2` is\n  ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\n\ncase right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2"
+            ],
+            "proof": null,
+            "state": null,
+            "status": "error"
+          },
+          {
+            "cache_hit": false,
+            "candidate": {
+              "model_rank": 3,
+              "origin": "ordinary",
+              "score": 0.12103166418059698,
+              "source": "exact hPart"
+            },
+            "diagnostics": [
+              "Type mismatch\n  hPart\nhas type\n  True\nbut is expected to have type\n  (True → p3 → p3) ∨ p2"
+            ],
+            "proof": null,
+            "state": null,
+            "status": "error"
+          }
+        ],
+        "candidate_pool": [
+          {
+            "model_rank": 1,
+            "origin": "ordinary",
+            "score": 0.46257068657333417,
+            "source": "apply hp1p5p4p5p2"
+          },
+          {
+            "model_rank": 2,
+            "origin": "ordinary",
+            "score": 0.23743217593511864,
+            "source": "right"
+          },
+          {
+            "model_rank": 3,
+            "origin": "ordinary",
+            "score": 0.12103166418059698,
+            "source": "exact hPart"
+          }
+        ],
+        "completed_proof": null,
+        "discarded": [],
+        "node": {
+          "cache_hit": false,
+          "depth": 5,
+          "incoming_candidate": {
+            "model_rank": null,
+            "origin": "ordinary",
+            "score": 1.0,
+            "source": "exact hp4"
+          },
+          "parent_state_id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f",
+          "score": 1.0,
+          "state": {
+            "context": [
+              "intro h",
+              "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+              "intro h",
+              "constructor",
+              "exact hp4"
+            ],
+            "expression": "case right\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ (True → p3 → p3) ∨ p2",
+            "id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+            "language": "lean4"
+          },
+          "tactic": "exact hp4"
+        },
+        "skipped_candidates": [
+          {
+            "candidate": {
+              "model_rank": 2,
+              "origin": "ordinary",
+              "score": 0.23743217593511864,
+              "source": "right"
+            },
+            "reason": "semantic_preflight_refuted"
+          }
+        ],
+        "successors": []
+      }
+    ],
+    "proof": null,
+    "rescue_rollouts": [
+      {
+        "analogy_trace": null,
+        "attempts": [
+          {
+            "discarded": {
+              "reason": "semantic_refuted",
+              "result": {
+                "cache_hit": false,
+                "candidate": {
+                  "model_rank": null,
+                  "origin": "deliberative",
+                  "score": 1.0,
+                  "source": "right"
+                },
+                "diagnostics": [
+                  "case right.h\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p2",
+                  "declaration uses `sorry`"
+                ],
+                "proof": null,
+                "state": {
+                  "context": [
+                    "intro h",
+                    "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                    "intro h",
+                    "constructor",
+                    "exact hp4",
+                    "right"
+                  ],
+                  "expression": "case right.h\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p2",
+                  "id": "propl_ood_168469097189615988227299206974:27fe167462a8f0cf",
+                  "language": "lean4"
+                },
+                "status": "accepted"
+              }
+            },
+            "proposal": {
+              "candidate": {
+                "model_rank": null,
+                "origin": "deliberative",
+                "score": 1.0,
+                "source": "right"
+              },
+              "predicted_state": "p2"
+            },
+            "result": {
+              "cache_hit": false,
+              "candidate": {
+                "model_rank": null,
+                "origin": "deliberative",
+                "score": 1.0,
+                "source": "right"
+              },
+              "diagnostics": [
+                "case right.h\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p2",
+                "declaration uses `sorry`"
+              ],
+              "proof": null,
+              "state": {
+                "context": [
+                  "intro h",
+                  "obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h",
+                  "intro h",
+                  "constructor",
+                  "exact hp4",
+                  "right"
+                ],
+                "expression": "case right.h\np1 p2 p3 p4 p5 : Prop\nhPart : True\nhp1p5p4p5p2 : ((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2\nhp4 : p4\nh : p1\n⊢ p2",
+                "id": "propl_ood_168469097189615988227299206974:27fe167462a8f0cf",
+                "language": "lean4"
+              },
+              "status": "accepted"
+            }
+          }
+        ],
+        "generations": [],
+        "proposals": [
+          {
+            "candidate": {
+              "model_rank": null,
+              "origin": "deliberative",
+              "score": 1.0,
+              "source": "right"
+            },
+            "predicted_state": "p2"
+          }
+        ],
+        "rollout_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541:deliberation:initial",
+        "semantic_event_id": "semantic:0",
+        "state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+        "termination": "exhausted"
+      }
+    ],
+    "semantic_prunes": [
+      {
+        "countermodel": [
+          [
+            "p1",
+            true
+          ],
+          [
+            "p2",
+            false
+          ],
+          [
+            "p3",
+            false
+          ],
+          [
+            "p4",
+            true
+          ],
+          [
+            "p5",
+            true
+          ]
+        ],
+        "invalid_goal_index": 0,
+        "parent_state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+        "successor_state_id": "propl_ood_168469097189615988227299206974:27fe167462a8f0cf",
+        "tactic": "right"
+      }
+    ],
+    "semantic_recoveries": [
+      {
+        "abandoned_tactics": [],
+        "countermodel": [],
+        "countermodel_table": null,
+        "error": null,
+        "event_id": "semantic:0",
+        "rescue_state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541",
+        "result": "valid",
+        "trigger_state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541"
+      }
+    ],
+    "status": "exhausted",
+    "stuckness_decisions": [
+      {
+        "is_stuck": false,
+        "reasons": [],
+        "state_id": "propl_ood_168469097189615988227299206974:a5bdd795586f9ea8"
+      },
+      {
+        "is_stuck": false,
+        "reasons": [],
+        "state_id": "propl_ood_168469097189615988227299206974:c0073bb4fd463753"
+      },
+      {
+        "is_stuck": false,
+        "reasons": [],
+        "state_id": "propl_ood_168469097189615988227299206974:cc4a8ab6106976f2"
+      },
+      {
+        "is_stuck": false,
+        "reasons": [],
+        "state_id": "propl_ood_168469097189615988227299206974:730c18821011b5dc"
+      },
+      {
+        "is_stuck": false,
+        "reasons": [],
+        "state_id": "propl_ood_168469097189615988227299206974:93ad3738c00b853f"
+      },
+      {
+        "is_stuck": true,
+        "reasons": [
+          "all_tactics_errored",
+          "candidates_exhausted"
+        ],
+        "state_id": "propl_ood_168469097189615988227299206974:e1d57e48f87f2541"
+      }
+    ],
+    "winning_path": []
+  }
+}

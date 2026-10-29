@@ -52,7 +52,6 @@ _LEGACY_NAMES = (
     (re.compile(r"\bnot\.intro\b"), "Not.intro"),
 )
 _BARE_RW = re.compile(r"^rw\s+(?P<hyp>«[^»]+»|[A-Za-z_][\w'✝]*)$")
-_BANNED_HEADS = frozenset({"tauto", "itauto", "modus_tollens"})
 _ALLOWED_TACTIC_HEADS = frozenset(
     {
         "exact", "apply", "refine", "rw", "cases", "rcases", "obtain",
@@ -62,7 +61,7 @@ _ALLOWED_TACTIC_HEADS = frozenset(
     }
 )
 _BANNED_TACTIC_TOKEN = re.compile(
-    r"(?<![\w'.])(?:tauto|itauto|modus_tollens)(?![\w'.])"
+    r"(?<![\w'.])(?:sorry|admit|tauto|itauto|modus_tollens)(?![\w'.])"
 )
 _NESTED_TACTIC_BLOCK = re.compile(r"(?<![\w'.])by(?![\w'.])")
 _SHAPE_SENSITIVE_HEADS = frozenset({"left", "right", "constructor", "intro", "intros"})
@@ -296,6 +295,16 @@ def candidate_rejection_reason(
     target = _first_goal_target(proof_state)
     if target is None:
         return None
+    declarations, _ = _first_goal_declarations(proof_state)
+    declaration_types = dict(declarations)
+    if head in {"exact", "apply", "cases", "rcases"}:
+        parts = segments[0].split(maxsplit=2)
+        if len(parts) >= 2 and _SIMPLE_IDENTIFIER.fullmatch(parts[1]):
+            operand = parts[1]
+            if declaration_types.get(operand) == "Prop":
+                return "proposition name is not evidence"
+            if operand not in declaration_types:
+                return "identifier is not visible in the proof state"
     root = _root_connective(target)
     connective = None if root is None else root[0]
     if head in {"left", "right"} and connective != "∨":

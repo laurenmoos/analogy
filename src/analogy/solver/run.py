@@ -12,16 +12,23 @@ from ..model.model_provider import TextGenerator
 from ..utils.checkpoint import Checkpoint
 from .analogy.harness import (
     AnalogyHarness,
+    AnalogyHarnessInitializationError,
+    AnalogyStoryInitializationError,
     activate_analogy,
     initialize_analogy_harness,
-    score_analogies,
-    select_analogy,
     update_analogies,
 )
 from .analogy.rescue import (
     generate_analogy_rescue,
     submit_analogy_rescue_to_lean,
 )
+from .analogy.structural_scoring import build_proof_belief
+from .deliberation import (
+    activate_deliberation,
+    deliberation_context,
+    initialize_deliberation_fallback,
+)
+from .proof.state import proof_state_fingerprint
 from .proof.adapter import LeanGymAdapter, initialize_proof
 from .report import (
     SolveRunRecord,
@@ -50,6 +57,7 @@ def _initialize_problem(
     model_events: list[dict[str, Any]],
     *,
     with_analogies: bool,
+    analogy_generator: TextGenerator | None = None,
 ) -> tuple[LeanGymAdapter, SearchSession, AnalogyHarness | None]:
     """Initialize the proof, search, and optional analogy cohort."""
 
@@ -57,38 +65,24 @@ def _initialize_problem(
     initial_state = proof.initial_state()
     goal_state = proof.goal_state()
 
-    analogies = None
-    analogy_fallback = None
-    if with_analogies:
-        analogies = initialize_analogy_harness(
-            config,
-            generator,
-            proof,
-            model_events,
-            initial_state,
-            goal_state,
-        )
-        analogy = select_analogy(score_analogies(None, analogies))
-        tactic_generator = analogy.tactic_generator
-        analogy_fallback = analogy.fallback
-    else:
-        tactic_generator = initialize_tactic_generator(
-            config,
-            generator,
-            proof,
-            model_events,
-        )
+    tactic_generator = initialize_tactic_generator(
+        config,
+        generator,
+        proof,
+        model_events,
+    )
 
     search = initialize_search(
         config,
         generator,
         proof,
         tactic_generator,
-        analogy_fallback=analogy_fallback,
+        analogy_fallback=None,
+        analogy_recovery_enabled=with_analogies,
         initial_state=initial_state,
         goal_state=goal_state,
     )
-    return proof, search, analogies
+    return proof, search, None
 
 
 def run_vanilla(
@@ -102,7 +96,11 @@ def run_vanilla(
     """Run the ordinary tactic-generation and Lean search recipe."""
 
     initialize_model_protocol(config)
-    run_state = start_run(config, checkpoint)
+    run_state = start_run(
+        config,
+        checkpoint,
+        model_revision=getattr(generator, "model_revision", None),
+    )
 
     for problem in problems:
         model_events = []
@@ -142,38 +140,88 @@ def run_analogy_assisted(
     verifier: Verifier,
     *,
     checkpoint: Checkpoint | None = None,
+    analogy_generator: TextGenerator | None = None,
 ) -> SolveRunRecord:
     """Run the ordinary recipe with analogy rescue at stuck states."""
 
     initialize_model_protocol(config)
-    run_state = start_run(config, checkpoint)
+    active_analogy_generator = analogy_generator or generator
+    run_state = start_run(
+        config,
+        checkpoint,
+        model_revision=getattr(generator, "model_revision", None),
+        analogy_model_revision=getattr(
+            active_analogy_generator, "model_revision", None
+        ),
+    )
 
     for problem in problems:
         model_events = []
+        failed_initializations: set[str] = set()
         search = None
+        analogies: AnalogyHarness | None = None
         failure = None
         try:
-            proof, search, analogies = _initialize_problem(
+            proof, search, _ = _initialize_problem(
                 config,
                 problem,
                 generator,
                 verifier,
                 model_events,
                 with_analogies=True,
+                analogy_generator=active_analogy_generator,
             )
-            assert analogies is not None
-
             while search.has_work():
                 tactics = generate_and_score_tactics(search)
                 results = submit_tactics_to_lean(proof, tactics)
                 update_search_with_scored_proof_states(search, results)
 
                 if search.is_stuck():
-                    analogies = update_analogies(search, analogies)
-                    scored_analogies = score_analogies(search, analogies)
-                    analogy = select_analogy(scored_analogies)
+                    rescue_node = search.rescue_node
+                    if rescue_node is None:
+                        raise RuntimeError("stuck search lacks a rescue node")
+                    fingerprinter = getattr(
+                        getattr(search, "context", None), "state_fingerprinter", None
+                    )
+                    fingerprint = (
+                        fingerprinter.fingerprint(rescue_node.state)
+                        if fingerprinter is not None
+                        else proof_state_fingerprint(rescue_node.state.expression)
+                    )
+                    if fingerprint in failed_initializations:
+                        model_events.append({
+                            "kind": "analogy_initialization_cache_hit",
+                            "state_id": rescue_node.state.id,
+                            "fingerprint": fingerprint,
+                        })
+                        search.abandon_pending_rescue()
+                        continue
+                    try:
+                        if analogies is None:
+                            analogies = initialize_analogy_harness(
+                                config,
+                                generator,
+                                proof,
+                                model_events,
+                                rescue_node.state,
+                                search.goal,
+                                proof_belief=build_proof_belief(search),
+                                analogy_generator=analogy_generator or generator,
+                            )
+                        analogies = update_analogies(search, analogies)
+                    except AnalogyStoryInitializationError:
+                        failed_initializations.add(fingerprint)
+                        search.abandon_pending_rescue()
+                        continue
+                    except AnalogyHarnessInitializationError:
+                        search.abandon_pending_rescue()
+                        continue
+                    analogy = analogies.tracks[0]
                     activate_analogy(search, analogy)
-                    rescue = generate_analogy_rescue(search, analogy.scratchpad)
+                    rescue = generate_analogy_rescue(
+                        search,
+                        analogy.scratchpad,
+                    )
                     result = submit_analogy_rescue_to_lean(proof, rescue)
                     update_search_with_scored_proof_states(search, result)
         except Exception as error:
@@ -189,4 +237,94 @@ def run_analogy_assisted(
     return run
 
 
-__all__ = ["run_analogy_assisted", "run_vanilla"]
+def run_deliberation_assisted(
+    config: AppConfig,
+    problems: Sequence[Problem],
+    generator: TextGenerator,
+    verifier: Verifier,
+    *,
+    checkpoint: Checkpoint | None = None,
+) -> SolveRunRecord:
+    """Run ordinary search with a call-budget-matched direct fallback."""
+
+    initialize_model_protocol(config)
+    run_state = start_run(
+        config,
+        checkpoint,
+        model_revision=getattr(generator, "model_revision", None),
+        analogy_model_revision=getattr(generator, "model_revision", None),
+    )
+    for problem in problems:
+        model_events = []
+        failed_initializations: set[str] = set()
+        search = None
+        fallback = None
+        failure = None
+        try:
+            proof, search, _ = _initialize_problem(
+                config,
+                problem,
+                generator,
+                verifier,
+                model_events,
+                with_analogies=True,
+            )
+            while search.has_work():
+                tactics = generate_and_score_tactics(search)
+                results = submit_tactics_to_lean(proof, tactics)
+                update_search_with_scored_proof_states(search, results)
+                if search.is_stuck():
+                    rescue_node = search.rescue_node
+                    ordinary = search.rescue_ordinary
+                    if rescue_node is None or ordinary is None:
+                        raise RuntimeError("stuck search lacks a rescue state")
+                    fingerprinter = getattr(search.context, "state_fingerprinter", None)
+                    fingerprint = (
+                        fingerprinter.fingerprint(rescue_node.state)
+                        if fingerprinter is not None
+                        else proof_state_fingerprint(rescue_node.state.expression)
+                    )
+                    if fingerprint in failed_initializations:
+                        search.abandon_pending_rescue()
+                        continue
+                    if fallback is None:
+                        semantic_guidance, dependency_table = deliberation_context(
+                            search
+                        )
+                        try:
+                            fallback = initialize_deliberation_fallback(
+                                config,
+                                generator,
+                                model_events,
+                                rescue_node.state,
+                                search.goal,
+                                ordinary.attempts,
+                                semantic_guidance,
+                                dependency_table,
+                            )
+                        except Exception:
+                            failed_initializations.add(fingerprint)
+                            search.abandon_pending_rescue()
+                            continue
+                    activate_deliberation(search, fallback)
+                    rescue = generate_analogy_rescue(
+                        search, fallback.scratchpad
+                    )
+                    result = submit_analogy_rescue_to_lean(proof, rescue)
+                    update_search_with_scored_proof_states(search, result)
+        except Exception as error:
+            failure = error
+        record = build_problem_record(problem, search, model_events, failure)
+        write_problem_record(run_state, record)
+    run = build_run_record(
+        run_state, label="deliberation", analogy_enabled=False
+    )
+    write_run_record(run_state, run)
+    return run
+
+
+__all__ = [
+    "run_analogy_assisted",
+    "run_deliberation_assisted",
+    "run_vanilla",
+]

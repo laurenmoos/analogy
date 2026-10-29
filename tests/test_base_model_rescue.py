@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from analogy.model.model_provider import CompletionScore
 from analogy.model import prompts as prompts_module
 from analogy.model.prompt_runner import GenerationStatus
 from analogy.model.prompts import PromptCatalog
@@ -21,9 +22,13 @@ from analogy.solver.analogy.rescue import (
     AnalogyFallback,
     PredictionLabel,
     RescueOutputError,
+    RescueProposal,
     RescueTermination,
     TacticEvaluation,
+    _parse_tactic_only,
+    initialize_analogy_fallback,
     _analogy_correction_feedback,
+    parse_analogy_update,
 )
 from analogy.solver.analogy.protocol import (
     render_analogy_state,
@@ -41,6 +46,7 @@ from analogy.solver.analogy.structural_scoring import (
     StructuralElement,
     StructuralGraph,
     StructuralScoringError,
+    UnscorableMentalModelError,
 )
 from analogy.solver.search import NeverCancelled
 from analogy.solver.proof.semantic import (
@@ -118,33 +124,355 @@ def _block(domain, mapping, steps, abandoned=()):
 
 
 def _mental_response(domain, transition, tactic, *, action="revise_model"):
-    model = MentalModel(
-        domain,
-        (
-            MentalModelCorrespondence(
-                "start",
-                transition,
-                "finish",
-                proof_transition=tactic,
-            ),
-        ),
-    )
-    return render_mental_model(model) + "\n" + json.dumps(
-        {
-            "action": action,
-            "predicted_state": "SOLVED",
-            "tactic": tactic,
-        }
-    )
+    return json.dumps({
+        "domain": domain,
+        "correspondences": [{
+            "domain_before": "start",
+            "domain_transition": transition,
+            "domain_after": "finish",
+        }],
+        "abandoned_domains": [],
+    })
+
+
+def _tactic_response(tactic, predicted_state="SOLVED"):
+    return json.dumps({"tactic": tactic, "predicted_state": predicted_state})
+
+
+def _decision_tactic_response(tactic, predicted_state="SOLVED"):
+    return json.dumps({
+        "decision": {
+            "current_everyday_state": "the cook is choosing which order to prepare",
+            "options": [
+                {
+                    "tactic": "left",
+                    "everyday_consequence": "prepare the order whose ingredients are available",
+                    "proof_consequence": "the left disjunct becomes the goal",
+                },
+                {
+                    "tactic": "right",
+                    "everyday_consequence": "prepare the order requiring a missing ingredient",
+                    "proof_consequence": "the right disjunct becomes the goal",
+                },
+            ],
+            "selection_reason": "the available route can be completed",
+        },
+        "tactic": tactic,
+        "predicted_state": predicted_state,
+    })
+
+
+def test_disjunction_tactic_requires_a_prospective_analogy_of_both_branches():
+    state = "p q : Prop\nhp : p\n⊢ p ∨ q"
+
+    with pytest.raises(RescueOutputError, match="decision"):
+        _parse_tactic_only(_tactic_response("left"), state)
+
+    proposal = _parse_tactic_only(_decision_tactic_response("left"), state)
+
+    assert proposal.candidate.source == "left"
+
+
+def test_recovery_decision_cannot_select_a_tactic_already_tried_at_that_state():
+    state = "p q : Prop\nhp : p\n⊢ p ∨ q"
+
+    with pytest.raises(RescueOutputError, match="already attempted"):
+        _parse_tactic_only(
+            _decision_tactic_response("right"),
+            state,
+            attempted_tactics={"right"},
+        )
 
 
 def _proof_belief():
     return ProofBelief(
         StructuralGraph(
-            (StructuralElement("proof-state:state", "proof-state", "P", 0.0),),
-            (),
+            (
+                StructuralElement("proof-state:root", "proof-state", "P", 0.0),
+                StructuralElement("proof-tactic:step", "proof-tactic", "exact h", 1.0),
+                StructuralElement("proof-state:state", "proof-state", "P", 2.0),
+            ),
+            (
+                ("proof-state:root", "proof-tactic:step"),
+                ("proof-tactic:step", "proof-state:state"),
+            ),
         )
     )
+
+
+def _p4_recovery_belief():
+    return ProofBelief(
+        StructuralGraph(
+            (
+                StructuralElement(
+                    "proof-state:root",
+                    "proof-state",
+                    "p1 p4 p3 : Prop\n⊢ p1 ∧ p4 ∧ p3 → p4",
+                    0.0,
+                ),
+                StructuralElement(
+                    "proof-tactic:intro",
+                    "proof-tactic",
+                    "intro h",
+                    1.0,
+                ),
+                StructuralElement(
+                    "proof-state:current",
+                    "proof-state",
+                    "p1 p4 p3 : Prop\nh : p1 ∧ p4 ∧ p3\n⊢ p4",
+                    2.0,
+                ),
+            ),
+            (
+                ("proof-state:root", "proof-tactic:intro"),
+                ("proof-tactic:intro", "proof-state:current"),
+            ),
+        )
+    )
+
+
+def test_ranked_recovery_rebases_story_to_current_path_then_requests_tactic(
+    monkeypatch,
+):
+    state = SymbolicState(
+        "p4-state", "p1 p4 p3 : Prop\nh : p1 ∧ p4 ∧ p3\n⊢ p4", "lean4"
+    )
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "travel or navigation",
+            (
+                MentalModelCorrespondence(
+                    "a traveler waits",
+                    "the traveler chooses an old branch",
+                    "the traveler reaches the wrong stop",
+                    "constructor",
+                ),
+            ),
+        )
+    )
+    calls = []
+    traces = []
+    lean_calls = []
+
+    class Generator:
+        def generate(self, messages, *, seed):
+            calls.append(messages)
+            if len(calls) == 1:
+                return json.dumps({
+                    "domain": "travel or navigation",
+                    "correspondences": [{
+                        "domain_before": "travel or navigation",
+                        "domain_transition": "take on an assumption",
+                        "domain_after": "travel or navigation",
+                    }],
+                    "abandoned_domains": [],
+                })
+            if len(calls) == 2:
+                assert "state-change vectors must be finite and nonzero" in messages[-1].content
+                return json.dumps({
+                    "domain": "travel or navigation",
+                    "correspondences": [{
+                        "domain_before": "a traveler enters a station carrying a nested ticket wallet",
+                        "domain_transition": "the traveler accepts responsibility for presenting the wallet",
+                        "domain_after": "the traveler stands at the gate holding the nested wallet",
+                    }],
+                    "abandoned_domains": [],
+                })
+            return json.dumps({
+                "tactic": "obtain ⟨hp1, hp4p3⟩ := h",
+                "predicted_state": "p1 p4 p3 : Prop\nhp1 : p1\nhp4p3 : p4 ∧ p3\n⊢ p4",
+            })
+
+        def score_completions(self, _messages, completions):
+            return (CompletionScore(completions[0], -0.2, -0.2, 1),)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder: (
+            (_ for _ in ()).throw(
+                UnscorableMentalModelError(
+                    "state-change vectors must be finite and nonzero"
+                )
+            )
+            if model.correspondences[0].domain_before
+            == model.correspondences[0].domain_after
+            else SimpleNamespace(distance=0.1, coupling=((1.0,),))
+        ),
+    )
+
+    def evaluate(candidate):
+        lean_calls.append(candidate.source)
+        successor_state = SymbolicState(
+            "successor",
+            "p1 p4 p3 : Prop\nhp1 : p1\nhp4p3 : p4 ∧ p3\n⊢ p4",
+            "lean4",
+            (candidate.source,),
+        )
+        result = TacticResult(candidate, TacticStatus.ACCEPTED, state=successor_state)
+        return TacticEvaluation(
+            result,
+            successor=SimpleNamespace(state=successor_state),
+        )
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=2,
+        seed=7,
+        trace_sink=traces.append,
+        analogy_scratchpad=scratchpad,
+    ).search(
+        state,
+        GOAL,
+        (),
+        evaluate,
+        NeverCancelled(),
+        "SAT: no countermodel; continue from this state.",
+        proof_belief=_p4_recovery_belief(),
+    )
+
+    story_prompt = "\n".join(message.content for message in calls[0])
+    tactic_prompt = "\n".join(message.content for message in calls[2])
+    assert "take on an assumption" in story_prompt
+    assert "distinct" in story_prompt
+    assert "p1" not in story_prompt and "intro h" not in story_prompt and "⊢" not in story_prompt
+    assert tactic_prompt.index("Current focused Lean proof state") < tactic_prompt.index(
+        "Selected everyday story"
+    )
+    assert "proof_transition" not in tactic_prompt
+    assert "old branch" not in tactic_prompt
+    assert lean_calls == ["obtain ⟨hp1, hp4p3⟩ := h"]
+    assert outcome.successor is not None
+    assert tuple(
+        item.proof_transition for item in scratchpad.current.correspondences
+    ) == ("intro h",)
+    assert [event["kind"] for event in traces] == [
+        "analogy_recovery_story_call",
+        "analogy_recovery_story_call",
+        "mental_model_structural_score",
+        "analogy_recovery_tactic_call",
+        "analogy_tactic_score",
+    ]
+
+
+def test_initialize_fallback_loads_model_matched_configured_calibration(
+    monkeypatch, tmp_path
+):
+    calibration = object()
+    calls = []
+
+    def load(path, *, expected_model_id):
+        calls.append((path, expected_model_id))
+        return calibration
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.load_embedding_calibration", load
+    )
+    config = SimpleNamespace(
+        analogy=SimpleNamespace(
+            max_model_calls=3,
+            calibration_path=tmp_path / "frozen.npz",
+            model_name="example/14b",
+        ),
+        model=SimpleNamespace(name="example/8b"),
+        run=SimpleNamespace(seed=11),
+    )
+
+    fallback = initialize_analogy_fallback(
+        config, object(), [], AnalogyScratchpad()
+    )
+
+    assert calls == [(tmp_path / "frozen.npz", "example/14b")]
+    assert fallback._calibration is calibration
+
+
+def test_queued_initial_tactic_reaches_lean_before_any_revision_generation():
+    class Generator:
+        def generate(self, _messages, *, seed):
+            raise AssertionError("revision generation must not precede queued tactic")
+
+    proposal = RescueProposal(
+        TacticCandidate("exact h", 1.0, CandidateOrigin.ANALOGICAL), "SOLVED"
+    )
+    seen = []
+    def evaluate(candidate):
+        seen.append(candidate.source)
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.COMPLETE, proof="done"),
+            completed_proof="done",
+        )
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=3,
+        seed=7,
+        analogy_scratchpad=AnalogyScratchpad(
+            MentalModel(
+                "cooking",
+                (MentalModelCorrespondence("food waits", "cook it", "food is ready"),),
+            )
+        ),
+        initial_proposal=proposal,
+        initial_state_id=STATE.id,
+    ).search(
+        STATE, GOAL, (), evaluate, NeverCancelled(), "guidance"
+    )
+
+    assert seen == ["exact h"]
+    assert outcome.completed_proof == "done"
+    assert outcome.rollouts[0].rollout_id.endswith(":initial")
+
+
+def test_countermodel_domain_restart_discards_queued_initial_tactic():
+    class Generator:
+        def generate(self, _messages, *, seed): return "invalid"
+
+    proposal = RescueProposal(
+        TacticCandidate("exact h", 1.0, CandidateOrigin.ANALOGICAL), "SOLVED"
+    )
+    seen = []
+    fallback = AnalogyFallback(
+        Generator(),
+        max_model_calls=1,
+        seed=7,
+        analogy_scratchpad=AnalogyScratchpad(
+            MentalModel(
+                "cooking",
+                (MentalModelCorrespondence("food waits", "cook", "food ready"),),
+            )
+        ),
+        initial_proposal=proposal,
+        initial_state_id=STATE.id,
+    )
+    fallback.search(
+        STATE,
+        GOAL,
+        (),
+        lambda candidate: seen.append(candidate.source),
+        NeverCancelled(),
+        "countermodel",
+        force_domain_change=True,
+    )
+    assert seen == []
+
+
+def test_runtime_mental_model_recovery_rejects_legacy_analogy_blocks():
+    current = MentalModel(
+        "cooking or restaurant preparation",
+        (MentalModelCorrespondence("start", "cook", "finish"),),
+    )
+    raw = _block("travel", ("P -> ticket",), ("Travel.",)) + "\n" + json.dumps({
+        "action": "change_domain",
+        "predicted_state": "SOLVED",
+        "tactic": "exact h",
+    })
+
+    with pytest.raises(RescueOutputError, match="validated mental-model"):
+        parse_analogy_update(
+            raw,
+            proof_state="P : Prop\nh : P\n⊢ P",
+            current=current,
+            required_domain="travel or navigation",
+        )
 
 
 def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
@@ -152,22 +480,34 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
 ):
     scratchpad = AnalogyScratchpad(
         MentalModel(
-            "navigation",
+            "travel or navigation",
             (MentalModelCorrespondence("start", "old", "finish"),),
         )
     )
     events = []
     generated = iter(
         (
-            _mental_response("navigation", "middle", "exact middle"),
-            _mental_response("navigation", "best", "exact best"),
-            _mental_response("navigation", "worst", "exact worst"),
+            _mental_response("travel or navigation", "middle", "exact middle"),
+            _mental_response("travel or navigation", "best", "exact best"),
+            _mental_response("travel or navigation", "worst", "exact worst"),
+            _tactic_response("exact best"),
+            _tactic_response("exact middle"),
         )
     )
 
     class Generator:
         def generate(self, _messages, *, seed):
             return next(generated)
+
+        def score_completions(self, _messages, completions):
+            tactic = next(
+                tactic
+                for tactic in ("exact best", "exact middle", "exact worst")
+                if tactic in completions[0]
+            )
+            events.append(("tactic_score", tactic))
+            mean = {"exact best": -9.0, "exact middle": -0.1, "exact worst": -0.01}[tactic]
+            return (CompletionScore(completions[0], mean * 2, mean, 2),)
 
     distances = {"middle": 0.2, "best": 0.1, "worst": 0.3}
 
@@ -211,24 +551,217 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
         ("score", "middle"),
         ("score", "best"),
         ("score", "worst"),
+        ("tactic_score", "exact best"),
         ("lean", "exact best"),
+        ("tactic_score", "exact middle"),
         ("lean", "exact middle"),
     ]
     assert outcome.completed_proof == "done"
     assert scratchpad.current.correspondences[0].domain_transition == "middle"
 
 
+def test_post_selection_tactic_score_cannot_reorder_structural_winners(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "travel or navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+    generated = iter(
+        (
+            _mental_response("travel or navigation", "structural winner", "exact low"),
+            _mental_response("travel or navigation", "structural runner-up", "exact high"),
+            _tactic_response("exact low"),
+        )
+    )
+    events = []
+    scoring_inputs = []
+
+    class Generator:
+        def generate(self, _messages, *, seed):
+            return next(generated)
+
+        def score_completions(self, _messages, completions):
+            scoring_inputs.append((_messages, completions))
+            tactic = completions[0]
+            events.append(("tactic_score", tactic))
+            mean = -100.0 if tactic == "exact low" else 0.0
+            return (CompletionScore(completions[0], mean, mean, 1),)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder: SimpleNamespace(
+            distance=(
+                0.1
+                if model.correspondences[0].domain_transition == "structural winner"
+                else 0.2
+            ),
+            coupling=((1.0,),),
+        ),
+    )
+
+    def evaluate(candidate):
+        events.append(("lean", candidate.source, candidate.model_rank))
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.COMPLETE, proof="done"),
+            completed_proof="done",
+        )
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=2,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        evaluate,
+        NeverCancelled(),
+        "guidance",
+        proof_belief=_proof_belief(),
+    )
+
+    assert outcome.completed_proof == "done"
+    assert events == [
+        ("tactic_score", "exact low"),
+        ("lean", "exact low", 1),
+    ]
+    assert scoring_inputs[0][1] == ("exact low",)
+    assert "structural winner" in scoring_inputs[0][0][-1].content
+    assert "selected everyday story" in scoring_inputs[0][0][-1].content.lower()
+
+
+def test_post_selection_tactic_score_failure_is_logged_and_fails_open(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "travel or navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+    traces = []
+    lean_calls = []
+
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return (
+                _mental_response("travel or navigation", "candidate", "exact h")
+                if self.calls == 1
+                else _tactic_response("exact h")
+            )
+
+        def score_completions(self, _messages, _completions):
+            raise RuntimeError("scorer offline")
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder: SimpleNamespace(
+            distance=0.1, coupling=((1.0,),)
+        ),
+    )
+
+    def evaluate(candidate):
+        lean_calls.append(candidate.source)
+        return TacticEvaluation(
+            TacticResult(candidate, TacticStatus.COMPLETE, proof="done"),
+            completed_proof="done",
+        )
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=1,
+        seed=7,
+        trace_sink=traces.append,
+        analogy_scratchpad=scratchpad,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        evaluate,
+        NeverCancelled(),
+        "guidance",
+        proof_belief=_proof_belief(),
+    )
+
+    assert outcome.completed_proof == "done"
+    assert lean_calls == ["exact h"]
+    tactic_event = next(event for event in traces if event["kind"] == "analogy_tactic_score")
+    assert tactic_event["structural_rank"] == 1
+    assert "RuntimeError: scorer offline" in tactic_event["error"]
+
+
+def test_cancellation_during_post_selection_score_prevents_lean_submission(monkeypatch):
+    scratchpad = AnalogyScratchpad(
+        MentalModel(
+            "travel or navigation",
+            (MentalModelCorrespondence("start", "old", "finish"),),
+        )
+    )
+
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self):
+            return self.cancelled
+
+    token = Token()
+
+    class Generator:
+        calls = 0
+
+        def generate(self, _messages, *, seed):
+            self.calls += 1
+            return (
+                _mental_response("travel or navigation", "candidate", "exact h")
+                if self.calls == 1
+                else _tactic_response("exact h")
+            )
+
+        def score_completions(self, _messages, completions):
+            token.cancelled = True
+            return (CompletionScore(completions[0], -0.5, -0.5, 1),)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda model, belief, embedder: SimpleNamespace(
+            distance=0.1, coupling=((1.0,),)
+        ),
+    )
+
+    outcome = AnalogyFallback(
+        Generator(),
+        max_model_calls=1,
+        seed=7,
+        analogy_scratchpad=scratchpad,
+    ).search(
+        STATE,
+        GOAL,
+        (),
+        lambda _candidate: pytest.fail("cancelled rescue must not call Lean"),
+        token,
+        "guidance",
+        proof_belief=_proof_belief(),
+    )
+
+    assert outcome.cancelled is True
+    assert len(outcome.rollouts) == 1
+    assert outcome.rollouts[0].termination is RescueTermination.SCORED
+
+
 def test_global_structural_scorer_failure_aborts_revision_ranking(monkeypatch):
     scratchpad = AnalogyScratchpad(
         MentalModel(
-            "navigation",
+            "travel or navigation",
             (MentalModelCorrespondence("start", "old", "finish"),),
         )
     )
 
     class Generator:
         def generate(self, _messages, *, seed):
-            return _mental_response("navigation", "new", "exact new")
+            return _mental_response("travel or navigation", "new", "exact new")
 
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.score_mental_model_revision",
@@ -257,18 +790,20 @@ def test_global_structural_scorer_failure_aborts_revision_ranking(monkeypatch):
 def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
     scratchpad = AnalogyScratchpad(
         MentalModel(
-            "navigation",
+            "travel or navigation",
             (MentalModelCorrespondence("start", "old", "finish"),),
         )
     )
     responses = iter(
         (
-            _mental_response("navigation", "invalid", "exact invalid"),
+            _mental_response("travel or navigation", "invalid", "exact invalid"),
             _mental_response(
                 "gardening", "plant", "exact h", action="change_domain"
             ),
+            _tactic_response("exact h"),
         )
     )
+    scratchpad.abandon_current("gardening")
     lean_calls = []
 
     class Generator:
@@ -314,18 +849,20 @@ def test_countermodel_batches_only_new_domain_mental_models(monkeypatch):
 
 def test_rejected_scored_revisions_leave_model_and_history_unchanged(monkeypatch):
     initial = MentalModel(
-        "navigation",
+        "travel or navigation",
         (MentalModelCorrespondence("start", "old", "finish"),),
     )
     scratchpad = AnalogyScratchpad(initial)
     responses = iter(
         (
             _mental_response(
-                "gardening", "first", "exact first", action="change_domain"
+                "travel or navigation", "first", "exact first"
             ),
             _mental_response(
-                "shipping", "second", "exact second", action="change_domain"
+                "travel or navigation", "second", "exact second"
             ),
+            _tactic_response("exact first"),
+            _tactic_response("exact second"),
         )
     )
 
@@ -353,7 +890,6 @@ def test_rejected_scored_revisions_leave_model_and_history_unchanged(monkeypatch
         ),
         NeverCancelled(),
         "guidance",
-        force_domain_change=True,
         proof_belief=_proof_belief(),
     )
 
@@ -368,14 +904,15 @@ def test_rejected_scored_revisions_leave_model_and_history_unchanged(monkeypatch
 def test_scored_but_unsubmitted_revisions_remain_in_generation_records(monkeypatch):
     scratchpad = AnalogyScratchpad(
         MentalModel(
-            "navigation",
+            "travel or navigation",
             (MentalModelCorrespondence("start", "old", "finish"),),
         )
     )
     responses = iter(
         (
-            _mental_response("navigation", "best", "exact best"),
-            _mental_response("navigation", "other", "exact other"),
+            _mental_response("travel or navigation", "best", "exact best"),
+            _mental_response("travel or navigation", "other", "exact other"),
+            _tactic_response("exact best"),
         )
     )
 
@@ -427,7 +964,7 @@ def test_scored_but_unsubmitted_revisions_remain_in_generation_records(monkeypat
 def test_cancellation_during_batch_keeps_already_scored_revision(monkeypatch):
     scratchpad = AnalogyScratchpad(
         MentalModel(
-            "navigation",
+            "travel or navigation",
             (MentalModelCorrespondence("start", "old", "finish"),),
         )
     )
@@ -441,7 +978,7 @@ def test_cancellation_during_batch_keeps_already_scored_revision(monkeypatch):
 
     class Generator:
         def generate(self, _messages, *, seed):
-            return _mental_response("navigation", "candidate", "exact h")
+            return _mental_response("travel or navigation", "candidate", "exact h")
 
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.score_mental_model_revision",

@@ -3,7 +3,8 @@ prompts:
 
 model:
   backend: mlx
-  name: mlx-community/Qwen3-8B-4bit
+  name: mlx-community/Qwen3-14B-4bit
+  revision: a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4
   device: mps
   hidden_layer: -1
   max_new_tokens: 2048
@@ -20,10 +21,14 @@ search:
   top_k: 3
   max_steps: 32
   stuck_after: 2
+  samples_per_state: 3
 
 analogy:
   enabled: true
-  max_model_calls: 3
+  max_model_calls: 2
+  model_name: mlx-community/Qwen3-14B-4bit
+  calibration_path: src/analogy/solver/analogy/score_calibration.npz
 
 run:
   output_dir: .artifacts/runs
+  seed: 0

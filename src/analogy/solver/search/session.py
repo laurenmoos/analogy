@@ -22,6 +22,7 @@ from ...utils.records import (
     TacticCanonicalizer,
     TacticResult,
     TacticStatus,
+    WinningTacticStep,
 )
 from ..analogy.rescue import (
     AnalogyRescueResult,
@@ -39,10 +40,12 @@ from ..proof.semantic import (
     SemanticRecoveryEvent,
     SemanticResult,
     SemanticPrune,
+    assess_disjunction_choice,
     build_countermodel_table,
     ForcedMoveEvent,
     forced_disjunction_tactic,
 )
+from ..proof.syntax import InventoryError, proof_goals, proposition_root
 from ..scoring import search_priority
 from .policies import (
     ProgressPolicy,
@@ -63,6 +66,7 @@ class EpisodeContext:
     progress_policy: ProgressPolicy
     cancellation: CancellationToken
     analogy_fallback: AnalogyRescueRunner | None = None
+    analogy_recovery_enabled: bool = False
     ordinary_width: int = 1
     max_expansions: int | None = None
     state_diversity: StateDiversity | None = None
@@ -151,6 +155,46 @@ def submit_tactics_to_lean(
     return TacticBatchResult(tactics, results)
 
 
+def _register_refuted_disjunction(
+    search: SearchSession, candidate: TacticCandidate
+) -> None:
+    """Record one semantically impossible `Or` constructor and queue its sibling."""
+
+    head = candidate.source.split(maxsplit=1)[0]
+    side = "left" if head in {"left", "constructor"} else head
+    if side not in {"left", "right"}:
+        return
+    search.refuted_disjuncts.add(side)
+    if side != "left":
+        return
+    right_key = search.context.tactic_canonicalizer.canonicalize("right")
+    if right_key in search.tried_tactics:
+        return
+    try:
+        root = proposition_root(proof_goals(search.node.state.expression)[0].target)
+    except (AttributeError, InventoryError, IndexError):
+        return
+    if root.operator != "∨":
+        return
+    assert search.candidate_pool is not None
+    right = next(
+        (item for item in search.candidate_pool if item.source == "right"),
+        TacticCandidate("right", 1.0, CandidateOrigin.ORDINARY),
+    )
+    remaining = tuple(
+        item
+        for item in search.active_candidates[search.candidate_index + 1 :]
+        if item.source != "right"
+    )
+    search.active_candidates = (
+        search.active_candidates[: search.candidate_index + 1]
+        + (right,)
+        + remaining
+    )
+    if not any(item.source == "right" for item in search.candidate_pool):
+        search.candidate_pool += (right,)
+
+
 @dataclass(slots=True)
 class SearchSession:
     context: EpisodeContext
@@ -235,15 +279,69 @@ class SearchSession:
             return batch
         if self.node is None or self.candidate_pool is None:
             raise RuntimeError("search has no generated candidate pool")
-        if not self.active_candidates:
-            return TacticBatch(self.node, (), self.candidate_pool)
-        candidate = self.active_candidates[self.candidate_index]
-        self.tried_tactics.add(
-            self.context.tactic_canonicalizer.canonicalize(candidate.source)
-        )
-        return TacticBatch(self.node, (candidate,), self.candidate_pool)
+        while self.active_candidates and self.candidate_index < len(
+            self.active_candidates
+        ):
+            candidate = self.active_candidates[self.candidate_index]
+            self.tried_tactics.add(
+                self.context.tactic_canonicalizer.canonicalize(candidate.source)
+            )
+            try:
+                assessment = assess_disjunction_choice(
+                    self.node.state, candidate.source
+                )
+            except SemanticCheckError:
+                assessment = None
+            if assessment is not None and assessment.result is SemanticResult.COUNTERMODEL:
+                self.skipped.append(
+                    SkippedCandidate(candidate, "semantic_preflight_refuted")
+                )
+                _register_refuted_disjunction(self, candidate)
+                self.candidate_index += 1
+                if self.refuted_disjuncts == {"left", "right"}:
+                    self.skipped.extend(
+                        SkippedCandidate(item, "early_all_disjunct_recovery")
+                        for item in self.active_candidates[self.candidate_index :]
+                    )
+                    self.candidate_index = len(self.active_candidates)
+                continue
+            return TacticBatch(self.node, (candidate,), self.candidate_pool)
+        return TacticBatch(self.node, (), self.candidate_pool)
 
-    def finish(self, status: SearchStatus, proof: str | None = None) -> None:
+    def finish(
+        self,
+        status: SearchStatus,
+        proof: str | None = None,
+        *,
+        completing_result: TacticResult | None = None,
+        completion_node: SearchNode | None = None,
+    ) -> None:
+        winning_path: tuple[WinningTacticStep, ...] = ()
+        if status is SearchStatus.COMPLETE:
+            if completing_result is None or completion_node is None:
+                raise ValueError("complete search requires completing result and node")
+            steps: list[WinningTacticStep] = []
+            current = completion_node
+            while current.parent_state_id is not None:
+                candidate = current.incoming_candidate
+                if candidate is None:
+                    raise RuntimeError("winning search node lacks candidate evidence")
+                steps.append(WinningTacticStep(
+                    candidate.source,
+                    candidate.origin,
+                    candidate.model_rank,
+                    current.cache_hit,
+                ))
+                current = self.nodes_by_id[current.parent_state_id]
+            steps.reverse()
+            candidate = completing_result.candidate
+            steps.append(WinningTacticStep(
+                candidate.source,
+                candidate.origin,
+                candidate.model_rank,
+                completing_result.cache_hit,
+            ))
+            winning_path = tuple(steps)
         self.terminal_result = SearchResult(
             status=status,
             proof=proof,
@@ -254,6 +352,7 @@ class SearchSession:
             semantic_recoveries=tuple(self.semantic_recoveries),
             semantic_prunes=tuple(self.semantic_prunes),
             forced_moves=tuple(self.forced_moves),
+            winning_path=winning_path,
         )
 
     def classify_rescue_result(
@@ -294,6 +393,15 @@ class SearchSession:
         self.rescue_node = None
         self.rescue_ordinary = None
         self.forced_successor = None
+
+    def abandon_pending_rescue(self) -> None:
+        """Fail open from a stuck state and preserve deterministic progress."""
+
+        if not self.is_stuck():
+            raise RuntimeError("search has no pending analogy rescue")
+        if self.forced_successor is not None:
+            self.frontier.push(self.forced_successor)
+        self.clear_active_node()
 
 
 def start_search(
@@ -347,9 +455,7 @@ def update_search_with_scored_proof_states(
     if rejected is not None:
         search.discarded.append(rejected)
         if rejected.reason is DiscardReason.SEMANTIC_REFUTED:
-            head = result.candidate.source.split(maxsplit=1)[0]
-            if head in {"left", "right"}:
-                search.refuted_disjuncts.add(head)
+            _register_refuted_disjunction(search, result.candidate)
 
     search.candidate_index += 1
     exhausted = search.candidate_index >= len(search.active_candidates)
@@ -382,7 +488,12 @@ def _finish_ordinary_expansion(
     for successor in ordinary.successors:
         _index_node(search.nodes_by_id, successor)
     if completed_proof is not None:
-        search.finish(SearchStatus.COMPLETE, completed_proof)
+        search.finish(
+            SearchStatus.COMPLETE,
+            completed_proof,
+            completing_result=search.attempts[-1],
+            completion_node=search.node,
+        )
         return
     search.frontier.extend(ordinary.successors)
 
@@ -431,7 +542,10 @@ def _finish_ordinary_expansion(
                 hypothesis,
             )
             return
-    if search.context.analogy_fallback is None:
+    if (
+        search.context.analogy_fallback is None
+        and not search.context.analogy_recovery_enabled
+    ):
         search.clear_active_node()
 
 
@@ -472,12 +586,20 @@ def _update_forced_move(
         attempts=search.rescue_ordinary.attempts + (result,),
     )
     if completed is not None:
-        search.finish(SearchStatus.COMPLETE, completed)
+        search.finish(
+            SearchStatus.COMPLETE,
+            completed,
+            completing_result=result,
+            completion_node=search.node,
+        )
         return
     if successor is not None:
         _index_node(search.nodes_by_id, successor)
         search.forced_successor = successor
-    if search.context.analogy_fallback is None:
+    if (
+        search.context.analogy_fallback is None
+        and not search.context.analogy_recovery_enabled
+    ):
         if successor is not None:
             search.frontier.push(successor)
         search.clear_active_node()
@@ -503,7 +625,19 @@ def _update_analogy_rescue(
         search.finish(SearchStatus.CANCELLED)
         return
     if outcome.completed_proof is not None:
-        search.finish(SearchStatus.COMPLETE, outcome.completed_proof)
+        completing_result = next(
+            attempt.result
+            for rollout in outcome.rollouts
+            for attempt in rollout.attempts
+            if attempt.result.status is TacticStatus.COMPLETE
+            and attempt.result.proof == outcome.completed_proof
+        )
+        search.finish(
+            SearchStatus.COMPLETE,
+            outcome.completed_proof,
+            completing_result=completing_result,
+            completion_node=search.rescue_node,
+        )
         return
     if search.forced_successor is not None:
         search.frontier.push(search.forced_successor)
@@ -707,6 +841,8 @@ def _classify(
             node.state.id,
             result.candidate.source,
             node.depth + 1,
+            result.candidate,
+            result.cache_hit,
         ),
         None,
     )

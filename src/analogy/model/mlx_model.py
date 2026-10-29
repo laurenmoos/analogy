@@ -53,9 +53,25 @@ class _DeltaLayer:
         return output
 
 
-def _load_exact_model(load_fn: Callable[[str], Any], identifier: str) -> Any:
+def _load_exact_model(
+    load_fn: Callable[[str], Any],
+    identifier: str,
+    *,
+    revision: str | None = None,
+    snapshot_download_fn: Callable[..., str] | None = None,
+) -> Any:
     try:
-        return load_fn(identifier)
+        source = identifier
+        if revision is not None:
+            if snapshot_download_fn is None:
+                from huggingface_hub import snapshot_download
+
+                snapshot_download_fn = snapshot_download
+            source = snapshot_download_fn(
+                repo_id=identifier,
+                revision=revision,
+            )
+        return load_fn(source)
     except Exception as error:
         raise ModelConfigurationError(
             f"failed to load MLX model {identifier!r}: {error or type(error).__name__}"
@@ -131,7 +147,11 @@ class MLXQwenGenerator:
             from mlx_lm.sample_utils import make_sampler
         except ImportError as error:
             raise ModelConfigurationError(_mlx_import_diagnostic(error)) from error
-        model, tokenizer = _load_exact_model(load, config.name)
+        model, tokenizer = _load_exact_model(
+            load,
+            config.name,
+            revision=config.revision,
+        )
         return cls(
             model=model,
             tokenizer=tokenizer,

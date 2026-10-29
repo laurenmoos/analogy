@@ -40,6 +40,8 @@ class RunState:
     run_id: str
     output_directory: Path
     started: float
+    model_revision: str | None = None
+    analogy_model_revision: str | None = None
     results: list[ProblemResult] = field(default_factory=list)
     traces: list[str] = field(default_factory=list)
 

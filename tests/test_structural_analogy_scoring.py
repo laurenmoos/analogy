@@ -1,9 +1,11 @@
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from analogy.main import load_config
 from analogy.solver.analogy.state import MentalModel, MentalModelCorrespondence
 from analogy.solver.analogy.structural_scoring import (
     FROZEN_EMBEDDING_LAYER,
@@ -12,21 +14,30 @@ from analogy.solver.analogy.structural_scoring import (
     FROZEN_MATRIX_SIZE,
     EmbeddingCalibration,
     ProofBelief,
+    ProofTrajectory,
     StructuralElement,
     StructuralGraph,
     StructuralScoringError,
     build_cosine_step_distance_matrix,
     build_proof_belief,
+    abstract_proof_transition,
+    proof_trajectory,
     compute_state_change_vectors,
+    fit_embedding_calibration,
+    load_embedding_calibration,
     load_frozen_embedding_calibration,
     ordered_mental_model_state_texts,
     ordered_proof_state_texts,
     remove_embedding_anisotropy,
     resize_step_distance_matrix,
     score_mental_model_revision,
+    validate_calibration_embeddings,
     upper_triangle_correlation_distance,
 )
 from analogy.utils.records import Embedding, SearchNode, SymbolicState
+
+
+ROOT = Path(__file__).parents[1]
 
 
 def _model(order=(0, 1, 2)):
@@ -141,6 +152,32 @@ def test_build_proof_belief_follows_only_the_active_rescue_ancestry():
     ]
 
 
+def test_proof_trajectory_extracts_owned_states_and_tactics_in_order():
+    assert proof_trajectory(_belief()) == ProofTrajectory(
+        ("shore", "island", "cave", "treasure"),
+        ("sail", "read map", "open chest"),
+    )
+
+
+@pytest.mark.parametrize(
+    "tactic,abstract",
+    [
+        ("intro h", "take on an assumption"),
+        ("obtain ⟨hA, hB⟩ := h", "break a combined fact into its parts"),
+        ("cases h", "break a combined fact into its parts"),
+        ("apply hRule", "use a rule to reduce the goal"),
+        ("exact h", "finish using something already in hand"),
+        ("constructor", "split the task into required parts"),
+        ("left", "commit to the left available choice"),
+        ("right", "commit to the right available choice"),
+        ("rw [h]", "rewrite the situation using a known relationship"),
+        ("uncommon h9", "make the next proof move"),
+    ],
+)
+def test_tactic_abstraction_is_operand_free_and_total(tactic, abstract):
+    assert abstract_proof_transition(tactic) == abstract
+
+
 def test_ordered_state_texts_exclude_transition_labels_but_keep_runtime_prefixes():
     assert ordered_mental_model_state_texts(_model()) == (
         "domain=treasure hunt\nrole=domain-state\nshore",
@@ -211,6 +248,7 @@ def test_runtime_score_uses_frozen_mean_layer_and_prefers_matching_order():
     )
 
     assert matching.distance < shuffled.distance
+    assert matching.coupling == shuffled.coupling
     assert math.isfinite(matching.distance)
     assert all(layer == FROZEN_EMBEDDING_LAYER for _, layer in embedder.inputs)
     assert len(matching.coupling) == FROZEN_MATRIX_SIZE
@@ -224,7 +262,57 @@ def test_runtime_score_is_neutral_until_the_proof_has_a_transition():
     fit = score_mental_model_revision(
         _model(), belief, _MeanSemanticEmbedder(), calibration=_calibration()
     )
-    assert fit.distance == 0.0
+    assert fit.distance == pytest.approx(0.5)
+    assert fit.discriminative is False
+
+
+def test_two_transition_score_is_marked_non_discriminating_instead_of_perfect():
+    model = MentalModel(
+        "treasure hunt",
+        (
+            MentalModelCorrespondence("shore", "sail", "island"),
+            MentalModelCorrespondence("island", "read map", "cave"),
+        ),
+    )
+    belief = ProofBelief(
+        StructuralGraph(
+            (
+                StructuralElement("p0", "proof-state", "shore", 0.0),
+                StructuralElement("t1", "proof-tactic", "sail", 1.0),
+                StructuralElement("p1", "proof-state", "island", 2.0),
+                StructuralElement("t2", "proof-tactic", "read map", 3.0),
+                StructuralElement("p2", "proof-state", "cave", 4.0),
+            ),
+            (("p0", "t1"), ("t1", "p1"), ("p1", "t2"), ("t2", "p2")),
+        )
+    )
+
+    fit = score_mental_model_revision(
+        model, belief, _MeanSemanticEmbedder(), calibration=_calibration()
+    )
+
+    assert fit.distance == pytest.approx(0.5)
+    assert fit.discriminative is False
+
+
+def test_root_state_score_still_rejects_wrong_calibration_revision():
+    belief = ProofBelief(
+        StructuralGraph((StructuralElement("only", "proof-state", "shore", 0.0),), ())
+    )
+    calibration = EmbeddingCalibration(
+        mean=(0.0,) * 6,
+        principal_components=(
+            (0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        ),
+        model_id="expected/model",
+        model_revision="expected/model@revision",
+    )
+
+    with pytest.raises(StructuralScoringError, match="calibration model"):
+        score_mental_model_revision(
+            _model(), belief, _MeanSemanticEmbedder(), calibration=calibration
+        )
 
 
 def test_frozen_calibration_matches_runtime_embedding_dimension():
@@ -241,8 +329,117 @@ def test_packaged_calibration_is_bound_to_the_frozen_embedding_model():
 
     assert calibration.model_id == FROZEN_EMBEDDING_MODEL
     assert calibration.model_revision == FROZEN_EMBEDDING_REVISION
-    assert len(calibration.mean) == 4096
+    assert len(calibration.mean) == 5120
     assert len(calibration.principal_components) == 2
+
+
+def test_release_config_and_packaged_calibration_use_the_same_14b_model():
+    config = load_config(ROOT / "config.yaml")
+    calibration = load_embedding_calibration(
+        config.analogy.calibration_path,
+        expected_model_id=config.model.name,
+    )
+
+    assert config.model.name == "mlx-community/Qwen3-14B-4bit"
+    assert config.analogy.model_name == config.model.name
+    assert calibration.model_id == config.model.name
+    assert calibration.model_revision == FROZEN_EMBEDDING_REVISION
+
+
+def test_generic_calibration_loader_accepts_matching_frozen_metadata(tmp_path):
+    path = tmp_path / "calibration.npz"
+    np.savez_compressed(
+        path,
+        mean=np.asarray([1.0, 2.0, 3.0]),
+        principal_components=np.asarray(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        ),
+        score_method=np.asarray(["ordered-transition-resized-correlation-v1"]),
+        model_id=np.asarray(["example/model"]),
+        model_revision=np.asarray(["example/model@frozen"]),
+        pooling=np.asarray(["mean"]),
+        source_text_count=np.asarray([838]),
+        embedding_layer=np.asarray([12]),
+        matrix_size=np.asarray([24]),
+    )
+
+    calibration = load_embedding_calibration(
+        path,
+        expected_model_id="example/model",
+    )
+
+    assert calibration.mean == (1.0, 2.0, 3.0)
+    assert calibration.model_revision == "example/model@frozen"
+
+
+def test_generic_calibration_loader_rejects_wrong_model(tmp_path):
+    path = tmp_path / "calibration.npz"
+    np.savez_compressed(
+        path,
+        mean=np.asarray([1.0, 2.0, 3.0]),
+        principal_components=np.asarray(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        ),
+        score_method=np.asarray(["ordered-transition-resized-correlation-v1"]),
+        model_id=np.asarray(["wrong/model"]),
+        model_revision=np.asarray(["wrong/model@frozen"]),
+        pooling=np.asarray(["mean"]),
+        source_text_count=np.asarray([838]),
+        embedding_layer=np.asarray([12]),
+        matrix_size=np.asarray([24]),
+    )
+
+    with pytest.raises(StructuralScoringError, match="model id"):
+        load_embedding_calibration(path, expected_model_id="expected/model")
+
+
+def test_fit_embedding_calibration_freezes_mean_and_two_orthogonal_components():
+    calibration = fit_embedding_calibration(
+        (
+            (0.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (0.0, 4.0, 0.0),
+            (2.0, 4.0, 1.0),
+        ),
+        model_id="example/model",
+        model_revision="example/model@revision",
+    )
+
+    np.testing.assert_allclose(calibration.mean, (1.0, 2.0, 0.25))
+    components = np.asarray(calibration.principal_components)
+    np.testing.assert_allclose(components @ components.T, np.eye(2), atol=1e-12)
+    assert calibration.model_id == "example/model"
+
+
+def test_calibration_inputs_require_one_exact_resolved_revision():
+    valid = Embedding(
+        "embedding-a", (1.0, 0.0), model_revision="model@abc", layer=12
+    )
+    assert validate_calibration_embeddings((valid,))[1] == "model@abc"
+
+    with pytest.raises(StructuralScoringError, match="resolved immutable revision"):
+        validate_calibration_embeddings(
+            (
+                Embedding(
+                    "embedding-a",
+                    (1.0, 0.0),
+                    model_revision="unresolved:model",
+                    layer=12,
+                ),
+            )
+        )
+    with pytest.raises(StructuralScoringError, match="same model revision"):
+        validate_calibration_embeddings(
+            (
+                valid,
+                Embedding(
+                    "embedding-b",
+                    (0.0, 1.0),
+                    model_revision="model@different",
+                    layer=12,
+                ),
+            )
+        )
 
 
 def test_runtime_score_rejects_embeddings_from_a_different_model():
@@ -252,8 +449,8 @@ def test_runtime_score_rejects_embeddings_from_a_different_model():
             (0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
             (0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
         ),
-        model_id="mlx-community/Qwen3-8B-4bit",
-        model_revision="mlx-community/Qwen3-8B-4bit@expected-revision",
+        model_id="example/other-model",
+        model_revision="example/other-model@expected-revision",
     )
 
     with pytest.raises(StructuralScoringError, match="calibration model"):

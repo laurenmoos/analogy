@@ -24,16 +24,30 @@ def _problem_fingerprint(problem: Problem) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _signature(config: AppConfig) -> str:
+def _signature(config: AppConfig, condition: str) -> str:
     prompt_hash = hashlib.sha256(config.prompts.path.read_bytes()).hexdigest()
+    calibration_hash = (
+        hashlib.sha256(config.analogy.calibration_path.read_bytes()).hexdigest()
+        if config.analogy.calibration_path is not None
+        else None
+    )
     payload = {
+        "condition": condition,
         "corpus": str(config.benchmark.corpus),
         "prompts_sha256": prompt_hash,
+        "calibration_sha256": calibration_hash,
         "model": asdict(config.model),
         "search": asdict(config.search),
         "analogy": asdict(config.analogy),
+        "run_seed": config.run.seed,
     }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -133,10 +147,18 @@ def _persist_checkpoint(checkpoint: Checkpoint) -> None:
 
 
 def load_checkpoint(
-    config: AppConfig, problems: Sequence[Problem]
+    config: AppConfig,
+    problems: Sequence[Problem],
+    *,
+    condition: str | None = None,
 ) -> Checkpoint:
     normalized = tuple(problems)
-    signature = _signature(config)
+    active_condition = condition or (
+        "analogy" if config.analogy.enabled else "ordinary"
+    )
+    if active_condition not in {"ordinary", "deliberation", "analogy"}:
+        raise ValueError(f"unknown solver condition {active_condition!r}")
+    signature = _signature(config, active_condition)
     fingerprints = {
         problem.id: _problem_fingerprint(problem) for problem in normalized
     }

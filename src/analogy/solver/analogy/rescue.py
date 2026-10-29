@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
@@ -14,6 +15,7 @@ from ...model.parser import (
     normalize_lean4_tactic,
     tactic_is_incomplete,
 )
+from ...model.model_provider import CompletionScore
 from ...model.prompt_runner import GenerationAttempt, GenerationStatus
 from ...model.prompts import (
     focused_lean_goal,
@@ -39,12 +41,15 @@ from ..proof.semantic import (
     render_countermodel_table,
     render_semantic_guidance,
 )
+from ..proof.syntax import InventoryError, proof_goals, proposition_root
 from .protocol import (
+    extract_story_model,
     extract_working_model_block,
     record_model_history,
     remove_analogy_blocks,
     render_working_model,
     render_scratchpad_context,
+    render_story_model,
 )
 from .state import (
     AnalogyScratchpad,
@@ -54,11 +59,20 @@ from .state import (
     MentalModel,
     WorkingMentalModel,
 )
+from .validation import (
+    MentalModelValidationError,
+    validate_mental_model,
+    validate_story_model,
+)
 from .structural_scoring import (
+    EmbeddingCalibration,
     ProofBelief,
     StructuralScoringError,
     UnscorableMentalModelError,
+    abstract_proof_transition,
     build_proof_belief,
+    load_embedding_calibration,
+    proof_trajectory,
     score_mental_model_revision,
 )
 
@@ -149,8 +163,14 @@ class RescueProposal:
     predicted_state: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.candidate, TacticCandidate) or self.candidate.origin is not CandidateOrigin.ANALOGICAL:
-            raise ValueError("rescue candidate must have analogical origin")
+        if (
+            not isinstance(self.candidate, TacticCandidate)
+            or self.candidate.origin
+            not in {CandidateOrigin.ANALOGICAL, CandidateOrigin.DELIBERATIVE}
+        ):
+            raise ValueError(
+                "rescue candidate must have analogical or deliberative origin"
+            )
         _require_text(self.predicted_state, "predicted_state")
 
 
@@ -160,9 +180,9 @@ class _ScoredRevision:
     generation_index: int
     action: AnalogyUpdateAction
     model: MentalModel
-    proposal: RescueProposal
     generation: AnalogyGenerationAttempt
     rendered_model: str
+    generation_messages: tuple[Message, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +284,8 @@ class AnalogyRescueRunner(Protocol):
 def generate_analogy_rescue(
     search: SearchSession,
     scratchpad: AnalogyScratchpad,
+    *,
+    force_domain_change: bool | None = None,
 ) -> AnalogyRescue:
     """Build the lazy rescue plan for the search's current stuck state."""
 
@@ -283,7 +305,11 @@ def generate_analogy_rescue(
         cancellation=search.context.cancellation,
         semantic_guidance=render_semantic_guidance(recovery),
         dependency_table=render_countermodel_table(recovery.countermodel_table),
-        force_domain_change=recovery.result is SemanticResult.COUNTERMODEL,
+        force_domain_change=(
+            recovery.result is SemanticResult.COUNTERMODEL
+            if force_domain_change is None
+            else force_domain_change
+        ),
         proof_belief=build_proof_belief(search),
         classify=search.classify_rescue_result,
     )
@@ -294,15 +320,29 @@ def initialize_analogy_fallback(
     generator: Any,
     model_events: list[dict[str, Any]],
     scratchpad: AnalogyScratchpad,
+    *,
+    initial_proposal: RescueProposal | None = None,
+    initial_state_id: str | None = None,
 ) -> AnalogyFallback:
     """Create the analogy-only fallback policy for one problem search."""
 
+    calibration = None
+    if config.analogy.calibration_path is not None:
+        calibration = load_embedding_calibration(
+            config.analogy.calibration_path,
+            expected_model_id=(
+                config.analogy.model_name or config.model.name
+            ),
+        )
     return AnalogyFallback(
         generator,
         max_model_calls=config.analogy.max_model_calls,
         seed=config.run.seed,
         trace_sink=model_events.append,
         analogy_scratchpad=scratchpad,
+        calibration=calibration,
+        initial_proposal=initial_proposal,
+        initial_state_id=initial_state_id,
     )
 
 
@@ -334,6 +374,105 @@ class RescueOutputError(ValueError):
     """Raised when generated analogy JSON violates the fallback contract."""
 
 
+def _parse_tactic_only(
+    text: str,
+    proof_state: str,
+    *,
+    attempted_tactics: set[str] | frozenset[str] = frozenset(),
+) -> RescueProposal:
+    """Parse and validate only the newly proposed current-state tactic."""
+
+    try:
+        payload = json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError) as error:
+        raise RescueOutputError("recovery tactic output must be strict JSON") from error
+    requires_decision = _focused_goal_is_disjunction(proof_state)
+    required_fields = (
+        {"decision", "tactic", "predicted_state"}
+        if requires_decision
+        else {"tactic", "predicted_state"}
+    )
+    if not isinstance(payload, dict) or set(payload) != required_fields:
+        raise RescueOutputError(
+            "recovery tactic JSON must contain exactly "
+            + ", ".join(f'"{field}"' for field in sorted(required_fields))
+        )
+    tactic = payload["tactic"]
+    predicted_state = payload["predicted_state"]
+    if (
+        not isinstance(tactic, str)
+        or not tactic.strip()
+        or "\n" in tactic
+        or "\r" in tactic
+        or "\x00" in tactic
+    ):
+        raise RescueOutputError("tactic must be one nonblank safe line")
+    if not isinstance(predicted_state, str) or not predicted_state.strip():
+        raise RescueOutputError("predicted_state must be nonblank text")
+    canonical = normalize_lean4_tactic(tactic, proof_state)
+    if requires_decision:
+        _validate_prospective_decision(payload["decision"], canonical)
+    canonical_attempts = {
+        normalize_lean4_tactic(item, proof_state) for item in attempted_tactics
+    }
+    if canonical in canonical_attempts:
+        raise RescueOutputError(
+            f"tactic {canonical!r} was already attempted at this proof state"
+        )
+    if tactic_is_incomplete(canonical):
+        raise RescueOutputError(f"tactic {canonical!r} is incomplete")
+    rejection = candidate_rejection_reason(canonical, proof_state)
+    if rejection is not None:
+        raise RescueOutputError(f"tactic {canonical!r} was filtered: {rejection}")
+    return RescueProposal(
+        TacticCandidate(canonical, 1.0, CandidateOrigin.ANALOGICAL),
+        predicted_state.strip(),
+    )
+
+
+def _focused_goal_is_disjunction(proof_state: str) -> bool:
+    try:
+        target = proof_goals(proof_state)[0].target
+    except (InventoryError, IndexError):
+        return False
+    return proposition_root(target).operator == "∨"
+
+
+def _validate_prospective_decision(decision: object, selected_tactic: str) -> None:
+    required = {"current_everyday_state", "options", "selection_reason"}
+    if not isinstance(decision, dict) or set(decision) != required:
+        raise RescueOutputError(
+            "decision must contain exactly current_everyday_state, options, and selection_reason"
+        )
+    for field in ("current_everyday_state", "selection_reason"):
+        value = decision[field]
+        if not isinstance(value, str) or not value.strip():
+            raise RescueOutputError(f"decision {field} must be nonblank text")
+    options = decision["options"]
+    if not isinstance(options, list) or not options:
+        raise RescueOutputError("decision options must be a nonempty list")
+    option_fields = {"tactic", "everyday_consequence", "proof_consequence"}
+    tactics: list[str] = []
+    for option in options:
+        if not isinstance(option, dict) or set(option) != option_fields:
+            raise RescueOutputError(
+                "each decision option must contain exactly tactic, "
+                "everyday_consequence, and proof_consequence"
+            )
+        if any(
+            not isinstance(option[field], str) or not option[field].strip()
+            for field in option_fields
+        ):
+            raise RescueOutputError("decision option fields must be nonblank text")
+        tactics.append(" ".join(option["tactic"].split()))
+    if not {"left", "right"}.issubset(tactics):
+        raise RescueOutputError(
+            "decision options must compare both left and right consequences"
+        )
+    if selected_tactic not in tactics:
+        raise RescueOutputError("selected tactic must appear in decision options")
+
+
 def _extract_json_object(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("```"):
@@ -353,6 +492,8 @@ def parse_analogy_update(
     proof_state: str | None = None,
     current: WorkingMentalModel | None,
     force_domain_change: bool = False,
+    required_domain: str | None = None,
+    abandoned_domains: tuple[str, ...] = (),
 ) -> tuple[AnalogyUpdateAction, WorkingMentalModel, RescueProposal]:
     """Parse one scratchpad update and its first tactic without mutating state."""
 
@@ -380,6 +521,21 @@ def parse_analogy_update(
         raise RescueOutputError("countermodel forces action change_domain")
     if current is None and action is not AnalogyUpdateAction.CHANGE_DOMAIN:
         raise RescueOutputError("missing active analogy requires action change_domain")
+    if (
+        (isinstance(current, MentalModel) or required_domain is not None)
+        and not isinstance(analogy, MentalModel)
+    ):
+        raise RescueOutputError("recovery requires the validated mental-model JSON format")
+    if isinstance(analogy, MentalModel):
+        try:
+            analogy = validate_mental_model(
+                analogy,
+                proof_state or "",
+                required_domain=required_domain,
+                abandoned_domains=abandoned_domains,
+            )
+        except MentalModelValidationError as error:
+            raise RescueOutputError(str(error)) from error
     if (
         action is AnalogyUpdateAction.REVISE_STEPS
         and isinstance(analogy, AnalogyState)
@@ -422,6 +578,9 @@ class AnalogyFallback:
         seed: int,
         analogy_scratchpad: AnalogyScratchpad,
         trace_sink: Any | None = None,
+        calibration: EmbeddingCalibration | None = None,
+        initial_proposal: RescueProposal | None = None,
+        initial_state_id: str | None = None,
     ) -> None:
         if isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls <= 0:
             raise ValueError("max_model_calls must be a positive integer")
@@ -433,6 +592,11 @@ class AnalogyFallback:
         self._max_model_calls = max_model_calls
         self._seed = seed
         self._trace_sink = trace_sink
+        self._calibration = calibration
+        if (initial_proposal is None) != (initial_state_id is None):
+            raise ValueError("initial proposal and state id must be supplied together")
+        self._initial_proposal = initial_proposal
+        self._initial_state_id = initial_state_id
         self.scratchpad = analogy_scratchpad
 
     def search(
@@ -468,6 +632,51 @@ class AnalogyFallback:
             for item in ordinary_attempts
             if item.status is not TacticStatus.ACCEPTED
         )
+        initial_rollouts: list[RescueRollout] = []
+        if force_domain_change and self._initial_state_id == state.id:
+            self._initial_proposal = None
+            self._initial_state_id = None
+        if (
+            self._initial_proposal is not None
+            and self._initial_state_id == state.id
+        ):
+            proposal = self._initial_proposal
+            self._initial_proposal = None
+            self._initial_state_id = None
+            if proposal.candidate.source not in attempted_tactics:
+                attempted_tactics.add(proposal.candidate.source)
+                attempted_order.append(proposal.candidate.source)
+                evaluation = evaluator(proposal.candidate)
+                attempt = RescueAttempt(
+                    proposal, evaluation.result, evaluation.discarded
+                )
+                termination = (
+                    RescueTermination.COMPLETE
+                    if evaluation.completed_proof is not None
+                    else RescueTermination.PROGRESS
+                    if evaluation.successor is not None
+                    else RescueTermination.REJECTED
+                    if evaluation.result.status is TacticStatus.ERROR
+                    else RescueTermination.EXHAUSTED
+                )
+                rollout = RescueRollout(
+                    f"{state.id}:analogy:initial",
+                    state.id,
+                    (proposal,),
+                    (attempt,),
+                    termination,
+                    analogy_trace=render_scratchpad_context(scratchpad),
+                )
+                initial_rollouts.append(rollout)
+                if evaluation.completed_proof is not None:
+                    return AnalogyRescueOutcome(
+                        completed_proof=evaluation.completed_proof,
+                        rollouts=(rollout,),
+                    )
+                if evaluation.successor is not None:
+                    return AnalogyRescueOutcome(
+                        successor=evaluation.successor, rollouts=(rollout,)
+                    )
         messages = prompt_catalog().messages(
             "analogy_update",
             overall_target=render_lean_goal_for_model(goal.expression),
@@ -479,6 +688,10 @@ class AnalogyFallback:
             domain_card=prompt_catalog().text("analogy_domain_card"),
             semantic_guidance=semantic_guidance,
             dependency_table=dependency_table,
+            required_domain=(
+                scratchpad.assigned_domain
+                or (scratchpad.current.domain if scratchpad.current is not None else "(none)")
+            ),
         )
         user = messages[1]
         if scratchpad.history:
@@ -499,14 +712,16 @@ class AnalogyFallback:
                 state,
                 evaluator,
                 cancellation,
-                messages,
                 attempted_order,
                 attempted_tactics,
                 proof_belief,
+                semantic_guidance=semantic_guidance,
+                dependency_table=dependency_table,
                 force_domain_change=force_domain_change,
+                prior_rollouts=tuple(initial_rollouts),
             )
         active_messages = messages
-        rollouts: list[RescueRollout] = []
+        rollouts: list[RescueRollout] = list(initial_rollouts)
         calibrated_update: tuple[AnalogyUpdateAction, WorkingMentalModel] | None = None
         for index in range(self._max_model_calls):
             if cancellation.is_cancelled():
@@ -523,6 +738,8 @@ class AnalogyFallback:
                     proof_state=state.expression,
                     current=scratchpad.current,
                     force_domain_change=force_domain_change,
+                    required_domain=scratchpad.assigned_domain,
+                    abandoned_domains=scratchpad.abandoned_domains,
                 )
                 try:
                     scratchpad.validate_transition(update_action, update_state)
@@ -587,6 +804,12 @@ class AnalogyFallback:
                         prompt_catalog().text(
                             "analogy_invalid_repair",
                             diagnostic=error,
+                            current_domain=(
+                                scratchpad.current.domain
+                                if scratchpad.current is not None
+                                else (scratchpad.abandoned_domains[-1] if scratchpad.abandoned_domains else "(none)")
+                            ),
+                            required_domain=scratchpad.assigned_domain or "preserve current domain",
                             previous_response=remove_analogy_blocks(raw),
                             contract=_rescue_output_contract(),
                         ),
@@ -711,18 +934,48 @@ class AnalogyFallback:
         state: SymbolicState,
         evaluator: Callable[[TacticCandidate], TacticEvaluation],
         cancellation: CancellationToken,
-        messages: tuple[Message, ...],
         attempted_order: list[str],
         attempted_tactics: set[str],
         proof_belief: ProofBelief,
         *,
+        semantic_guidance: str,
+        dependency_table: str,
         force_domain_change: bool,
+        prior_rollouts: tuple[RescueRollout, ...] = (),
     ) -> AnalogyRescueOutcome:
-        """Generate and score the whole revision batch before asking Lean."""
+        """Rank current-path stories, then request one current-goal tactic."""
 
         scratchpad = self.scratchpad
-        rollouts: list[RescueRollout] = []
+        rollouts: list[RescueRollout] = list(prior_rollouts)
         ranked: list[_ScoredRevision] = []
+        trajectory = proof_trajectory(proof_belief)
+        if not trajectory.tactics:
+            return AnalogyRescueOutcome(rollouts=tuple(rollouts))
+        abstract_trajectory = "\n".join(
+            f"{index}. {abstract_proof_transition(tactic)}"
+            for index, tactic in enumerate(trajectory.tactics, 1)
+        )
+        required_domain = (
+            scratchpad.assigned_domain
+            or (
+                scratchpad.current.domain
+                if isinstance(scratchpad.current, MentalModel)
+                else None
+            )
+        )
+        if required_domain is None:
+            return AnalogyRescueOutcome(rollouts=tuple(rollouts))
+        action = (
+            AnalogyUpdateAction.CHANGE_DOMAIN
+            if force_domain_change
+            else AnalogyUpdateAction.REVISE_MODEL
+        )
+        base_story_messages = prompt_catalog().messages(
+            "analogy_recovery_story",
+            required_domain=required_domain,
+            abstract_trajectory=abstract_trajectory,
+        )
+        active_story_messages = base_story_messages
         for index in range(self._max_model_calls):
             if cancellation.is_cancelled():
                 _append_unsubmitted_rollouts(
@@ -735,75 +988,36 @@ class AnalogyFallback:
                 )
             seed = _fallback_seed(self._seed, state, index)
             raw = ""
+            traced_story_call = False
             try:
-                raw = self._generator.generate(messages, seed=seed)
-                self._trace(state.id, messages, seed, raw)
-                action, candidate_model, proposal = parse_analogy_update(
-                    raw,
-                    proof_state=state.expression,
-                    current=scratchpad.current,
-                    force_domain_change=force_domain_change,
+                raw = self._generator.generate(active_story_messages, seed=seed)
+                candidate_model = validate_story_model(
+                    extract_story_model(raw),
+                    required_domain=required_domain,
+                    proof_transitions=trajectory.tactics,
+                    abandoned_domains=scratchpad.abandoned_domains,
                 )
-                if not isinstance(candidate_model, MentalModel):
-                    raise RescueOutputError(
-                        "structural revision scoring requires a mental model"
-                    )
                 try:
                     scratchpad.validate_transition(action, candidate_model)
                 except AnalogyStateError as error:
                     raise RescueOutputError(str(error)) from error
+                self._trace(
+                    state.id,
+                    active_story_messages,
+                    seed,
+                    raw,
+                    kind="analogy_recovery_story_call",
+                )
+                traced_story_call = True
                 rendered = render_working_model(candidate_model)
-                if proposal.candidate.source in attempted_tactics:
-                    diagnostic = (
-                        f"tactic {proposal.candidate.source!r} was already attempted "
-                        "at this proof state"
-                    )
-                    generation = AnalogyGenerationAttempt(
-                        seed,
-                        raw,
-                        GenerationStatus.DUPLICATE,
-                        index > 0,
-                        "duplicate_tactic",
-                        diagnostic,
-                    )
-                    rollouts.append(
-                        RescueRollout(
-                            f"{state.id}:analogy:{index}",
-                            state.id,
-                            (),
-                            (),
-                            RescueTermination.DUPLICATE,
-                            generations=(generation,),
-                            analogy_trace=rendered,
-                        )
-                    )
-                    continue
-                attempted_tactics.add(proposal.candidate.source)
-                attempted_order.append(proposal.candidate.source)
-                if _normalized_prediction_state(proposal.predicted_state) == _normalized_prediction_state(state.expression):
-                    generation = AnalogyGenerationAttempt(
-                        seed,
-                        raw,
-                        GenerationStatus.VALID,
-                        index > 0,
-                        prediction_label=PredictionLabel.PREDICTED_NO_CHANGE,
-                    )
-                    rollouts.append(
-                        RescueRollout(
-                            f"{state.id}:analogy:{index}",
-                            state.id,
-                            (proposal,),
-                            (),
-                            RescueTermination.PREDICTED_NO_CHANGE,
-                            generations=(generation,),
-                            analogy_trace=rendered,
-                        )
-                    )
-                    continue
+                score_arguments = {}
+                if self._calibration is not None:
+                    score_arguments["calibration"] = self._calibration
                 fit = score_mental_model_revision(
                     candidate_model,
                     proof_belief,
                     self._generator,
+                    **score_arguments,
                 )
                 generation = AnalogyGenerationAttempt(
                     seed,
@@ -814,7 +1028,13 @@ class AnalogyFallback:
                     structural_coupling=fit.coupling,
                 )
                 self._trace_structural_fit(
-                    state.id, index, seed, candidate_model, fit.distance, fit.coupling
+                    state.id,
+                    index,
+                    seed,
+                    candidate_model,
+                    fit.distance,
+                    fit.coupling,
+                    discriminative=getattr(fit, "discriminative", True),
                 )
                 ranked.append(
                     _ScoredRevision(
@@ -822,12 +1042,21 @@ class AnalogyFallback:
                         index,
                         action,
                         candidate_model,
-                        proposal,
                         generation,
                         rendered,
+                        active_story_messages,
                     )
                 )
-            except RescueOutputError as error:
+            except (RescueOutputError, MentalModelValidationError, AnalogyStateError) as error:
+                if not traced_story_call:
+                    self._trace(
+                        state.id,
+                        active_story_messages,
+                        seed,
+                        raw,
+                        error=error,
+                        kind="analogy_recovery_story_call",
+                    )
                 generation = AnalogyGenerationAttempt(
                     seed,
                     raw,
@@ -846,11 +1075,28 @@ class AnalogyFallback:
                         generations=(generation,),
                     )
                 )
+                active_story_messages = base_story_messages + (
+                    Message(
+                        "user",
+                        prompt_catalog().text(
+                            "analogy_invalid_repair",
+                            diagnostic=error,
+                            current_domain=(
+                                scratchpad.current.domain
+                                if scratchpad.current is not None
+                                else (scratchpad.abandoned_domains[-1] if scratchpad.abandoned_domains else "(none)")
+                            ),
+                            required_domain=required_domain,
+                            previous_response=raw or "(no response)",
+                            contract="Return exactly one valid story JSON object and no other text.",
+                        ),
+                    ),
+                )
             except UnscorableMentalModelError as error:
                 generation = AnalogyGenerationAttempt(
                     seed,
                     raw,
-                    GenerationStatus.RUNTIME_ERROR,
+                    GenerationStatus.INVALID,
                     index > 0,
                     "structural_scoring",
                     str(error),
@@ -861,14 +1107,38 @@ class AnalogyFallback:
                         state.id,
                         (),
                         (),
-                        RescueTermination.GENERATION_ERROR,
+                        RescueTermination.INVALID_OUTPUT,
                         generations=(generation,),
                     )
+                )
+                active_story_messages = base_story_messages + (
+                    Message(
+                        "user",
+                        prompt_catalog().text(
+                            "analogy_invalid_repair",
+                            diagnostic=error,
+                            current_domain=required_domain,
+                            required_domain=required_domain,
+                            previous_response=raw or "(no response)",
+                            contract=(
+                                "Return exactly one valid story JSON object. "
+                                "Use concrete, meaningfully distinct before and after situations."
+                            ),
+                        ),
+                    ),
                 )
             except StructuralScoringError:
                 raise
             except Exception as error:
-                self._trace(state.id, messages, seed, raw, error=error)
+                if not traced_story_call:
+                    self._trace(
+                        state.id,
+                        active_story_messages,
+                        seed,
+                        raw,
+                        error=error,
+                        kind="analogy_recovery_story_call",
+                    )
                 generation = AnalogyGenerationAttempt(
                     seed,
                     raw,
@@ -897,17 +1167,145 @@ class AnalogyFallback:
                 return AnalogyRescueOutcome(
                     rollouts=tuple(rollouts), cancelled=True
                 )
-            evaluation = evaluator(candidate.proposal.candidate)
-            generation = replace(
-                candidate.generation,
+            tactic_messages = prompt_catalog().messages(
+                "analogy_recovery_tactic",
+                current_goals=render_lean_goal_for_model(
+                    focused_lean_goal(state.expression)
+                ),
+                tried_tactics=_bounded_tactic_ledger(attempted_order),
+                semantic_guidance=semantic_guidance,
+                dependency_table=dependency_table,
+                tactic_card=lean_tactic_card(state.expression),
+                story_model=render_story_model(candidate.model),
+            )
+            tactic_seed = _fallback_seed(self._seed + 10_000, state, rank)
+            raw_tactic = ""
+            try:
+                raw_tactic = self._generator.generate(
+                    tactic_messages, seed=tactic_seed
+                )
+                proposal = _parse_tactic_only(
+                    raw_tactic,
+                    state.expression,
+                    attempted_tactics=attempted_tactics,
+                )
+                proposal = replace(
+                    proposal,
+                    candidate=replace(proposal.candidate, model_rank=rank + 1),
+                )
+                self._trace(
+                    state.id,
+                    tactic_messages,
+                    tactic_seed,
+                    raw_tactic,
+                    kind="analogy_recovery_tactic_call",
+                )
+            except Exception as error:
+                self._trace(
+                    state.id,
+                    tactic_messages,
+                    tactic_seed,
+                    raw_tactic,
+                    error=error,
+                    kind="analogy_recovery_tactic_call",
+                )
+                tactic_generation = AnalogyGenerationAttempt(
+                    tactic_seed,
+                    raw_tactic,
+                    GenerationStatus.INVALID,
+                    rank > 0,
+                    type(error).__name__,
+                    str(error) or type(error).__name__,
+                )
+                rollouts.append(
+                    RescueRollout(
+                        f"{state.id}:analogy:{candidate.generation_index}",
+                        state.id,
+                        (),
+                        (),
+                        RescueTermination.INVALID_OUTPUT,
+                        generations=(candidate.generation, tactic_generation),
+                        analogy_trace=candidate.rendered_model,
+                    )
+                )
+                continue
+            if proposal.candidate.source in attempted_tactics:
+                diagnostic = (
+                    f"tactic {proposal.candidate.source!r} was already attempted "
+                    "at this proof state"
+                )
+                tactic_generation = AnalogyGenerationAttempt(
+                    tactic_seed,
+                    raw_tactic,
+                    GenerationStatus.DUPLICATE,
+                    rank > 0,
+                    "duplicate_tactic",
+                    diagnostic,
+                )
+                rollouts.append(
+                    RescueRollout(
+                        f"{state.id}:analogy:{candidate.generation_index}",
+                        state.id,
+                        (),
+                        (),
+                        RescueTermination.DUPLICATE,
+                        generations=(candidate.generation, tactic_generation),
+                        analogy_trace=candidate.rendered_model,
+                    )
+                )
+                continue
+            attempted_tactics.add(proposal.candidate.source)
+            attempted_order.append(proposal.candidate.source)
+            tactic_generation = AnalogyGenerationAttempt(
+                tactic_seed,
+                raw_tactic,
+                GenerationStatus.VALID,
+                rank > 0,
+            )
+            if _normalized_prediction_state(proposal.predicted_state) == _normalized_prediction_state(state.expression):
+                tactic_generation = replace(
+                    tactic_generation,
+                    prediction_label=PredictionLabel.PREDICTED_NO_CHANGE,
+                )
+                rollouts.append(
+                    RescueRollout(
+                        f"{state.id}:analogy:{candidate.generation_index}",
+                        state.id,
+                        (proposal,),
+                        (),
+                        RescueTermination.PREDICTED_NO_CHANGE,
+                        generations=(candidate.generation, tactic_generation),
+                        analogy_trace=candidate.rendered_model,
+                    )
+                )
+                continue
+            self._score_selected_tactic(
+                state.id,
+                tactic_messages,
+                proposal,
+                generation_index=candidate.generation_index,
+                structural_rank=rank + 1,
+            )
+            if cancellation.is_cancelled():
+                _append_unsubmitted_rollouts(
+                    rollouts,
+                    state.id,
+                    [candidate, *ordered[rank + 1 :]],
+                )
+                return AnalogyRescueOutcome(
+                    rollouts=tuple(rollouts), cancelled=True
+                )
+            evaluation = evaluator(proposal.candidate)
+            tactic_generation = replace(
+                tactic_generation,
                 prediction_label=(
                     PredictionLabel.PREDICTION_MATCHED
-                    if _prediction_matches(candidate.proposal.predicted_state, evaluation)
+                    if _prediction_matches(proposal.predicted_state, evaluation)
                     else PredictionLabel.PREDICTION_MISMATCHED
                 ),
             )
             attempt = RescueAttempt(
-                candidate.proposal, evaluation.result, evaluation.discarded
+                proposal, evaluation.result, evaluation.discarded
             )
             termination = (
                 RescueTermination.COMPLETE
@@ -922,10 +1320,10 @@ class AnalogyFallback:
                 RescueRollout(
                     f"{state.id}:analogy:{candidate.generation_index}",
                     state.id,
-                    (candidate.proposal,),
+                    (proposal,),
                     (attempt,),
                     termination,
-                    generations=(generation,),
+                    generations=(candidate.generation, tactic_generation),
                     analogy_trace=candidate.rendered_model,
                 )
             )
@@ -948,10 +1346,10 @@ class AnalogyFallback:
                 return AnalogyRescueOutcome(rollouts=tuple(rollouts))
         return AnalogyRescueOutcome(rollouts=tuple(rollouts))
 
-    def _trace(self, state_id: str, messages: tuple[Message, ...], seed: int, response: str, *, error: Exception | None = None) -> None:
+    def _trace(self, state_id: str, messages: tuple[Message, ...], seed: int, response: str, *, error: Exception | None = None, kind: str = "analogy_model_call") -> None:
         if self._trace_sink is not None:
             self._trace_sink({
-                "kind": "analogy_model_call",
+                "kind": kind,
                 "state_id": state_id,
                 "seed": seed,
                 "messages": [{"role": item.role, "content": item.content} for item in messages],
@@ -967,19 +1365,77 @@ class AnalogyFallback:
         model: MentalModel,
         distance: float,
         coupling: tuple[tuple[float, ...], ...],
+        *,
+        discriminative: bool,
     ) -> None:
         if self._trace_sink is not None:
             self._trace_sink(
                 {
                     "kind": "mental_model_structural_score",
+                    "alignment_kind": "fixed_order",
                     "state_id": state_id,
                     "generation_index": generation_index,
                     "seed": seed,
                     "domain": model.domain,
                     "distance": distance,
+                    "discriminative": discriminative,
                     "coupling": [list(row) for row in coupling],
                 }
             )
+
+    def _score_selected_tactic(
+        self,
+        state_id: str,
+        messages: tuple[Message, ...],
+        proposal: RescueProposal,
+        *,
+        generation_index: int,
+        structural_rank: int,
+    ) -> None:
+        """Score one selected tactic without changing structural ordering."""
+
+        event: dict[str, Any] = {
+            "kind": "analogy_tactic_score",
+            "state_id": state_id,
+            "generation_index": generation_index,
+            "structural_rank": structural_rank,
+            "tactic": proposal.candidate.source,
+            "completion": proposal.candidate.source,
+            "total_log_likelihood": None,
+            "mean_log_likelihood": None,
+            "token_count": None,
+            "error": None,
+        }
+        try:
+            scorer = getattr(self._generator, "score_completions", None)
+            if scorer is None:
+                raise TypeError("model provider has no completion likelihood scorer")
+            scores = tuple(
+                scorer(
+                    messages,
+                    (proposal.candidate.source,),
+                )
+            )
+            if len(scores) != 1 or not isinstance(scores[0], CompletionScore):
+                raise ValueError("completion scorer returned an invalid result")
+            score = scores[0]
+            if (
+                not math.isfinite(score.total_log_likelihood)
+                or not math.isfinite(score.mean_log_likelihood)
+                or score.token_count <= 0
+            ):
+                raise ValueError("completion scorer returned a non-finite score")
+            event.update(
+                {
+                    "total_log_likelihood": score.total_log_likelihood,
+                    "mean_log_likelihood": score.mean_log_likelihood,
+                    "token_count": score.token_count,
+                }
+            )
+        except Exception as error:
+            event["error"] = f"{type(error).__name__}: {error}"
+        if self._trace_sink is not None:
+            self._trace_sink(event)
 
 
 def _append_unsubmitted_rollouts(
@@ -992,7 +1448,7 @@ def _append_unsubmitted_rollouts(
             RescueRollout(
                 f"{state_id}:analogy:{candidate.generation_index}",
                 state_id,
-                (candidate.proposal,),
+                (),
                 (),
                 RescueTermination.SCORED,
                 generations=(candidate.generation,),

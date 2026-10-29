@@ -9,7 +9,7 @@ from analogy.model.parser import (
     normalize_lean4_tactic,
 )
 from analogy.solver.scoring import parse_scored_tactic_candidates
-from analogy.model.mlx_model import _mlx_import_diagnostic
+from analogy.model.mlx_model import _load_exact_model, _mlx_import_diagnostic
 
 
 @pytest.mark.parametrize("source,expected", [
@@ -34,6 +34,34 @@ def test_normalize_lean3_cases_only_when_standalone(source, expected):
 ])
 def test_normalize_common_model_syntax_before_lean(source, expected):
     assert normalize_lean4_tactic(source) == expected
+
+
+def test_mlx_loader_resolves_an_immutable_model_revision_before_loading():
+    calls = []
+
+    def snapshot_download(**kwargs):
+        calls.append(("download", kwargs))
+        return "/cache/snapshots/abc123"
+
+    def load(path):
+        calls.append(("load", path))
+        return "model", "tokenizer"
+
+    loaded = _load_exact_model(
+        load,
+        "example/model",
+        revision="abc123",
+        snapshot_download_fn=snapshot_download,
+    )
+
+    assert loaded == ("model", "tokenizer")
+    assert calls == [
+        (
+            "download",
+            {"repo_id": "example/model", "revision": "abc123"},
+        ),
+        ("load", "/cache/snapshots/abc123"),
+    ]
 
 
 @pytest.mark.parametrize("source", ["tauto", "itauto", "modus_tollens h1 h2"])
@@ -73,6 +101,22 @@ def test_nested_or_shape_unsafe_continuation_tactics_are_filtered(source):
 
 
 @pytest.mark.parametrize(
+    "source",
+    (
+        "sorry",
+        "exact sorry",
+        "exact (sorry)",
+        "refine (sorry)",
+        "exact (by sorry)",
+        "admit",
+        "exact (by admit)",
+    ),
+)
+def test_admission_constructs_are_filtered_in_every_supported_shape(source):
+    assert candidate_rejection_reason(source, "P : Prop\n⊢ P") is not None
+
+
+@pytest.mark.parametrize(
     "state,tactic,expected",
     [
         ("P Q : Prop\n⊢ P", "left", "requires a disjunction goal"),
@@ -84,6 +128,10 @@ def test_nested_or_shape_unsafe_continuation_tactics_are_filtered(source):
         ("α : Type\nP : α → Prop\n⊢ ∀ x, P x", "intro x", None),
         ("α : Type\nP : α → Prop\n⊢ forall x, P x", "intros", None),
         ("P : Prop\n⊢ P", "intros", "requires an implication, negation, or universal goal"),
+        ("P : Prop\n⊢ P", "exact P", "proposition name is not evidence"),
+        ("P : Prop\n⊢ P", "exact ghost", "identifier is not visible in the proof state"),
+        ("P : Prop\n⊢ P", "apply ghost", "identifier is not visible in the proof state"),
+        ("P : Prop\n⊢ P", "cases ghost", "identifier is not visible in the proof state"),
     ],
 )
 def test_candidate_goal_shape_filter(state, tactic, expected):
@@ -114,7 +162,7 @@ def test_candidate_normalization_precedes_deduplication_and_weighting():
         {"tactic": "exact hp", "score": 1.0},
     ]), 3)
     assert [(item.source, item.score) for item in candidates] == [
-        ("cases h with hp hq", 0.2), ("cases h", 0.6), ("exact hp", 0.2),
+        ("cases h with hp hq", 1 / 3), ("cases h", 1 / 3), ("exact hp", 1 / 3),
     ]
 
 
@@ -240,8 +288,35 @@ def test_incomplete_candidates_are_removed_before_top_k_and_scores_are_renormali
     ]), 2)
 
     assert [(item.source, item.score) for item in candidates] == [
-        ("exact h2", 0.75),
-        ("assumption", 0.25),
+        ("exact h2", 0.5),
+        ("assumption", 0.5),
+    ]
+
+
+def test_model_written_zero_scores_are_schema_valid_but_do_not_rank_candidates():
+    discarded = []
+    candidates = parse_scored_tactic_candidates(json.dumps([
+        {"tactic": "simp", "score": 0},
+        {"tactic": "simp", "score": 99},
+        {"tactic": "assumption", "score": 0},
+    ]), None, discarded_candidates=discarded)
+
+    assert [(item.source, item.score) for item in candidates] == [
+        ("simp", 0.5),
+        ("assumption", 0.5),
+    ]
+    assert discarded == ["simp: duplicate proposal"]
+
+
+def test_tactic_only_candidates_are_schema_valid_without_model_written_scores():
+    candidates = parse_scored_tactic_candidates(json.dumps([
+        {"tactic": "exact h"},
+        {"tactic": "assumption"},
+    ]), None)
+
+    assert [(item.source, item.score) for item in candidates] == [
+        ("exact h", 0.5),
+        ("assumption", 0.5),
     ]
 
 

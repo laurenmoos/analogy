@@ -37,12 +37,6 @@ def _clean_lines(values: object, field: str) -> tuple[str, ...]:
     return normalized
 
 
-def _clean_optional_line(value: object, field: str) -> str | None:
-    if value is None:
-        return None
-    return _clean_line(value, field)
-
-
 def _clean_optional_text(value: object, field: str) -> str | None:
     if value is None:
         return None
@@ -52,21 +46,54 @@ def _clean_optional_text(value: object, field: str) -> str | None:
 
 
 @dataclass(frozen=True, slots=True)
-class MentalModelCorrespondence:
+class StoryCorrespondence:
     domain_before: str
     domain_transition: str
     domain_after: str
-    proof_before: str | None = None
-    proof_transition: str | None = None
-    proof_after: str | None = None
 
     def __post_init__(self) -> None:
         for field in ("domain_before", "domain_transition", "domain_after"):
             object.__setattr__(self, field, _clean_line(getattr(self, field), field))
-        for field in ("proof_before", "proof_transition", "proof_after"):
-            object.__setattr__(
-                self, field, _clean_optional_text(getattr(self, field), field)
+
+
+@dataclass(frozen=True, slots=True)
+class StoryModel:
+    domain: str
+    correspondences: tuple[StoryCorrespondence, ...]
+    abandoned_domains: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "domain", _clean_line(self.domain, "domain"))
+        correspondences = tuple(self.correspondences)
+        if not correspondences:
+            raise AnalogyStateError("correspondences must be nonempty")
+        if any(not isinstance(item, StoryCorrespondence) for item in correspondences):
+            raise AnalogyStateError("story correspondences have the wrong type")
+        object.__setattr__(self, "correspondences", correspondences)
+        abandoned = tuple(
+            dict.fromkeys(
+                _clean_line(value, "abandoned domain")
+                for value in self.abandoned_domains
             )
+        )
+        object.__setattr__(self, "abandoned_domains", abandoned)
+
+
+@dataclass(frozen=True, slots=True)
+class MentalModelCorrespondence:
+    domain_before: str
+    domain_transition: str
+    domain_after: str
+    proof_transition: str | None = None
+
+    def __post_init__(self) -> None:
+        for field in ("domain_before", "domain_transition", "domain_after"):
+            object.__setattr__(self, field, _clean_line(getattr(self, field), field))
+        object.__setattr__(
+            self,
+            "proof_transition",
+            _clean_optional_text(self.proof_transition, "proof_transition"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +168,7 @@ class AnalogyScratchpad:
         self._history_limit = history_limit
         self._history: list[str] = []
         self._pending_rebuild = False
+        self._assigned_domain: str | None = None
 
     @property
     def current(self) -> WorkingMentalModel | None:
@@ -158,6 +186,10 @@ class AnalogyScratchpad:
     def pending_rebuild(self) -> bool:
         return self._pending_rebuild
 
+    @property
+    def assigned_domain(self) -> str | None:
+        return self._assigned_domain
+
     def initialize(self, state: WorkingMentalModel) -> None:
         if self._current is not None:
             raise AnalogyStateError("active analogy is already initialized")
@@ -167,6 +199,10 @@ class AnalogyScratchpad:
             )
         if state.domain in self._abandoned:
             raise AnalogyStateError("new domain must not reuse an abandoned domain")
+        if self._assigned_domain is not None and state.domain != self._assigned_domain:
+            raise AnalogyStateError(
+                f"change_domain must use harness-assigned domain {self._assigned_domain!r}"
+            )
         self._current = replace(state, abandoned_domains=tuple(self._abandoned))
 
     def validate_transition(
@@ -199,6 +235,10 @@ class AnalogyScratchpad:
             )
         if state.domain in self._abandoned:
             raise AnalogyStateError("new domain must not reuse an abandoned domain")
+        if self._assigned_domain is not None and state.domain != self._assigned_domain:
+            raise AnalogyStateError(
+                f"change_domain must use harness-assigned domain {self._assigned_domain!r}"
+            )
 
     def apply(self, action: AnalogyUpdateAction, state: WorkingMentalModel) -> None:
         self.validate_transition(action, state)
@@ -220,12 +260,14 @@ class AnalogyScratchpad:
         self._abandoned = prospective
         self._current = replacement
         self._pending_rebuild = False
+        self._assigned_domain = None
 
-    def abandon_current(self) -> None:
+    def abandon_current(self, assigned_domain: str | None = None) -> None:
         if self._current is not None:
             self._remember_abandoned(self._current.domain)
             self._current = None
         self._pending_rebuild = True
+        self._assigned_domain = assigned_domain
 
     def record_history(self, text: str) -> None:
         if not text:

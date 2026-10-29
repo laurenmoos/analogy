@@ -1,9 +1,9 @@
 prompts:
   conventional_ranker:
-    version: conventional-ranker-v5
+    version: conventional-ranker-v6
     system: >-
-      Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic` and `score`.
-      Tactics are one-line strings; scores are nonnegative numbers. Use visible identifiers only. Never repeat
+      Rank next Lean 4 tactics. JSON only: a nonempty array of objects with exactly `tactic`.
+      Tactics are one-line strings. Use visible identifiers only. Never repeat
       a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.
     user: |-
       Overall target:
@@ -18,11 +18,11 @@ prompts:
       Return at most {{top_k}} candidates.
 
   analogy_conventional_ranker:
-    version: analogy-conventional-ranker-v4
+    version: analogy-conventional-ranker-v5
     system: >-
       Rank next Lean 4 tactics while maintaining the external working mental model. Return exactly one
-      <mental_model> JSON block followed by a nonempty JSON array of objects with exactly `tactic` and `score`.
-      Tactics are one-line strings; scores are nonnegative numbers. Use visible identifiers only. Never repeat
+      <mental_model> JSON block followed by a nonempty JSON array of objects with exactly `tactic`.
+      Tactics are one-line strings. Use visible identifiers only. Never repeat
       a current-state failure; earlier-state failures are diagnostic context, not a global blacklist.
     user: |-
       Overall target:
@@ -38,68 +38,69 @@ prompts:
       Then return at most {{top_k}} candidates after the block.
 
   analogy_initialize:
-    version: analogy-initialize-v4
+    version: analogy-initialize-story-v2
     system: |-
-      Explain the supplied Lean proof state through one everyday mental model with an exact structural mapping.
-      Use only a source domain from the supplied domain card and only proof tactics from the supplied tactic card.
-      Map every visible atomic proposition to one distinct concrete thing and keep that mapping consistent.
-      Map every tactic in the proposed plan to one distinct everyday action: one action per tactic and one tactic per action.
-      Before planning, look for a shortcut such as an automatically true goal, a reusable hypothesis, or False, and
-      make the source-domain story reflect it.
-      Ordered domain transitions and proof transitions must have the same causal transition structure.
-      The domain fields must not mention Lean, proofs, tactics, logic, mathematics,
-      propositions, conjunction, disjunction, or implication. Proof fields may use exact Lean states and tactics.
-      Even descriptive words such as "logical" are forbidden in every domain_* value.
-      Use the complete supplied proof state as planning input, but keep the returned model to pivotal transitions.
-      A proof_before or proof_after must be an exact complete Lean state when supplied; otherwise use JSON null rather than inventing or shortening it.
-      A declaration such as p1 : Prop is not evidence;
-      never use a proposition name as the operand of exact, apply, or cases. Tactic operands must be visible hypotheses
-      from the supplied state or names introduced by an earlier proposed tactic.
+      Write one concrete everyday story whose ordered changes match the supplied abstract action sequence.
+      You are not given a formal proof, identifiers, or formal tactics. Do not invent or mention any.
+      Use exactly the harness-assigned canonical domain. Write one initial_state and one transition per supplied action.
+      Each transition contains only the action and its resulting state; never repeat the preceding state. Domain fields must not mention Lean, proofs,
+      tactics, logic, mathematics, propositions, conjunction, disjunction, or implication.
 
-      Worked example for a different theorem (`P Q : Prop`, `hP : P`, goal `P ∨ Q`):
+      Example for two abstract actions, “commit to the right available choice” then
+      “finish using something already in hand”:
       {
         "domain": "travel",
-        "correspondences": [
+        "initial_state": "a traveler holding a blue ticket faces a red lane and a blue lane",
+        "transitions": [
           {
-            "domain_before": "a traveler holding a red ticket needs either a red or a blue ticket",
-            "domain_transition": "the traveler chooses the red-ticket counter",
-            "domain_after": "the red-ticket counter is selected",
-            "proof_before": "P Q : Prop\nhP : P\n⊢ P ∨ Q",
-            "proof_transition": "left",
-            "proof_after": "P Q : Prop\nhP : P\n⊢ P"
+            "domain_transition": "the traveler enters the blue lane on the right",
+            "domain_after": "the traveler stands at the blue-lane checkpoint"
           },
           {
-            "domain_before": "the red-ticket counter is selected",
-            "domain_transition": "the traveler presents the red ticket already in hand",
-            "domain_after": "the ticket requirement is satisfied",
-            "proof_before": "P Q : Prop\nhP : P\n⊢ P",
-            "proof_transition": "exact hP",
-            "proof_after": "SOLVED"
+            "domain_transition": "the traveler presents the blue ticket already in hand",
+            "domain_after": "the checkpoint opens"
           }
         ],
         "abandoned_domains": []
       }
-      Use the example only for structural discipline; do not reuse its setting unless the domain card and exclusions permit it.
-
-      Return only one block containing strict JSON in exactly this shape:
-      <mental_model>
+      Return strict JSON only in exactly this shape:
       {
         "domain": "one-line domain",
-        "correspondences": [
+        "initial_state": "one-line initial domain state",
+        "transitions": [
           {
-            "domain_before": "one-line domain state",
             "domain_transition": "one-line domain action",
-            "domain_after": "one-line resulting domain state",
-            "proof_before": "known proof state or null",
-            "proof_transition": "known or predicted tactic or null",
-            "proof_after": "known or predicted proof state or null"
+            "domain_after": "one-line resulting domain state"
           }
         ],
         "abandoned_domains": []
       }
-      </mental_model>
-      Keep correspondences ordered. Use JSON null only for genuinely unknown future proof fields. Partial future
-      correspondences are allowed, but every proposed proof_transition must come from the tactic card.
+    user: |-
+      Allowed source domains:
+      {{domain_card}}
+
+      Required source domain (use this exact canonical entry):
+      {{required_domain}}
+
+      Do not use any of these already selected domains:
+      {{excluded_domains}}
+
+      Abstract action sequence (write exactly one transition per line):
+      {{abstract_trajectory}}
+
+      Return exactly one JSON object and no text before or after it.
+
+  analogy_initial_tactic:
+    version: analogy-initial-tactic-v3
+    system: >-
+      The validated everyday story describes transitions that have already happened. The current Lean 4 state is
+      the proof state after every proof_transition shown in that story. Reason prospectively about the current
+      decision rather than merely continuing the pattern of earlier actions. For a disjunction, first translate
+      both `left` and `right` into alternative next events in the same everyday situation, describe the resulting
+      proof obligation for each, and select the route supported by the visible hypotheses. Never repeat a
+      proof_transition merely because it appeared in the history.
+      Use visible identifiers only. `left` commits to the left side and makes the left disjunct the goal;
+      `right` commits to the right side and makes the right disjunct the goal.
     user: |-
       Overall target:
       {{overall_target}}
@@ -107,24 +108,152 @@ prompts:
       Current focused Lean proof state:
       {{current_goals}}
 
-      Allowed source domains:
-      {{domain_card}}
+      Completed everyday history and already-accepted proof transitions:
+      {{mental_model}}
 
-      Allowed tactics for this proof state:
       {{tactic_card}}
 
-      Do not use any of these already selected domains:
-      {{excluded_domains}}
+      If the current goal is a disjunction, return strict JSON with exactly "decision", "tactic", and
+      "predicted_state". decision must contain current_everyday_state, options, and selection_reason. options must
+      compare both `left` and `right`; every option contains exactly tactic, everyday_consequence, and
+      proof_consequence. Otherwise return exactly "tactic" and "predicted_state". predicted_state is SOLVED or
+      the exact complete focused Lean state expected immediately after the tactic.
 
-      Return exactly one block in the required format and no text before or after it.
+  analogy_recovery_story:
+    version: analogy-recovery-story-v3
+    system: |-
+      Rewrite the everyday story so its completed changes match the supplied current-path abstract action sequence.
+      You are not given a formal proof, identifiers, or formal tactics. Do not invent or mention any.
+      Use exactly the harness-assigned canonical domain. Return one concrete "initial_state" and one item in
+      "transitions" per supplied action. Each transition contains exactly "domain_transition" and "domain_after". Never repeat a previous
+      state. Every resulting state must be meaningfully distinct from the state before it.
+      Return strict JSON only with exactly "domain", "initial_state", "transitions", and an empty "abandoned_domains" list.
+    user: |-
+      Required source domain:
+      {{required_domain}}
+
+      Abstract actions on the exact current path:
+      {{abstract_trajectory}}
+
+      Return the replacement everyday story only. Keep each state and action concrete and concise.
+      A one-action example has initial_state = "a cook waiting without an order" and exactly one transition:
+      domain_transition = "the cook accepts a new order"; domain_after = "the cook is now responsible for
+      preparing that order". Never split one supplied action into multiple transitions.
+
+  analogy_recovery_tactic:
+    version: analogy-recovery-tactic-v2
+    system: |-
+      Solve the current focused Lean goal using only identifiers visible in that state.
+      The current goal and visible hypotheses are authoritative. Use the completed everyday history to construct
+      a prospective analogy for the current decision: describe what each available route would make happen next,
+      then choose the route whose resulting proof obligation is supported. Do not copy an earlier action or invent
+      a name from it. You must not select a tactic listed as already attempted.
+      `left` commits to the left disjunct and `right` commits to the right disjunct.
+    user: |-
+      Current focused Lean proof state:
+      {{current_goals}}
+
+      Tactics already attempted at this exact state:
+      {{tried_tactics}}
+
+      Semantic recovery:
+      {{semantic_guidance}}
+
+      Dependency evidence:
+      {{dependency_table}}
+
+      {{tactic_card}}
+
+      Selected everyday story (secondary context; it contains no proof identifiers or tactics):
+      {{story_model}}
+
+      If the current goal is a disjunction, return strict JSON with exactly "decision", "tactic", and
+      "predicted_state". decision must contain current_everyday_state, options, and selection_reason. options must
+      compare both `left` and `right`; every option contains exactly tactic, everyday_consequence, and
+      proof_consequence. Otherwise return exactly "tactic" and "predicted_state". predicted_state is SOLVED or
+      the exact complete focused Lean state expected immediately after the tactic.
+
+  deliberation_plan:
+    version: deliberation-plan-v1
+    system: |-
+      Analyze the current Lean 4 proof state directly. This is a proof-planning control condition:
+      do not create or mention an everyday story, analogy, metaphor, or source domain. For a
+      disjunction, compare both `left` and `right` and state the resulting proof obligation for
+      each. Use only identifiers visible in the current state and do not recommend a tactic already
+      attempted at this exact state.
+    user: |-
+      Overall target:
+      {{overall_target}}
+
+      Current focused Lean proof state:
+      {{current_goals}}
+
+      Tactics already attempted at this exact state:
+      {{tried_tactics}}
+
+      Semantic recovery:
+      {{semantic_guidance}}
+
+      Dependency evidence:
+      {{dependency_table}}
+
+      {{tactic_card}}
+
+      Return strict JSON only with exactly "analysis", "branches", and "recommended_approach".
+      Each branches item contains exactly "tactic" and "resulting_obligation". For a disjunction,
+      include both `left` and `right`.
+
+  deliberation_tactic:
+    version: deliberation-tactic-v1
+    system: |-
+      Select one Lean 4 tactic using direct proof reasoning only. The current proof state is
+      authoritative. Do not introduce an everyday story, analogy, metaphor, or source domain. Use
+      only visible identifiers and never select a tactic already attempted at this exact state.
+    user: |-
+      Current focused Lean proof state:
+      {{current_goals}}
+
+      Tactics already attempted at this exact state:
+      {{tried_tactics}}
+
+      Semantic recovery:
+      {{semantic_guidance}}
+
+      Dependency evidence:
+      {{dependency_table}}
+
+      {{tactic_card}}
+
+      Direct proof plan:
+      {{direct_plan}}
+
+      If the goal is a disjunction, return strict JSON with exactly "decision", "tactic", and
+      "predicted_state". decision contains exactly "current_proof_situation", "options", and
+      "selection_reason". Each option contains exactly "tactic" and "resulting_obligation", and
+      options must compare both `left` and `right`. Otherwise return exactly "tactic" and
+      "predicted_state". predicted_state is SOLVED or the exact focused state after the tactic.
+
+  deliberation_invalid_repair:
+    version: deliberation-invalid-repair-v1
+    text: |-
+      Your direct proof plan was rejected: {{diagnostic}}
+      Previous response:
+      {{previous_response}}
+      Return one corrected strict JSON plan matching the requested schema. Do not use an analogy.
 
   analogy_domain_card:
-    version: analogy-domain-card-v1
-    text: >-
-      Everyday-domain card: choose exactly one setting from cooking or restaurant preparation; travel or navigation;
-      building, maintenance, or construction; a board, card, or team game; gardening; package delivery or logistics;
-      household organization; or mechanical repair involving ordinary physical objects. Use concrete objects, states,
-      and causal actions from that setting only. Do not use a mathematical, logical, programming, or proof setting.
+    version: analogy-domain-card-v2
+    text: |-
+      Everyday-domain card: each line is one canonical domain.
+      - cooking or restaurant preparation
+      - travel or navigation
+      - building, maintenance, or construction
+      - board, card, or team game
+      - gardening
+      - package delivery or logistics
+      - household organization
+      - mechanical repair
+      Use concrete physical objects, states, and causal actions only. Do not use a mathematical, logical, programming, or proof setting.
 
   analogy_update:
     version: analogy-update-v4
@@ -161,21 +290,26 @@ prompts:
       Allowed source domains:
       {{domain_card}}
 
+      Harness-assigned source domain:
+      {{required_domain}}
+
       Choose action revise_model or change_domain. revise_model must preserve the supplied domain while revising
-      its ordered transition correspondences. change_domain must choose a new domain not listed under abandoned_domains
-      and must select that domain from the supplied domain card before creating a new ordered correspondence list.
-      A SAT restart/countermodel requires change_domain.
+      its ordered transition correspondences. For change_domain, use exactly the harness-assigned source domain;
+      never choose a domain yourself. A SAT restart/countermodel requires change_domain.
       The mental-model JSON must contain exactly "domain", "correspondences", and "abandoned_domains". Every
-      correspondence must contain "domain_before", "domain_transition", "domain_after", "proof_before",
-      "proof_transition", and "proof_after"; use null for unknown proof fields.
+      correspondence must contain "domain_before", "domain_transition", "domain_after", and "proof_transition".
+      Never include proof_before or proof_after. The harness owns all proof states and the domain ledger,
+      so always return an empty abandoned_domains list; the harness will fill it after validation.
       Return the updated <mental_model> block, then JSON with exactly "action", "predicted_state", and "tactic".
       predicted_state is literal SOLVED or the exact full focused Lean state expected immediately after the first tactic.
 
   lean_tactic_card:
-    version: lean-tactic-card-v3
+    version: lean-tactic-card-v5
     text: >-
-      Lean card: {{recipes}}intro h; exact <hyp>; apply <hyp>; cases <hyp>; constructor; left/right;
-      rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>]. P : Prop is not evidence; no tauto/itauto.
+      Lean card: {{recipes}}intro h; exact <hyp>; apply <hyp>; constructor; left/right;
+      left = commit to the left side, so the goal becomes the left disjunct; right = commit to the right side,
+      so the goal becomes the right disjunct; rcases <hyp> with ...; exact False.elim <hyp>; simp; rw [<hyp>].
+      P : Prop is not evidence; no tauto/itauto.
 
   lean_tactic_card_recipes:
     version: lean-tactic-card-recipes-v1
@@ -224,12 +358,12 @@ prompts:
       {{contract}}
 
   analogy_invalid_repair:
-    version: analogy-invalid-repair-v1
+    version: analogy-invalid-repair-v2
     text: |-
-      The previous response was invalid.
-
-      Parser diagnostic:
-      {{diagnostic}}
+      Rejected: {{diagnostic}}
+      Current domain: {{current_domain}}
+      Required domain: {{required_domain}}
+      Correct the rejection and choose no other domain.
 
       Previous response (analogy block removed):
       {{previous_response}}
@@ -268,10 +402,11 @@ prompts:
     text: 'Lean rejected the tactic'
 
   analogy_pending_context:
-    version: analogy-pending-context-v2
+    version: analogy-pending-context-v3
     text: |-
       <mental_model_pending>
       active: none; change_domain required
+      assigned_domain: {{assigned_domain}}
       abandoned_domains:
       {{abandoned_domains}}
       </mental_model_pending>

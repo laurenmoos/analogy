@@ -85,154 +85,6 @@ class SymbolicState:
         object.__setattr__(self, "context", _text_tuple(self.context, "context"))
 
 
-@dataclass(frozen=True, slots=True)
-class PseudoOperator:
-    id: str
-    source_state_id: str
-    target_state_id: str
-    embedding: Embedding
-
-    def __post_init__(self) -> None:
-        _require_text(self.id, "id")
-        _require_text(self.source_state_id, "source_state_id")
-        _require_text(self.target_state_id, "target_state_id")
-        if not isinstance(self.embedding, Embedding):
-            raise ValueError("embedding must be an Embedding")
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorRelation:
-    id: str
-    source_operator_id: str
-    target_operator_id: str
-    embedding: Embedding
-
-    def __post_init__(self) -> None:
-        _require_text(self.id, "id")
-        _require_text(self.source_operator_id, "source_operator_id")
-        _require_text(self.target_operator_id, "target_operator_id")
-        if not isinstance(self.embedding, Embedding):
-            raise ValueError("embedding must be an Embedding")
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorComposition:
-    left_operator_id: str
-    right_operator_id: str
-    result_operator_id: str
-
-    def __post_init__(self) -> None:
-        _require_text(self.left_operator_id, "left_operator_id")
-        _require_text(self.right_operator_id, "right_operator_id")
-        _require_text(self.result_operator_id, "result_operator_id")
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorTransformation:
-    source_operator_id: str
-    relation_id: str
-    result_operator_id: str
-
-    def __post_init__(self) -> None:
-        _require_text(self.source_operator_id, "source_operator_id")
-        _require_text(self.relation_id, "relation_id")
-        _require_text(self.result_operator_id, "result_operator_id")
-
-
-@dataclass(frozen=True, slots=True)
-class AnalogicalTransfer:
-    source_from_operator_id: str
-    source_to_operator_id: str
-    target_from_operator_id: str
-    target_to_operator_id: str
-    similarity: float
-
-    def __post_init__(self) -> None:
-        _require_text(self.source_from_operator_id, "source_from_operator_id")
-        _require_text(self.source_to_operator_id, "source_to_operator_id")
-        _require_text(self.target_from_operator_id, "target_from_operator_id")
-        _require_text(self.target_to_operator_id, "target_to_operator_id")
-        normalized = _finite_float(self.similarity, "similarity")
-        if not -1.0 <= normalized <= 1.0:
-            raise ValueError("similarity must be a finite real number in [-1.0, 1.0]")
-        object.__setattr__(self, "similarity", normalized)
-
-
-class VerificationStatus(str, Enum):
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    ERROR = "error"
-
-
-@dataclass(frozen=True, slots=True)
-class ProgramCandidate:
-    id: str
-    initial_state_id: str
-    final_state_id: str
-    operator_ids: tuple[str, ...]
-    language: str
-    source: str
-
-    def __post_init__(self) -> None:
-        _require_text(self.id, "id")
-        _require_text(self.initial_state_id, "initial_state_id")
-        _require_text(self.final_state_id, "final_state_id")
-        normalized = _text_tuple(self.operator_ids, "operator_ids")
-        if not normalized:
-            raise ValueError("operator_ids must not be empty")
-        object.__setattr__(self, "operator_ids", normalized)
-        _require_text(self.language, "language")
-        _require_text(self.source, "source")
-
-
-@dataclass(frozen=True, slots=True)
-class VerificationEvidence:
-    verifier: str
-    status: VerificationStatus
-    artifact_ref: str | None = None
-    diagnostics: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _require_text(self.verifier, "verifier")
-        if not isinstance(self.status, VerificationStatus):
-            raise ValueError("status must be a VerificationStatus")
-        if self.artifact_ref is not None:
-            _require_text(self.artifact_ref, "artifact_ref")
-        object.__setattr__(self, "diagnostics", _text_tuple(self.diagnostics, "diagnostics"))
-
-
-@dataclass(frozen=True, slots=True)
-class VerifiedProgram:
-    candidate: ProgramCandidate
-    evidence: VerificationEvidence
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.candidate, ProgramCandidate):
-            raise ValueError("candidate must be a ProgramCandidate")
-        if not isinstance(self.evidence, VerificationEvidence):
-            raise ValueError("evidence must be VerificationEvidence")
-        if self.evidence.status is not VerificationStatus.ACCEPTED:
-            raise ValueError("verified programs require accepted evidence")
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorLibraryEntry:
-    operator: PseudoOperator
-    program: VerifiedProgram
-    name: str
-    description: str = ""
-    tags: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.operator, PseudoOperator):
-            raise ValueError("operator must be a PseudoOperator")
-        if not isinstance(self.program, VerifiedProgram):
-            raise ValueError("program must be a VerifiedProgram")
-        _require_text(self.name, "name")
-        _require_text(self.description, "description", allow_empty=True)
-        object.__setattr__(self, "tags", _text_tuple(self.tags, "tags"))
-
-
 _T = TypeVar("_T")
 
 
@@ -262,6 +114,7 @@ def _typed_tuple(
 class CandidateOrigin(str, Enum):
     ORDINARY = "ordinary"
     ANALOGICAL = "analogical"
+    DELIBERATIVE = "deliberative"
 
 
 class TacticStatus(str, Enum):
@@ -305,12 +158,19 @@ class TacticCandidate:
     source: str
     score: float
     origin: CandidateOrigin
+    model_rank: int | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.source, "source")
         object.__setattr__(self, "score", _probability(self.score, "score"))
         if not isinstance(self.origin, CandidateOrigin):
             raise ValueError("origin must be a CandidateOrigin")
+        if self.model_rank is not None and (
+            isinstance(self.model_rank, bool)
+            or not isinstance(self.model_rank, int)
+            or self.model_rank <= 0
+        ):
+            raise ValueError("model_rank must be a positive integer or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +180,7 @@ class TacticResult:
     state: SymbolicState | None = None
     proof: str | None = None
     diagnostics: tuple[str, ...] = ()
+    cache_hit: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidate, TacticCandidate):
@@ -329,6 +190,8 @@ class TacticResult:
         object.__setattr__(
             self, "diagnostics", _text_tuple(self.diagnostics, "diagnostics")
         )
+        if not isinstance(self.cache_hit, bool):
+            raise ValueError("cache_hit must be a bool")
         if self.status is TacticStatus.ERROR:
             if self.state is not None or self.proof is not None:
                 raise ValueError("error results must not include state or proof")
@@ -351,6 +214,8 @@ class SearchNode:
     parent_state_id: str | None = None
     tactic: str | None = None
     depth: int = 0
+    incoming_candidate: TacticCandidate | None = None
+    cache_hit: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, SymbolicState):
@@ -362,6 +227,34 @@ class SearchNode:
             _require_text(self.tactic, "tactic")
         if isinstance(self.depth, bool) or not isinstance(self.depth, int) or self.depth < 0:
             raise ValueError("depth must be a non-negative integer")
+        if self.incoming_candidate is not None:
+            if not isinstance(self.incoming_candidate, TacticCandidate):
+                raise ValueError("incoming_candidate must be a TacticCandidate or None")
+            if self.tactic != self.incoming_candidate.source:
+                raise ValueError("incoming_candidate must match tactic")
+        if not isinstance(self.cache_hit, bool):
+            raise ValueError("cache_hit must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class WinningTacticStep:
+    source: str
+    origin: CandidateOrigin
+    model_rank: int | None
+    cache_hit: bool
+
+    def __post_init__(self) -> None:
+        _require_text(self.source, "source")
+        if not isinstance(self.origin, CandidateOrigin):
+            raise ValueError("origin must be a CandidateOrigin")
+        if self.model_rank is not None and (
+            isinstance(self.model_rank, bool)
+            or not isinstance(self.model_rank, int)
+            or self.model_rank <= 0
+        ):
+            raise ValueError("model_rank must be a positive integer or None")
+        if not isinstance(self.cache_hit, bool):
+            raise ValueError("cache_hit must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +377,11 @@ class ProblemResult:
     no_progress_count: int
     stuck_state_count: int
     analogy_fallback_count: int = 0
+    tactic_submission_count: int = 0
+    analogy_winning_path_count: int = 0
+    winning_tactic_ranks: tuple[int | None, ...] = ()
+    deliberation_fallback_count: int = 0
+    deliberation_winning_path_count: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.problem_id, "problem_id")
@@ -505,8 +403,20 @@ class ProblemResult:
             "no_progress_count",
             "stuck_state_count",
             "analogy_fallback_count",
+            "tactic_submission_count",
+            "analogy_winning_path_count",
+            "deliberation_fallback_count",
+            "deliberation_winning_path_count",
         ):
             _nonnegative_integer(getattr(self, field), field)
+        ranks = tuple(self.winning_tactic_ranks)
+        if any(
+            item is not None
+            and (isinstance(item, bool) or not isinstance(item, int) or item <= 0)
+            for item in ranks
+        ):
+            raise ValueError("winning_tactic_ranks must contain positive integers or None")
+        object.__setattr__(self, "winning_tactic_ranks", ranks)
 
 
 @dataclass(frozen=True, slots=True)

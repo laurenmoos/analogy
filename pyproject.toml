@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "analogy"
 version = "0.1.0"
 description = "Analogical tactic discovery experiments with Lean verification"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26,<3",
@@ -21,6 +23,7 @@ model = [
   "transformers>=4.51,<5",
 ]
 mlx = [
+  "huggingface-hub>=0.30,<1",
   "mlx>=0.29,<0.33",
   "mlx-lm>=0.29.1,<0.30",
 ]

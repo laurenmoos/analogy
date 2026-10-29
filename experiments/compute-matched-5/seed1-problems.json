@@ -1,0 +1,29 @@
+{
+  "problems": [
+    {
+      "id": "propl_ood_254637624771904022244407550769",
+      "title": "PropL OOD 19",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 ∧ p2 → (p4 ∨ (True → (True → (p4 → ((False → True → p5) ∧ False) ∧ False ∧ False → p4) ∧ (True ∨ p4)) ∧ p3)) ∨ p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/254637624771904022244407550769",
+      "connective": "mixed",
+      "difficulty": 20
+    },
+    {
+      "id": "propl_ood_168469097189615988227299206974",
+      "title": "PropL OOD 26",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/168469097189615988227299206974",
+      "connective": "mixed",
+      "difficulty": 16
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "repository": "https://huggingface.co/datasets/KomeijiForce/PropL",
+    "license": "MIT"
+  }
+}

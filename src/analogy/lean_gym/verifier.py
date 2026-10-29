@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -17,6 +18,11 @@ from .models import (
     ProofStructureError,
     VerificationResult,
     VerificationStatus,
+)
+
+
+_ADMISSION_TOKEN = re.compile(
+    r"(?<![\w'.])(?:sorry|admit)(?![\w'.])"
 )
 
 
@@ -202,11 +208,13 @@ class LeanSubprocessVerifier:
             return self._result(VerificationStatus.INTERNAL_ERROR, False, None, run)
         traces = [item for item in run.diagnostics if item.kind == "trace" and item.line == rendered.trace_line]
         errors = [item for item in run.diagnostics if item.severity == "error"]
+        has_sorry = any(item.kind == "hasSorry" for item in run.diagnostics)
+        if has_sorry and len(traces) == 1 and not traces[0].message.strip():
+            return self._result(VerificationStatus.REJECTED, False, None, run)
         if not errors and run.exit_code == 0 and len(traces) == 1 and not traces[0].message.strip():
             return self._result(VerificationStatus.COMPLETE, True, None, run)
         if errors or run.exit_code != 0 or len(traces) != 1 or not traces[0].message.strip():
             return self._result(VerificationStatus.REJECTED, False, None, run)
-        has_sorry = any(item.kind == "hasSorry" for item in run.diagnostics)
         if not has_sorry:
             protocol = Diagnostic("error", "protocol", "probe did not report generated sorry", None, None)
             altered = LeanRun(run.exit_code, run.diagnostics + (protocol,), run.duration_ms)
@@ -224,6 +232,22 @@ class LeanSubprocessVerifier:
         if not isinstance(tactic, str) or not tactic.strip() or "\n" in tactic or "\r" in tactic or "\x00" in tactic or len(tactic) > 4096:
             diagnostic = Diagnostic("error", "input_validation", "tactic must be one nonblank line of at most 4096 characters", None, None)
             return VerificationResult(VerificationStatus.REJECTED, False, None, (diagnostic,), None, 0)
+        if _ADMISSION_TOKEN.search(tactic):
+            diagnostic = Diagnostic(
+                "error",
+                "input_validation",
+                "admission constructs are forbidden",
+                None,
+                None,
+            )
+            return VerificationResult(
+                VerificationStatus.REJECTED,
+                False,
+                None,
+                (diagnostic,),
+                None,
+                0,
+            )
         return None
 
     @staticmethod

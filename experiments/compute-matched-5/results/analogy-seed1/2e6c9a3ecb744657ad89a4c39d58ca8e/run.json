@@ -1,0 +1,82 @@
+{
+  "analogy_enabled": true,
+  "analogy_model": "mlx-community/Qwen3-14B-4bit",
+  "elapsed_seconds": 614.4112700420665,
+  "max_analogy_model_calls_per_stuck_state": 2,
+  "max_steps": 32,
+  "model": "mlx-community/Qwen3-14B-4bit",
+  "problem_index_fingerprints": {
+    "propl_ood_168469097189615988227299206974": "ccfbde6edefe1b3f88aa5e6e0f445f0a016cf552e47f16a10c5d8b35781fc92b",
+    "propl_ood_254637624771904022244407550769": "40a599ba8aaba2cb33650677bffbf64ce6e14d7e9fb82a85dd07594a2c3970ec"
+  },
+  "problem_index_signature": "93eb8aeb4dd0ca41d2bc35a8493663229d1fd051e2939a482c569bc2e9866816",
+  "run_id": "2e6c9a3ecb744657ad89a4c39d58ca8e",
+  "samples_per_state": 3,
+  "summary": {
+    "elapsed_seconds": 614.4112525839591,
+    "results": [
+      {
+        "analogy_fallback_count": 2,
+        "analogy_winning_path_count": 1,
+        "deliberation_fallback_count": 0,
+        "deliberation_winning_path_count": 0,
+        "expansion_count": 9,
+        "failure": null,
+        "invalid_tactic_count": 2,
+        "no_progress_count": 0,
+        "problem_id": "propl_ood_168469097189615988227299206974",
+        "proof": "theorem current_problem (p1 p2 p3 p4 p5 : Prop) : True ∧ (((((p1 → p5 ∨ True) → True) → p4) ∧ (True → p5) → False) → p2) ∧ p4 → p1 → p4 ∧ ((True → p3 → p3) ∨ p2) := by\n  intro h\n  obtain ⟨hPart, ⟨hp1p5p4p5p2, hp4⟩⟩ := h\n  intro h\n  constructor\n  exact hp4\n  left\n  intro h2\n  intro h3\n  exact h3\n",
+        "repeated_state_count": 0,
+        "status": "complete",
+        "stuck_state_count": 1,
+        "tactic_submission_count": 12,
+        "verifier_call_count": 12,
+        "winning_tactic_ranks": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          1,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "analogy_fallback_count": 1,
+        "analogy_winning_path_count": 1,
+        "deliberation_fallback_count": 0,
+        "deliberation_winning_path_count": 0,
+        "expansion_count": 13,
+        "failure": null,
+        "invalid_tactic_count": 3,
+        "no_progress_count": 0,
+        "problem_id": "propl_ood_254637624771904022244407550769",
+        "proof": "theorem current_problem (p1 p2 p3 p4 p5 : Prop) : p3 ∧ p2 → (p4 ∨ (True → (True → (p4 → ((False → True → p5) ∧ False) ∧ False ∧ False → p4) ∧ (True ∨ p4)) ∧ p3)) ∨ p1 := by\n  intro h\n  obtain ⟨hp3, hp2⟩ := h\n  left\n  right\n  intro h\n  constructor\n  intro h2\n  constructor\n  intro h3\n  intro h4\n  exact h3\n  exact Or.inl (h)\n  exact hp3\n",
+        "repeated_state_count": 0,
+        "status": "complete",
+        "stuck_state_count": 1,
+        "tactic_submission_count": 16,
+        "verifier_call_count": 16,
+        "winning_tactic_ranks": [
+          null,
+          null,
+          null,
+          3,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "run_id": "analogy-on"
+  },
+  "top_k": 3
+}

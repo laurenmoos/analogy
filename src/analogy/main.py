@@ -30,9 +30,12 @@ from .model.model_provider import (
     get_model_provider,
 )
 from .model.prompts import PromptCatalog, configure_prompt_catalog
-from .solver.report import SolveRunRecord
 from .solver.report.render import render_cli_report
-from .solver.run import run_analogy_assisted, run_vanilla
+from .solver.run import (
+    run_analogy_assisted,
+    run_deliberation_assisted,
+    run_vanilla,
+)
 from .utils.checkpoint import Checkpoint, load_checkpoint, select_problems
 
 
@@ -64,6 +67,13 @@ def load_config(path: Path) -> AppConfig:
         )
     if not isinstance(data["analogy"].get("enabled"), bool):
         raise ValueError("config.analogy.enabled must be a boolean")
+    data["search"] = {"samples_per_state": 3, **data["search"]}
+    if (
+        isinstance(data["search"]["samples_per_state"], bool)
+        or not isinstance(data["search"]["samples_per_state"], int)
+        or data["search"]["samples_per_state"] <= 0
+    ):
+        raise ValueError("config.search.samples_per_state must be a positive integer")
 
     return AppConfig(
         prompts=PromptConfig(
@@ -75,7 +85,16 @@ def load_config(path: Path) -> AppConfig:
             **benchmark,
         ),
         search=SearchConfig(**data["search"]),
-        analogy=AnalogyConfig(**data["analogy"]),
+        analogy=AnalogyConfig(
+            **{
+                **data["analogy"],
+                "calibration_path": (
+                    resolve(data["analogy"]["calibration_path"])
+                    if data["analogy"].get("calibration_path") is not None
+                    else None
+                ),
+            }
+        ),
         run=RunConfig(
             output_dir=resolve(run.pop("output_dir")),
             **run,
@@ -90,13 +109,10 @@ class Session:
     config: AppConfig
     prompts: PromptCatalog | None
     model: Any
+    analogy_model: Any
     verifier: Any
     problems: tuple[Problem, ...]
     checkpoint: Checkpoint
-
-
-def session_config(config: AppConfig) -> AppConfig:
-    return config
 
 
 def with_analogy_enabled(
@@ -125,26 +141,45 @@ def with_problem_selection(
     )
 
 
+def _condition_name(config: AppConfig, *, deliberation_enabled: bool) -> str:
+    if deliberation_enabled:
+        return "deliberation"
+    return "analogy" if config.analogy.enabled else "ordinary"
+
+
 @lru_cache(maxsize=None)
 def get_session(
     config_path: Path,
     analogy_enabled: bool | None = None,
     problem_selection: str | None = None,
+    deliberation_enabled: bool = False,
 ) -> Session:
     """Build each immutable or expensive dependency once per configuration."""
 
-    config = session_config(load_config(Path(config_path)))
+    config = load_config(Path(config_path))
     config = with_analogy_enabled(config, analogy_enabled)
     config = with_problem_selection(config, problem_selection)
     all_problems = tuple(load_problems(config.benchmark.corpus))
-    checkpoint = load_checkpoint(config, all_problems)
+    condition = (
+        "deliberation"
+        if deliberation_enabled
+        else "analogy"
+        if config.analogy.enabled
+        else "ordinary"
+    )
+    checkpoint = load_checkpoint(config, all_problems, condition=condition)
     problems = select_problems(checkpoint, config.benchmark.selection)
     if not problems:
-        return Session(config, None, None, None, (), checkpoint)
+        return Session(config, None, None, None, None, (), checkpoint)
     prompts = configure_prompt_catalog(config.prompts.path)
     model = get_model_provider(config.model)
+    analogy_model = (
+        get_model_provider(replace(config.model, name=config.analogy.model_name))
+        if config.analogy.enabled and config.analogy.model_name
+        else model
+    )
     verifier = LeanSubprocessVerifier(LEAN_PROJECT_ROOT)
-    return Session(config, prompts, model, verifier, problems, checkpoint)
+    return Session(config, prompts, model, analogy_model, verifier, problems, checkpoint)
 
 
 def run_solve(args: argparse.Namespace) -> int:
@@ -152,35 +187,41 @@ def run_solve(args: argparse.Namespace) -> int:
 
     session = get_session(
         args.config,
-        args.analogy_enabled,
+        False if getattr(args, "deliberation_enabled", False) else args.analogy_enabled,
         args.problem_selection,
+        getattr(args, "deliberation_enabled", False),
     )
     config = session.config
+    deliberation_enabled = getattr(args, "deliberation_enabled", False)
 
     print(f"MODEL: {config.model.name}")
     print(f"PROBLEMS: {len(session.problems)} from {config.benchmark.corpus}")
     print(f"SELECTION: {config.benchmark.selection}")
     print(
         f"SEARCH: top_k={config.search.top_k}, "
+        f"samples_per_state={config.search.samples_per_state}, "
         f"max_steps={config.search.max_steps}"
     )
     print(
-        f"ANALOGY: {'enabled' if config.analogy.enabled else 'disabled'}; "
-        f"schema calls per stuck state={config.analogy.max_model_calls}"
+        f"CONDITION: {_condition_name(config, deliberation_enabled=deliberation_enabled)}; "
+        f"planning attempts per stuck state={config.analogy.max_model_calls}"
     )
     print("DIVERSITY: frozen-model 3-nearest-neighbor cosine novelty")
     print("JUDGE: Lean\n")
     if not session.problems:
         print("No unresolved problems for this experiment configuration.")
         return 0
-    recipe = run_analogy_assisted if config.analogy.enabled else run_vanilla
-    run = recipe(
-        config,
-        session.problems,
-        session.model,
-        session.verifier,
-        checkpoint=session.checkpoint,
+    recipe = (
+        run_deliberation_assisted
+        if deliberation_enabled
+        else run_analogy_assisted
+        if config.analogy.enabled
+        else run_vanilla
     )
+    kwargs = {"checkpoint": session.checkpoint}
+    if config.analogy.enabled:
+        kwargs["analogy_generator"] = getattr(session, "analogy_model", session.model)
+    run = recipe(config, session.problems, session.model, session.verifier, **kwargs)
     print(render_cli_report(run))
     print(f"\nDETAILS: {run.output_directory}")
     return 0
@@ -211,7 +252,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="disable analogy fallback",
     )
+    analogy.add_argument(
+        "--deliberation",
+        dest="deliberation_enabled",
+        action="store_true",
+        help="use a call-budget-matched direct deliberation fallback",
+    )
     command.set_defaults(analogy_enabled=None)
+    command.set_defaults(deliberation_enabled=False)
     selection = command.add_mutually_exclusive_group()
     selection.add_argument(
         "--all-problems",
@@ -258,7 +306,6 @@ __all__ = [
     "load_config",
     "main",
     "run_solve",
-    "session_config",
     "with_analogy_enabled",
     "with_problem_selection",
 ]

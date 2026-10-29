@@ -26,14 +26,14 @@ def normalize_tactic_scores(
     if total <= 0.0:
         raise ModelOutputError("selected candidate scores must not all be zero")
     return tuple(
-        TacticCandidate(item.source, item.score / total, item.origin)
+        TacticCandidate(item.source, item.score / total, item.origin, item.model_rank)
         for item in values
     )
 
 
 def parse_scored_tactic_candidates(
     text: str,
-    top_k: int,
+    top_k: int | None,
     *,
     discarded_candidates: list[str] | None = None,
     proof_state: str | None = None,
@@ -41,8 +41,10 @@ def parse_scored_tactic_candidates(
 ) -> tuple[TacticCandidate, ...]:
     """Parse, filter, deduplicate, truncate, and normalize tactic weights."""
 
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
-        raise ValueError("top_k must be a positive integer")
+    if top_k is not None and (
+        isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0
+    ):
+        raise ValueError("top_k must be a positive integer or None")
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError) as error:
@@ -55,9 +57,12 @@ def parse_scored_tactic_candidates(
     incomplete: list[str] = []
     filtered: list[str] = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"tactic", "score"}:
+        if not isinstance(item, dict) or set(item) not in (
+            {"tactic"},
+            {"tactic", "score"},
+        ):
             raise ModelOutputError(
-                "every candidate must contain exactly tactic and score"
+                "every candidate must contain tactic and may contain score"
             )
         tactic = item["tactic"]
         if (
@@ -68,16 +73,17 @@ def parse_scored_tactic_candidates(
             or "\x00" in tactic
         ):
             raise ModelOutputError("candidate tactics must be nonblank single lines")
-        score = item["score"]
-        if (
-            isinstance(score, bool)
-            or not isinstance(score, (int, float))
-            or not math.isfinite(float(score))
-            or float(score) < 0.0
-        ):
-            raise ModelOutputError(
-                "candidate scores must be finite nonnegative numbers"
-            )
+        score = item.get("score", 1.0)
+        if "score" in item:
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+                or float(score) < 0.0
+            ):
+                raise ModelOutputError(
+                    "candidate scores must be finite nonnegative numbers"
+                )
         canonical = normalize_lean4_tactic(tactic, proof_state)
         reason = candidate_rejection_reason(
             canonical,
@@ -98,7 +104,8 @@ def parse_scored_tactic_candidates(
             order.append(canonical)
             weights[canonical] = float(score)
         else:
-            weights[canonical] = max(weights[canonical], float(score))
+            if discarded_candidates is not None:
+                discarded_candidates.append(f"{canonical}: duplicate proposal")
 
     if not order:
         if filtered:
@@ -109,14 +116,12 @@ def parse_scored_tactic_candidates(
         raise IncompleteCandidatePool(
             f"all generated tactics were incomplete: {rejected}"
         )
-    selected = order[:top_k]
-    total = sum(weights[tactic] for tactic in selected)
-    if total <= 0.0:
-        raise ModelOutputError("selected candidate scores must not all be zero")
+    selected = order if top_k is None else order[:top_k]
+    neutral = 1.0 / len(selected)
     return tuple(
         TacticCandidate(
             tactic,
-            weights[tactic] / total,
+            neutral,
             CandidateOrigin.ORDINARY,
         )
         for tactic in selected

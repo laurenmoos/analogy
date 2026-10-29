@@ -12,7 +12,6 @@ from typing import Mapping
 
 import yaml
 
-from .parser import normalize_lean4_tactic
 from ..utils.records import Message
 
 
@@ -72,12 +71,6 @@ def _root_connective(expression: str) -> tuple[str, str, str] | None:
                 expression[index + 1 :].strip(),
             )
     return None
-
-
-def _same_expression(left: str, right: str) -> bool:
-    return " ".join(_strip_outer_parentheses(left).split()) == " ".join(
-        _strip_outer_parentheses(right).split()
-    )
 
 
 def _fresh_identifier(base: str, occupied: set[str]) -> str:
@@ -257,14 +250,6 @@ def lean_tactic_card(proof_state: str) -> str:
                         f"{semantic_name(right, 'Right')}"
                     )
                 break
-        for name, proposition in goal.declarations:
-            root = proposition_root(proposition)
-            if root.operator == "∧" and root.parts is not None:
-                recipes.append(
-                    f"obtain ⟨{semantic_name(root.parts[0], 'Left')},"
-                    f"{semantic_name(root.parts[1], 'Right')}⟩ := {name}"
-                )
-                break
         target = goal.target.strip()
         if target.startswith(("∀", "forall ")):
             match = re.match(r"(?:∀|forall)\s+([A-Za-z_][\w']*)", target)
@@ -276,8 +261,7 @@ def lean_tactic_card(proof_state: str) -> str:
         if recipes
         else ""
     )
-    card = catalog.text("lean_tactic_card", recipes=recipe_text)
-    return card if len(card) <= 240 else card[:239] + "…"
+    return catalog.text("lean_tactic_card", recipes=recipe_text)
 
 
 def focused_lean_goal(proof_state: str) -> str:

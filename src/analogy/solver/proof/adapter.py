@@ -13,9 +13,9 @@ from ...lean_gym.models import (
 )
 from ...lean_gym.verifier import Verifier
 from ...utils.records import SymbolicState, TacticCandidate, TacticResult, TacticStatus
+from .state import canonical_proof_state
 
 _MAX_FAILURE_FEEDBACK = 8
-_MAX_FAILURE_ENTRY_CHARS = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,8 @@ class LeanGymAdapter:
     def __init__(self, problem: Problem, verifier: Verifier) -> None:
         self.problem = problem
         self.verifier = verifier
-        self._prefixes: dict[str, tuple[str, ...]] = {}
+        self._known_states: set[str] = set()
+        self._cache: dict[tuple[str, str], object] = {}
         self._failed: list[_FailureFeedback] = []
 
     def initial_state(self) -> SymbolicState:
@@ -70,37 +71,67 @@ class LeanGymAdapter:
         )
 
     def failed_tactics_for(self, state_id: str) -> tuple[str, ...]:
-        try:
-            prefix = self._prefixes[state_id]
-        except KeyError:
+        if state_id not in self._known_states:
             return ()
-        eligible: list[str] = []
-        for failure in self._failed:
-            if failure.state_id == state_id:
-                scope = "current"
-            elif (
-                len(failure.prefix) <= len(prefix)
-                and prefix[: len(failure.prefix)] == failure.prefix
-            ):
-                scope = "ancestor"
-            else:
-                continue
-            eligible.append(f"{scope} state — {failure.text}")
+        eligible = [
+            f"current state — {failure.text}"
+            for failure in self._failed
+            if failure.state_id == state_id
+        ]
         return tuple(eligible[-_MAX_FAILURE_FEEDBACK:])
 
     def run_tactic(
         self, state: SymbolicState, candidate: TacticCandidate
     ) -> TacticResult:
-        try:
-            prefix = self._prefixes[state.id]
-        except KeyError as error:
-            raise ValueError(f"unknown Lean search state: {state.id}") from error
-        result = self.verifier.try_tactic(self.problem, prefix, candidate.source)
+        if state.id not in self._known_states:
+            raise ValueError(f"unknown Lean search state: {state.id}")
+        prefix = state.context
+        cache_key = (
+            canonical_proof_state(state.expression),
+            " ".join(candidate.source.split()),
+        )
+        result = self._cache.get(cache_key)
+        cache_hit = result is not None
+        if result is None:
+            result = self.verifier.try_tactic(self.problem, prefix, candidate.source)
+            if result.status not in (
+                VerificationStatus.TIMEOUT,
+                VerificationStatus.INTERNAL_ERROR,
+            ):
+                self._cache[cache_key] = result
         diagnostics = tuple(
             item.message for item in result.diagnostics if item.message.strip()
         )
         if result.status is VerificationStatus.COMPLETE and result.accepted:
             tactics = prefix + (candidate.source,)
+            final = self.verifier.verify_complete(self.problem, tactics)
+            final_diagnostics = tuple(
+                item.message
+                for item in final.diagnostics
+                if item.message.strip()
+            )
+            if final.status in (
+                VerificationStatus.TIMEOUT,
+                VerificationStatus.INTERNAL_ERROR,
+            ):
+                return LeanInfrastructureResult(
+                    candidate,
+                    TacticStatus.ERROR,
+                    diagnostics=final_diagnostics or (final.status.value,),
+                    verification_status=final.status,
+                )
+            if final.status is not VerificationStatus.COMPLETE or not final.accepted:
+                diagnostic = next(
+                    (item for item in final_diagnostics if item.strip()),
+                    final.status.value,
+                )
+                self._record_failure(state, candidate.source, diagnostic)
+                return TacticResult(
+                    candidate,
+                    TacticStatus.ERROR,
+                    diagnostics=final_diagnostics or (final.status.value,),
+                    cache_hit=cache_hit,
+                )
             lines = [self.problem.theorem_header()]
             lines.extend(f"  {tactic}" for tactic in tactics)
             return TacticResult(
@@ -108,6 +139,7 @@ class LeanGymAdapter:
                 TacticStatus.COMPLETE,
                 proof="\n".join(lines) + "\n",
                 diagnostics=diagnostics,
+                cache_hit=cache_hit,
             )
         if (
             result.status is VerificationStatus.OPEN
@@ -121,6 +153,7 @@ class LeanGymAdapter:
                     candidate,
                     TacticStatus.ERROR,
                     diagnostics=diagnostics + (diagnostic,),
+                    cache_hit=cache_hit,
                 )
             successor = self._register(
                 result.proof_state.normalized, prefix + (candidate.source,)
@@ -130,6 +163,7 @@ class LeanGymAdapter:
                 TacticStatus.ACCEPTED,
                 state=successor,
                 diagnostics=diagnostics,
+                cache_hit=cache_hit,
             )
         if result.status in (
             VerificationStatus.TIMEOUT,
@@ -144,28 +178,30 @@ class LeanGymAdapter:
         self._record_failure(
             state,
             candidate.source,
-            next((item.splitlines()[0] for item in diagnostics if item.strip()), result.status.value),
+            next((item for item in diagnostics if item.strip()), result.status.value),
         )
         return TacticResult(
             candidate,
             TacticStatus.ERROR,
             diagnostics=diagnostics or (result.status.value,),
+            cache_hit=cache_hit,
         )
 
     def _record_failure(
         self, state: SymbolicState, tactic: str, diagnostic: str
     ) -> None:
-        tactic_summary = " ".join(tactic.split())[:48]
-        diagnostic_summary = " ".join(diagnostic.split())[:48]
-        text = f"{tactic_summary}: {diagnostic_summary}"[:_MAX_FAILURE_ENTRY_CHARS]
+        tactic_summary = " ".join(tactic.split())
+        text = f"{tactic_summary}: {diagnostic.strip()}"
         self._failed.append(
-            _FailureFeedback(state.id, self._prefixes[state.id], text)
+            _FailureFeedback(state.id, state.context, text)
         )
 
     def _register(self, proof_state: str, prefix: tuple[str, ...]) -> SymbolicState:
-        digest = hashlib.sha256(proof_state.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(
+            canonical_proof_state(proof_state).encode("utf-8")
+        ).hexdigest()[:16]
         state_id = f"{self.problem.id}:{digest}"
-        self._prefixes.setdefault(state_id, prefix)
+        self._known_states.add(state_id)
         return SymbolicState(state_id, proof_state, "lean4", prefix)
 
 

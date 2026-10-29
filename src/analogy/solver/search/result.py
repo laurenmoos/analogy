@@ -8,6 +8,7 @@ from ...utils.records import (
     ExpansionOutcome,
     SearchStatus,
     StucknessDecision,
+    WinningTacticStep,
     _require_text,
     _typed_tuple,
 )
@@ -27,6 +28,7 @@ class SearchResult:
     semantic_recoveries: tuple[SemanticRecoveryEvent, ...] = ()
     semantic_prunes: tuple[SemanticPrune, ...] = ()
     forced_moves: tuple[ForcedMoveEvent, ...] = ()
+    winning_path: tuple[WinningTacticStep, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, SearchStatus):
@@ -85,6 +87,11 @@ class SearchResult:
             self,
             "forced_moves",
             _typed_tuple(self.forced_moves, ForcedMoveEvent, "forced_moves"),
+        )
+        object.__setattr__(
+            self,
+            "winning_path",
+            _typed_tuple(self.winning_path, WinningTacticStep, "winning_path"),
         )
 
 

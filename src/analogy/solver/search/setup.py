@@ -27,6 +27,7 @@ def initialize_search(
     tactic_generator: TacticGenerator,
     *,
     analogy_fallback: AnalogyFallback | None = None,
+    analogy_recovery_enabled: bool = False,
     initial_state: SymbolicState | None = None,
     goal_state: SymbolicState | None = None,
 ) -> SearchSession:
@@ -40,6 +41,7 @@ def initialize_search(
         progress_policy=AcceptNovelState(),
         cancellation=NeverCancelled(),
         analogy_fallback=analogy_fallback,
+        analogy_recovery_enabled=analogy_recovery_enabled,
         ordinary_width=config.search.top_k,
         max_expansions=config.search.max_steps,
         state_diversity=FrozenEmbeddingDiversity(

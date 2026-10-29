@@ -1,0 +1,20 @@
+prompts: {path: ../../prompts.yaml}
+model:
+  backend: mlx
+  name: mlx-community/Qwen3-14B-4bit
+  revision: a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4
+  device: mps
+  hidden_layer: -1
+  max_new_tokens: 2048
+  timeout_seconds: 180.0
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.9
+benchmark: {corpus: seed0-problems.json, selection: exhaustive}
+search: {top_k: 3, max_steps: 32, stuck_after: 2, samples_per_state: 3}
+analogy:
+  enabled: false
+  max_model_calls: 2
+  model_name: mlx-community/Qwen3-14B-4bit
+  calibration_path: ../../src/analogy/solver/analogy/score_calibration.npz
+run: {output_dir: reruns/deliberation-seed0, seed: 0}

@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from analogy.utils.records import (
     CandidateOrigin,
     SearchStatus,
@@ -39,6 +41,7 @@ from analogy.solver.search import (
     update_search_with_scored_proof_states,
 )
 from analogy.solver.search import generate_and_score_tactics
+from analogy.solver.search.tactic_generator import TacticGenerationError, TacticGenerator
 from analogy.solver.proof.semantic import (
     ExhaustiveSemanticChecker,
     SemanticAssessment,
@@ -115,6 +118,7 @@ def _context(
     verifier,
     *,
     analogy_enabled=False,
+    analogy_recovery_enabled=False,
     rescue=None,
     ranker=None,
     diversity=None,
@@ -134,6 +138,7 @@ def _context(
         ordinary_width=ordinary_width,
         max_expansions=max_expansions,
         analogy_fallback=(rescue or _FailIfCalledFallback()) if analogy_enabled else None,
+        analogy_recovery_enabled=analogy_recovery_enabled,
         state_diversity=diversity,
         semantic_checker=semantic_checker or ExhaustiveSemanticChecker(),
     )
@@ -141,23 +146,116 @@ def _context(
     return context
 
 
-def test_episode_returns_immediately_after_ordinary_completion():
+def test_recovery_enabled_search_can_pause_stuck_without_initialized_fallback():
     class Verifier:
         def run_tactic(self, _state, candidate):
-            return TacticResult(candidate, TacticStatus.COMPLETE, proof="exact h")
+            return TacticResult(candidate, TacticStatus.ERROR)
+
+    verifier = Verifier()
+    context = _context(verifier, analogy_recovery_enabled=True)
+    search = start_search(context, START, GOAL)
+
+    assert search.has_work()
+    tactics = generate_and_score_tactics(search)
+    results = submit_tactics_to_lean(verifier, tactics)
+    update_search_with_scored_proof_states(search, results)
+
+    assert search.is_stuck()
+    assert search.context.analogy_fallback is None
+
+
+def test_abandon_pending_rescue_preserves_accepted_forced_successor():
+    root = SymbolicState("root", "P Q R : Prop\nhPQ : P ∨ Q\n⊢ R", "lean4")
+    left_false = SymbolicState("left-false", "P Q R : Prop\n⊢ R", "lean4")
+    right_false = SymbolicState("right-false", "P Q R : Prop\n⊢ R", "lean4")
+    split = SymbolicState("split", "P Q R : Prop\nhP : P\n⊢ R", "lean4")
+
+    class Ranker:
+        def rank(self, state, _goal, **_kwargs):
+            if state.id == "root":
+                return tuple(
+                    TacticCandidate(source, 1.0, CandidateOrigin.ORDINARY)
+                    for source in ("assumption", "rfl")
+                )
+            return (CANDIDATE,)
+
+    class Verifier:
+        def run_tactic(self, state, candidate):
+            if state.id == "root" and candidate.source == "assumption":
+                return TacticResult(candidate, TacticStatus.ACCEPTED, state=left_false)
+            if state.id == "root" and candidate.source == "rfl":
+                return TacticResult(candidate, TacticStatus.ACCEPTED, state=right_false)
+            if state.id == "root":
+                return TacticResult(candidate, TacticStatus.ACCEPTED, state=split)
+            return TacticResult(candidate, TacticStatus.COMPLETE, proof="exact hP")
+
+    class Checker:
+        def assess(self, state):
+            if state.id == "left-false":
+                values = (("P", True), ("Q", False), ("R", False))
+                return SemanticAssessment(state.id, SemanticResult.COUNTERMODEL, values, 0)
+            if state.id == "right-false":
+                values = (("P", False), ("Q", True), ("R", False))
+                return SemanticAssessment(state.id, SemanticResult.COUNTERMODEL, values, 0)
+            return SemanticAssessment(state.id, SemanticResult.VALID)
+
+    verifier = Verifier()
+    context = _context(
+        verifier,
+        ranker=Ranker(),
+        ordinary_width=2,
+        semantic_checker=Checker(),
+        analogy_recovery_enabled=True,
+    )
+    search = start_search(context, root, GOAL)
+    while search.has_work() and not search.is_stuck():
+        tactics = generate_and_score_tactics(search)
+        results = submit_tactics_to_lean(verifier, tactics)
+        update_search_with_scored_proof_states(search, results)
+
+    assert search.is_stuck()
+    assert search.forced_successor is not None
+    assert search.forced_successor.state is split
+
+    search.abandon_pending_rescue()
+
+    assert not search.is_stuck()
+    assert search.has_work()
+    assert search.node is not None
+    assert search.node.state is split
+
+
+def test_episode_returns_immediately_after_ordinary_completion():
+    ranked = TacticCandidate("exact h", 1.0, CandidateOrigin.ORDINARY, 2)
+
+    class Ranker:
+        def rank(self, _state, _goal):
+            return (ranked,)
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            return TacticResult(
+                candidate,
+                TacticStatus.COMPLETE,
+                proof="exact h",
+                cache_hit=True,
+            )
 
     class SemanticMustNotRun:
         def assess(self, _state):
             raise AssertionError("semantic checking must wait for stuckness")
 
     result = _run_incremental(
-        _context(Verifier(), semantic_checker=SemanticMustNotRun())
+        _context(Verifier(), ranker=Ranker(), semantic_checker=SemanticMustNotRun())
     )
 
     assert result.status is SearchStatus.COMPLETE
     assert result.proof == "exact h"
     assert len(result.ordinary_expansions) == 1
     assert result.semantic_recoveries == ()
+    assert [(step.source, step.model_rank, step.cache_hit) for step in result.winning_path] == [
+        ("exact h", 2, True)
+    ]
 
 
 def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
@@ -202,6 +300,7 @@ def test_episode_calls_rescue_only_after_ordinary_tactics_are_stuck():
     assert result.semantic_recoveries[0].trigger_state_id == "start"
     assert result.semantic_recoveries[0].rescue_state_id == "start"
     assert result.rescue_rollouts[0].semantic_event_id == "semantic:0"
+    assert [step.origin for step in result.winning_path] == [CandidateOrigin.ANALOGICAL]
 
 
 def test_disabled_analogy_never_calls_fallback_when_conventional_tactic_is_stuck():
@@ -559,7 +658,7 @@ def test_semantic_assessments_are_cached_while_resolving_sibling_paths():
                     TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),
                     TacticCandidate("rfl", 0.9, CandidateOrigin.ORDINARY),
                 )
-            return (CANDIDATE,)
+            return (TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),)
 
     class Verifier:
         def run_tactic(self, state, candidate):
@@ -619,6 +718,74 @@ def test_countermodel_refuted_open_successor_is_pruned_before_frontier_expansion
     assert result.ordinary_expansions[0].discarded[0].reason.value == "semantic_refuted"
 
 
+@pytest.mark.parametrize("dead_tactic", ["left", "constructor"])
+def test_refuted_disjunction_choice_is_skipped_before_lean(dead_tactic):
+    root = SymbolicState("root", "P : Prop\n⊢ P ∨ True", "lean4")
+    attempted = []
+
+    class Ranker:
+        def rank(self, _state, _goal, **_kwargs):
+            return tuple(
+                TacticCandidate(source, 1.0, CandidateOrigin.ORDINARY)
+                for source in (dead_tactic, "right")
+            )
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            attempted.append(candidate.source)
+            if candidate.source != "right":
+                raise AssertionError("a SAT-refuted choice must not reach Lean")
+            return TacticResult(candidate, TacticStatus.COMPLETE, proof="by right")
+
+    result = _run_incremental(
+        _context(Verifier(), ranker=Ranker(), ordinary_width=2),
+        initial=root,
+    )
+
+    assert result.status is SearchStatus.COMPLETE
+    assert attempted == ["right"]
+    expansion = result.ordinary_expansions[0]
+    assert [item.candidate.source for item in expansion.skipped_candidates] == [
+        dead_tactic
+    ]
+    assert expansion.skipped_candidates[0].reason == "semantic_preflight_refuted"
+
+
+def test_preflight_does_not_requeue_an_already_tried_right_choice():
+    root = SymbolicState("root", "P : Prop\nhT : True\n⊢ P ∨ True", "lean4")
+    successor = SymbolicState("right", "P : Prop\nhT : True\n⊢ True", "lean4")
+    attempted = []
+
+    class Ranker:
+        def rank(self, _state, _goal, **_kwargs):
+            return tuple(
+                TacticCandidate(source, 1.0, CandidateOrigin.ORDINARY)
+                for source in ("left", "right", "constructor")
+            )
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            attempted.append(candidate.source)
+            if candidate.source != "right":
+                raise AssertionError("refuted choices must not reach Lean")
+            return TacticResult(candidate, TacticStatus.ACCEPTED, state=successor)
+
+    verifier = Verifier()
+    search = start_search(
+        _context(verifier, ranker=Ranker(), ordinary_width=3),
+        root,
+        GOAL,
+    )
+    while not search.expansions:
+        assert search.has_work()
+        batch = generate_and_score_tactics(search)
+        update_search_with_scored_proof_states(
+            search, submit_tactics_to_lean(verifier, batch)
+        )
+
+    assert attempted == ["right"]
+
+
 def test_unknown_open_successor_remains_on_frontier():
     quantified = SymbolicState("quantified", "P : α → Prop\n⊢ ∀ x, P x", "lean4")
     calls = []
@@ -655,7 +822,7 @@ def test_cross_countermodels_force_disjunction_destructuring_before_analogy():
                     TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),
                     TacticCandidate("rfl", 0.9, CandidateOrigin.ORDINARY),
                 )
-            return (CANDIDATE,)
+            return (TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),)
 
     class Verifier:
         def run_tactic(self, state, candidate):
@@ -762,6 +929,220 @@ def test_incremental_search_records_an_empty_candidate_pool_as_exhausted():
     assert result.ordinary_expansions[0].candidate_pool == ()
 
 
+def test_implication_tries_deterministic_intro_before_calling_ranker():
+    root = SymbolicState("implication", "P Q : Prop\n⊢ P → Q", "lean4")
+    seen = []
+
+    class Ranker:
+        def rank(self, *_args, **_kwargs):
+            raise AssertionError("intro fallback must run before model ranking")
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            seen.append(candidate.source)
+            return TacticResult(candidate, TacticStatus.COMPLETE, proof="by intro h")
+
+    result = _run_incremental(_context(Verifier(), ranker=Ranker()), initial=root)
+
+    assert result.status is SearchStatus.COMPLETE
+    assert seen == ["intro h"]
+
+
+@pytest.mark.parametrize(
+    "expression,expected",
+    [
+        ("P : Prop\nh : P\n⊢ P", "exact h"),
+        ("P : Prop\nhFalse : False\n⊢ P", "exact False.elim hFalse"),
+        ("⊢ True", "exact True.intro"),
+        ("P Q : Prop\n⊢ P ∧ Q", "constructor"),
+        ("P Q : Prop\n⊢ P ↔ Q", "constructor"),
+    ],
+)
+def test_safe_goal_shape_tactics_run_before_model_generation(expression, expected):
+    seen = []
+
+    class Provider:
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("matching hypothesis must run before model ranking")
+
+    ranker = TacticGenerator(
+        Provider(),
+        top_k=3,
+        seed=7,
+        failed_tactics_for=lambda _state_id: (),
+        trace_sink=lambda _event: None,
+    )
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            seen.append(candidate.source)
+            return TacticResult(candidate, TacticStatus.COMPLETE, proof="by fallback")
+
+    initial = SymbolicState("deterministic", expression, "lean4")
+    result = _run_incremental(
+        _context(Verifier(), ranker=ranker), initial=initial
+    )
+
+    assert result.status is SearchStatus.COMPLETE
+    assert seen == [expected]
+
+
+def test_identical_refuted_disjuncts_do_not_call_the_model_or_lean() -> None:
+    class Provider:
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("identical disjuncts must be handled deterministically")
+
+    ranker = TacticGenerator(
+        Provider(),
+        top_k=3,
+        seed=7,
+        failed_tactics_for=lambda _state_id: (),
+        trace_sink=lambda _event: None,
+    )
+
+    class Verifier:
+        def run_tactic(self, *_args, **_kwargs):
+            raise AssertionError("SAT-refuted duplicate choices must not reach Lean")
+
+    result = _run_incremental(
+        _context(Verifier(), ranker=ranker),
+        initial=SymbolicState("same", "P : Prop\n⊢ P ∨ P", "lean4"),
+    )
+
+    assert result.status is SearchStatus.SEMANTIC_FAILURE
+    assert [
+        item.candidate.source
+        for item in result.ordinary_expansions[0].skipped_candidates
+    ] == ["left", "right"]
+
+
+def test_post_intro_conjunction_is_unpacked_before_goal_constructor():
+    state = SymbolicState(
+        "post-intro",
+        "p1 p4 p3 : Prop\nh : p1 ∧ p4 ∧ p3\n⊢ p1 ∧ p4",
+        "lean4",
+        ("intro h",),
+    )
+
+    class Provider:
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("eager unpacking must run before model ranking")
+
+    ranker = TacticGenerator(
+        Provider(),
+        top_k=3,
+        seed=7,
+        failed_tactics_for=lambda _state_id: (),
+        trace_sink=lambda _event: None,
+    )
+
+    candidate = ranker.deterministic_candidate(state)
+
+    assert candidate is not None
+    assert candidate.source == "obtain ⟨hp1, ⟨hp4, hp3⟩⟩ := h"
+
+
+def test_repeated_fully_filtered_candidate_batch_stops_replacement_sampling():
+    calls = []
+    traces = []
+
+    class Provider:
+        def generate(self, _messages, *, seed):
+            calls.append(seed)
+            return '[{"tactic":"exact ghost"}]'
+
+    ranker = TacticGenerator(
+        Provider(),
+        top_k=3,
+        seed=7,
+        samples_per_state=3,
+        failed_tactics_for=lambda _state_id: (),
+        trace_sink=traces.append,
+    )
+
+    with pytest.raises(TacticGenerationError):
+        ranker.rank(
+            SymbolicState("state", "P : Prop\n⊢ P", "lean4"),
+            SymbolicState("goal", "P", "lean4"),
+        )
+
+    assert len(calls) == 2
+    assert any(
+        item["disposition"] == "repeated_batch"
+        for item in traces[0]["candidate_dispositions"]
+    )
+
+
+def test_generation_failure_exhausts_only_the_current_node():
+    root = SymbolicState(
+        "opaque", "P Q : Prop\nhP : P\n⊢ P ∨ Q", "lean4"
+    )
+
+    class BrokenRanker:
+        def rank(self, *_args, **_kwargs):
+            raise TacticGenerationError("malformed model output")
+
+    result = _run_incremental(
+        _context(object(), ranker=BrokenRanker()), initial=root
+    )
+
+    assert result.status is SearchStatus.EXHAUSTED
+    assert result.ordinary_expansions[0].candidate_pool == ()
+
+
+def test_legacy_ranker_generation_failure_exhausts_only_the_current_node():
+    root = SymbolicState(
+        "opaque", "P Q : Prop\nhP : P\n⊢ P ∨ Q", "lean4"
+    )
+
+    class LegacyBrokenRanker:
+        def rank(self, _state, _goal):
+            raise TacticGenerationError("malformed model output")
+
+    result = _run_incremental(
+        _context(object(), ranker=LegacyBrokenRanker()), initial=root
+    )
+
+    assert result.status is SearchStatus.EXHAUSTED
+    assert result.ordinary_expansions[0].candidate_pool == ()
+
+
+def test_refuted_left_schedules_right_next_even_at_width_one():
+    root = SymbolicState("root", "P Q : Prop\nhQ : Q\n⊢ P ∨ Q", "lean4")
+    left_false = SymbolicState("left-false", "P Q : Prop\n⊢ P", "lean4")
+    attempted = []
+
+    class Ranker:
+        def rank(self, *_args, **_kwargs):
+            return (
+                TacticCandidate("left", 1.0, CandidateOrigin.ORDINARY),
+                TacticCandidate("right", 0.8, CandidateOrigin.ORDINARY),
+            )
+
+    class Verifier:
+        def run_tactic(self, _state, candidate):
+            attempted.append(candidate.source)
+            if candidate.source == "left":
+                return TacticResult(candidate, TacticStatus.ACCEPTED, state=left_false)
+            return TacticResult(candidate, TacticStatus.COMPLETE, proof="by right")
+
+    class Checker:
+        def assess(self, state):
+            if state.id == "left-false":
+                return SemanticAssessment(
+                    state.id, SemanticResult.COUNTERMODEL, (("P", False),), 0
+                )
+            return SemanticAssessment(state.id, SemanticResult.VALID)
+
+    result = _run_incremental(
+        _context(Verifier(), ranker=Ranker(), ordinary_width=1, semantic_checker=Checker()),
+        initial=root,
+    )
+
+    assert result.status is SearchStatus.COMPLETE
+    assert attempted == ["right"]
+
+
 def test_all_refuted_disjunct_choices_skip_trailing_candidates():
     root = SymbolicState("root", "P Q : Prop\n⊢ P ∨ Q", "lean4")
     left_false = SymbolicState("left-false", "P Q : Prop\n⊢ P", "lean4")
@@ -794,13 +1175,16 @@ def test_all_refuted_disjunct_choices_skip_trailing_candidates():
         initial=root,
     )
 
-    assert attempted == ["left", "right"]
+    assert attempted == []
     assert [item.candidate.source for item in result.ordinary_expansions[0].skipped_candidates] == [
+        "left",
+        "right",
         "assumption",
         "rfl",
     ]
     assert {item.reason for item in result.ordinary_expansions[0].skipped_candidates} == {
-        "early_all_disjunct_recovery"
+        "semantic_preflight_refuted",
+        "early_all_disjunct_recovery",
     }
     assert result.status is SearchStatus.EXHAUSTED
 
@@ -816,7 +1200,7 @@ def test_accepted_forced_move_does_not_suppress_stuck_only_analogy():
         def rank(self, state, _goal, **_kwargs):
             if state.id == "root":
                 return tuple(TacticCandidate(item, 1.0, CandidateOrigin.ORDINARY) for item in ("assumption", "rfl"))
-            return (CANDIDATE,)
+            return (TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),)
 
     class Verifier:
         def run_tactic(self, state, candidate):
@@ -920,6 +1304,8 @@ def test_unknown_stuck_state_skips_rescue_and_keeps_other_frontier_work():
                     TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),
                     TacticCandidate("rfl", 0.9, CandidateOrigin.ORDINARY),
                 )
+            if state.id == "unknown":
+                return (TacticCandidate("assumption", 1.0, CandidateOrigin.ORDINARY),)
             return (CANDIDATE,)
 
     class Verifier:

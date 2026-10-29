@@ -36,6 +36,8 @@ def _attempt_line(attempt: dict[str, Any], *, fallback: bool = False) -> str:
         status = "progress" if raw_status == "accepted" else raw_status
     diagnostics = "; ".join(result.get("diagnostics") or ())
     suffix = f" — {diagnostics}" if diagnostics else ""
+    if result.get("cache_hit"):
+        suffix += " — Lean cache hit"
     lines = [f"- `{source}` → **{status}**{suffix}"]
     if result.get("state"):
         lines.extend(("", _pre(result["state"].get("expression", result["state"]))))
@@ -63,7 +65,7 @@ def _append_rollout(
             lines.extend(("", f"Structural distance: **{distance:.6g}**"))
         coupling = generation.get("structural_coupling")
         if coupling is not None:
-            lines.extend(("", "**Structural coupling**", "", _pre(coupling)))
+            lines.extend(("", "**Fixed-order alignment**", "", _pre(coupling)))
         diagnostic = generation.get("diagnostic")
         if diagnostic:
             kind = generation.get("error_kind")
@@ -166,11 +168,18 @@ def render_problem_trace(
         _pre(f"theorem current_problem{binders} : {problem['target']} := by"),
         "",
         f"Lean calls: **{outcome.get('verifier_call_count', 0)}** · "
+        f"tactic submissions: **{outcome.get('tactic_submission_count', outcome.get('verifier_call_count', 0))}** · "
         f"invalid tactics: **{outcome.get('invalid_tactic_count', 0)}** · "
         f"stuck states: **{outcome.get('stuck_state_count', 0)}** · "
         f"Analogy generations: **{analogy_generations}** · "
-        f"Analogy tactics submitted to Lean: **{analogy_submissions}**",
+        f"Analogy tactics submitted to Lean: **{analogy_submissions}** · "
+        f"Analogy tactics on winning path: **{outcome.get('analogy_winning_path_count', 0)}**",
     ]
+    ranks = outcome.get("winning_tactic_ranks", ())
+    if ranks:
+        lines.extend(("", "Winning tactic ranks by step: " + ", ".join(
+            "deterministic" if item is None else str(item) for item in ranks
+        )))
     if outcome.get("failure"):
         lines.extend(("", f"**Failure:** {outcome['failure']}"))
     lines.extend(("", "### Model trace"))
@@ -188,11 +197,36 @@ def render_problem_trace(
                     f"Domain: `{event.get('domain', '(unknown)')}` · "
                     f"distance: **{event.get('distance', '(unknown)')}**",
                     "",
-                    "**Structural coupling**",
+                    "**Fixed-order alignment**",
                     "",
                     _pre(event.get("coupling", ())),
                 )
             )
+            continue
+        if kind == "analogy_tactic_score":
+            lines.extend(("", f"#### Post-selection tactic score {index}"))
+            if event.get("state_id"):
+                lines.extend(("", f"State: `{event['state_id']}`"))
+            lines.extend(
+                (
+                    "",
+                    f"Structural rank: **{event.get('structural_rank', '(unknown)')}** · "
+                    f"generation: **{event.get('generation_index', '(unknown)')}**",
+                    "",
+                    f"Tactic: `{event.get('tactic', '(unknown)')}`",
+                )
+            )
+            if event.get("error"):
+                lines.extend(("", f"Likelihood scoring failed: `{event['error']}`"))
+            else:
+                lines.extend(
+                    (
+                        "",
+                        f"total log-probability: **{event.get('total_log_likelihood')}** · "
+                        f"mean log-probability: **{event.get('mean_log_likelihood')}** · "
+                        f"tokens: **{event.get('token_count')}**",
+                    )
+                )
             continue
         lines.extend(("", f"#### Model call {index} — {kind}"))
         if event.get("state_id"):
@@ -282,12 +316,33 @@ def render_run_report(
     traces: Sequence[str],
 ) -> str:
     summary = run.summary
+    if summary.run_id == "deliberation":
+        submitted = sum(
+            item.deliberation_fallback_count for item in summary.results
+        )
+        winning = sum(
+            item.deliberation_winning_path_count for item in summary.results
+        )
+        report = [
+            "# Proof search run",
+            "",
+            "- Condition: **direct deliberation**",
+            f"- Deliberation tactics submitted to Lean: {submitted}",
+            f"- Deliberation tactics on winning paths: {winning}",
+            f"- Solved: {summary.solved_count}/{summary.attempted_count}",
+            "",
+            "## Detailed traces",
+            "",
+            *traces,
+        ]
+        return "\n".join(report) + "\n"
     report = [
         "# Proof search run",
         "",
         f"- Analogy fallback: {'enabled' if run.analogy_enabled else 'disabled'}",
-        f"- Solved: {summary.solved_count}/{summary.attempted_count}",
         f"- Analogy tactics submitted to Lean: {sum(item.analogy_fallback_count for item in summary.results)}",
+        f"- Analogy tactics on winning paths: {sum(item.analogy_winning_path_count for item in summary.results)}",
+        f"- Solved: {summary.solved_count}/{summary.attempted_count}",
         "",
         "## Detailed traces",
         "",
@@ -299,12 +354,31 @@ def render_run_report(
 def render_cli_report(run: Any) -> str:
     """Render one solve session for the command line."""
 
+    if run.summary.run_id == "deliberation":
+        lines = []
+        for result in run.summary.results:
+            lines.append(
+                f"{result.status.value.upper()} {result.problem_id}: "
+                f"deliberation_submissions={result.deliberation_fallback_count}, "
+                f"deliberation_winning={result.deliberation_winning_path_count}, "
+                f"lean_calls={result.verifier_call_count}"
+            )
+        submitted = sum(
+            item.deliberation_fallback_count for item in run.summary.results
+        )
+        lines.extend((
+            "",
+            f"SUMMARY: deliberation=on, deliberation_submissions={submitted}, "
+            f"solved={run.summary.solved_count}/{run.summary.attempted_count}",
+        ))
+        return "\n".join(lines)
     lines: list[str] = []
     for result in run.summary.results:
         lines.append(
             f"{result.status.value.upper()} {result.problem_id}: "
-            f"lean_calls={result.verifier_call_count}, "
-            f"analogy_fallbacks={result.analogy_fallback_count}"
+            f"analogy_submissions={result.analogy_fallback_count}, "
+            f"analogy_winning={result.analogy_winning_path_count}, "
+            f"lean_calls={result.verifier_call_count}"
         )
     fallback_count = sum(
         result.analogy_fallback_count for result in run.summary.results
@@ -313,8 +387,8 @@ def render_cli_report(run: Any) -> str:
         (
             "",
             f"SUMMARY: analogy={'on' if run.analogy_enabled else 'off'}, "
-            f"solved={run.summary.solved_count}/{run.summary.attempted_count}, "
-            f"analogy_fallbacks={fallback_count}",
+            f"analogy_submissions={fallback_count}, "
+            f"solved={run.summary.solved_count}/{run.summary.attempted_count}",
         )
     )
     return "\n".join(lines)

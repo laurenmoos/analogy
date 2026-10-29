@@ -435,6 +435,42 @@ class ExhaustiveSemanticChecker:
         return SemanticAssessment(state.id, SemanticResult.VALID)
 
 
+def assess_disjunction_choice(
+    state: SymbolicState, tactic: str
+) -> SemanticAssessment | None:
+    """Assess a visible `Or` branch before asking Lean to construct its state."""
+
+    if not isinstance(state, SymbolicState) or not isinstance(tactic, str):
+        raise SemanticCheckError("disjunction preflight requires a state and tactic")
+    head = tactic.strip().split(maxsplit=1)[0] if tactic.strip() else ""
+    side = 0 if head in {"left", "constructor"} else 1 if head == "right" else None
+    if side is None:
+        return None
+    try:
+        goal = proof_goals(state.expression)[0]
+        root = proposition_root(goal.target)
+        if root.operator != "∨" or root.parts is None:
+            return None
+        selected = ProofGoal(goal.declarations, root.parts[side])
+        if _goal_has_quantifier(selected):
+            return SemanticAssessment(state.id, SemanticResult.UNKNOWN)
+        countermodel = _goal_countermodel(selected)
+    except _UnsupportedExpression:
+        return SemanticAssessment(state.id, SemanticResult.UNKNOWN)
+    except (InventoryError, IndexError, RecursionError, ValueError) as error:
+        if isinstance(error, SemanticCheckError):
+            raise
+        raise SemanticCheckError(str(error)) from error
+    if countermodel is None:
+        return SemanticAssessment(state.id, SemanticResult.VALID)
+    return SemanticAssessment(
+        state.id,
+        SemanticResult.COUNTERMODEL,
+        countermodel,
+        0,
+    )
+
+
 _QUANTIFIER = re.compile(r"(?:^|[^\w])(?:∀|∃|forall\b|exists\b)")
 
 
@@ -457,6 +493,7 @@ __all__ = [
     "SemanticPrune",
     "SemanticResult",
     "build_countermodel_table",
+    "assess_disjunction_choice",
     "forced_disjunction_tactic",
     "render_countermodel_table",
     "render_semantic_guidance",

@@ -17,6 +17,7 @@ class ModelConfig:
     do_sample: bool
     temperature: float
     top_p: float
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,15 @@ class SearchConfig:
     top_k: int
     max_steps: int
     stuck_after: int
+    samples_per_state: int = 3
 
 
 @dataclass(frozen=True)
 class AnalogyConfig:
     enabled: bool
     max_model_calls: int
+    model_name: str | None = None
+    calibration_path: Path | None = None
 
 
 @dataclass(frozen=True)

@@ -1,62 +1,261 @@
 # Analogy-guided Lean proof search
 
-This repository has one proof-search session. Conventional tactic generation owns the frontier,
-verification, progress checks, budgets, and ordinary backtracking. Every Lean-accepted OPEN
-successor in the supported propositional fragment receives a deterministic SAT check before it can
-enter the frontier. Countermodel-refuted successors are pruned; quantified or otherwise unsupported
-states are marked unknown and remain searchable. Analogy itself remains strictly stuck-only.
+Humans often get unstuck by moving a problem sideways: an electrical circuit becomes flowing water,
+a difficult route becomes a delivery plan, and an abstract dependency becomes a set of boxes inside
+boxes. The objects change while the relationships stay recognizable. This is the central idea in
+[structure-mapping theory](https://doi.org/10.1207/s15516709cog0702_3): useful analogies preserve
+relational structure across domains. Accounts of mathematical discovery often place insight after a
+change of scene.
 
-After the ordinary controller declares a state stuck, it resolves the nearest propositionally valid
-rescue state. Sibling countermodels are summarized by disjunctive-hypothesis side. When different
-models require opposite sides of the same hypothesis, the controller first applies a deterministic
-fresh-name `rcases`; otherwise analogy receives the table and asks for a different plan. If the root
-is false or a stuck state cannot be checked safely, the problem ends as `semantic_failure`.
+Classic experiments found that concrete source stories can support transfer to new problems
+([Gick and Holyoak, 1983](https://doi.org/10.1016/0010-0285(83)90002-6)), and constraint-based
+accounts formalized analogical mapping as a balance of structural, semantic, and pragmatic fit
+([Holyoak and Thagard, 1989](https://doi.org/10.1207/s15516709cog1303_1)). Automated theorem proving
+has also used source proof plans to guide target proofs
+([Melis, 1995](https://www.ijcai.org/Proceedings/95-1/Papers/024.pdf)). This project tests a related
+idea with dynamically generated everyday stories: can analogy help a small language model choose
+better Lean tactics, with Lean verifying every proposed step?
 
-Before any Lean call, ordinary and analogy candidates share the same syntax and safety boundary:
-common syntax is normalized, incomplete/unknown tactics and `tauto`/`itauto` are rejected, tactic
-heads are filtered by focused-goal shape, and tactics already tried at that exact state are removed.
-Removed ordinary candidates trigger bounded replacement sampling. Prompts show only the focused
-goal and a compact generic Lean syntax card without per-problem solution hints.
+Mathematics offers an unusually clean test bed for general analogical reasoning: Lean supplies an
+exact evaluator.
 
-The proof behavior switch is `analogy.enabled` in `config.yaml`:
+Analogy creates **reflective access** by turning a relationship the model already carries into an
+explicit representation it can inspect, revise, and reuse. The working hypothesis is that this
+exposes relational knowledge already available to the model and helps it generalize that knowledge
+into a new domain.
 
-```bash
-uv run python -m analogy solve --analogy
-uv run python -m analogy solve --no-analogy
+When SAT returns a countermodel for the current route, the harness changes the model's frame of
+reference by assigning a new everyday domain. Structural ranking then favors the story whose pattern
+of changes best matches the proof trajectory, giving the model a fresh route through tactic search.
+Lean determines whether that reframing yields a valid proof step. The control flow below makes this
+hypothesis operational.
+
+## Basic control flow
+
+Both experimental conditions start with the same vanilla solver. They differ in what happens
+after that solver runs out of useful tactics at a state.
+
+```text
+problem
+  -> vanilla tactic search
+  -> Lean verifies each tactic
+  -> accepted tactics create the next proof states to try
+  -> if the proof completes: stop
+  -> if a state is stuck: run semantic recovery
+       -> deterministic move available: try it, then resume vanilla search
+       -> model intervention required:
+            deliberation control -> direct proof plan -> tactic -> Lean
+            analogy condition    -> story revisions -> structural rank -> tactic -> Lean
 ```
 
-Without either CLI override, the configured boolean is used. Both settings execute the same
-ordinary controller, proactive SAT pruning, countermodel tables, and deterministic forced moves.
-Disabling analogy records the same recovery decisions but makes no analogy model call.
-`analogy.max_model_calls` limits malformed, duplicate, and Lean-feedback correction attempts per
-stuck state. Each generation is logged; duplicate proposals are resampled without reaching Lean.
+Any intervention tactic accepted by Lean produces an ordinary proof state and returns control to the
+same vanilla search loop. Ordinary search, intervention, and Lean verification run in sequence, with
+Lean verifying every tactic.
 
-Problem scheduling is controlled by `benchmark.selection`. The default, `exhaustive`, runs the
-complete 30-problem PropL OOD benchmark. Use an override when an interrupted experiment should
-retry only unresolved or failed problems:
+In the first five-trial branch-choice evaluation, analogy solved **4/5** while the matched
+direct-deliberation control solved **2/5**.
 
-```bash
-uv run python -m analogy solve --all-problems
-uv run python -m analogy solve --previous-failures
+## Problems
+
+The benchmark contains 30 synthetic Lean theorems over five atomic propositions from PropL's
+[`test_ood`](https://huggingface.co/datasets/KomeijiForce/PropL) split, pinned to revision
+`62a13de410999c20f60ec2f3be93457dcaac0d62`. Each combines `∧`, `∨`, `→`, `True`, and `False` with
+branch choices and multi-step hypothesis use. Deterministic selection requires a flat source trace,
+a verifier-accepted reference proof of at least 13 tactics, and reasoning beyond one `simp`. The
+exact corpus and selection record are in
+[`problems.json`](src/analogy/lean_gym/corpus/problems.json) and
+[`benchmark_metadata.json`](src/analogy/lean_gym/corpus/benchmark_metadata.json). The model receives
+the theorem and live search context; selection uses the reference proofs and metadata.
+
+The capability suite freezes five trials where vanilla search exhausts its candidates at a
+meaningful disjunction: OOD 09 seed 0, OOD 19 seed 1, OOD 26 seeds 0 and 1, and OOD 18 seed 0. These
+trials test whether analogy can move the proof forward from those states.
+
+## Vanilla solver
+
+Vanilla search is the shared foundation of both conditions, and each accepted intervention returns
+to it.
+
+1. **Apply safe deterministic moves.** Before asking the model, the controller handles immediately
+   recognizable cases such as an exact matching hypothesis, a directly available conjunction
+   component, implication introduction, `True`, conjunction construction, and disjunctions whose
+   two sides are identical.
+2. **Generate tactic candidates.** The model sees the overall theorem, the current focused Lean
+   state, the accepted path, Lean feedback from that state, and a compact tactic card. It returns JSON
+   tactics. The configured controller permits up to three generation or repair calls per state.
+3. **Validate and pool.** Tactics are normalized and deduplicated. Admission requires a complete
+   single tactic with a supported head, visible identifiers, genuine evidence, and a fresh tactic for
+   the normalized state. The model receives repair feedback for schema corrections.
+4. **Rank by model likelihood.** The harness asks the model provider for each candidate completion's
+   mean token log-likelihood, converts those values into normalized weights, and keeps the top three.
+5. **Preflight branch choices.** For `left` and `right`, the propositional checker evaluates the
+   selected disjunct before Lean is called. Branches supported across the exhaustive valuation check
+   proceed to Lean; a countermodel for `left` triggers evaluation of `right`.
+6. **Ask Lean.** Candidates are submitted one at a time. Lean errors, completed proofs, open
+   successors, repeated states, and unchanged states are recorded separately. Normalized
+   `(state, tactic)` results are cached.
+7. **Prune and prioritize.** Every Lean-accepted open state in the supported propositional fragment
+   receives an exhaustive Boolean validity check. States that remain valid enter the search pool. The
+   solver chooses the next open proof state primarily from tactic likelihood with a small depth
+   penalty; frozen-model embedding novelty is the secondary key.
+8. **Declare stuckness.** A state becomes stuck when every candidate yields an error, a repeated
+   state, an unchanged state, or a semantic countermodel. Quantified states remain searchable.
+
+In short:
+
+```text
+proof state -> deterministic move or model candidates -> likelihood ranking
+            -> SAT preflight -> Lean -> semantic pruning -> next open proof state
 ```
 
-At startup the runner creates or loads the checkpoint file `.artifacts/problem-index.json`. The
-checkpoint is keyed by the corpus, prompts, model settings, search budgets, and analogy settings. A
-changed experiment therefore starts with every problem unresolved instead of inheriting
-incompatible results. The checkpoint is updated after each attempted problem, so an interrupted run
-can restart with the same MLX model loaded once for only the remaining failures. If every compatible
-problem is already complete, the command exits before initializing prompts, MLX, or Lean. If the
-checkpoint is missing, compatible `run.json` files are used to reconstruct it.
+## Analogy condition
 
-Each run writes `run.json`, per-problem JSON, and a readable `report.md` beneath
-`.artifacts/runs/solve/<run-id>/`. `analogy_fallback_count` counts analogy tactics actually submitted
-to Lean, not malformed generations. Semantic recovery records separately show the stuck trigger,
-countermodel or validation result, chosen rescue state, abandoned path tactics, dependency table,
-and forced moves. Benchmark reports use one matched run of each arm on the same corpus problems.
+Analogy is a stuck-state intervention layered on the same search. One persistent mental model is
+used per problem, and later calls revise that story.
 
-The active corpus is a deterministic subset of the online
-[PropL dataset](https://huggingface.co/datasets/KomeijiForce/PropL), pinned to revision
-`62a13de410999c20f60ec2f3be93457dcaac0d62`. Each problem is intuitionistic propositional logic
-from `test_ood`, contains conjunction, disjunction, and implication, has a verifier-accepted source
-proof of at least 13 tactics, and is not solved by one `simp`. Selection and provenance details live
-in `src/analogy/lean_gym/corpus/benchmark_metadata.json`; they are not included in model prompts.
+### 1. Build a story from abstract actions
+
+At the first recoverable stuck state, the harness reconstructs the root-to-stuck proof path.
+Accepted tactics on that path are converted deterministically into abstract actions—for example,
+`intro` becomes “take on an assumption,” `rcases` becomes “break a combined fact into its parts,”
+and `left` becomes “commit to the left available choice.”
+
+The story-writing input contains those abstract actions and a harness-assigned everyday domain. It
+must produce one concrete state transition per accepted proof transition. Domains come from a fixed
+card including cooking, travel, construction, games, gardening, logistics, household organization,
+and mechanical repair.
+
+For example, suppose the accepted Lean path is:
+
+```lean
+intro h
+obtain ⟨hp1, hp2⟩ := h
+left
+exact hp1
+```
+
+The harness retains that code, converts it into the following story-writing input, and assigns the
+domain `travel or navigation`:
+
+```text
+1. take on an assumption
+2. break a combined fact into its parts
+3. commit to the left available choice
+4. finish using something already in hand
+```
+
+A valid story response could be:
+
+```json
+{
+  "domain": "travel or navigation",
+  "initial_state": "a traveler is waiting at a station to receive an assigned trip",
+  "transitions": [
+    {
+      "domain_transition": "the traveler accepts a sealed travel packet",
+      "domain_after": "the traveler is responsible for the trip and holds the sealed packet"
+    },
+    {
+      "domain_transition": "the traveler opens the packet and separates the ticket from the map",
+      "domain_after": "the traveler holds the ticket and map as separate items"
+    },
+    {
+      "domain_transition": "the traveler enters the left departure lane toward the train platform",
+      "domain_after": "the traveler stands at the train-platform checkpoint"
+    },
+    {
+      "domain_transition": "the traveler presents the ticket already in hand",
+      "domain_after": "the checkpoint opens for the traveler"
+    }
+  ],
+  "abandoned_domains": []
+}
+```
+
+After validation, the harness pairs these four everyday transitions with the four actual proof
+transitions and states.
+
+### 2. Validate and revise
+
+The harness checks the JSON schema, exact transition count, assigned domain, domain ledger, and
+concrete everyday vocabulary. A response requiring repair receives the validator's reason once as
+feedback. Every initialization outcome is cached by normalized stuck-state fingerprint.
+
+At later stuck states, the model may generate several revisions of the same mental model. A SAT
+countermodel forces a domain change; the harness selects the next domain in the canonical sequence
+and fills the abandoned-domain ledger.
+
+### 3. Rank analogies by structural correspondence
+
+Analogy ranking is independent of tactic ranking:
+
+1. Embed the ordered everyday states and the ordered proof states with mean-token embeddings from
+   layer 12.
+2. Subtract a frozen corpus mean and remove the top two principal components. These frozen
+   statistics reduce embedding anisotropy and were fitted on 838 calibration texts.
+3. Convert consecutive states into transition vectors (`after - before`).
+4. Build a cosine-distance matrix between transitions in each sequence and mean-normalize it.
+5. Resize both ordered distance structures to `24 × 24`.
+6. Compare their upper triangles using correlation distance. Lower distance means that the story's
+   pattern of changes more closely matches the proof trajectory's pattern of changes.
+7. Rank valid story revisions by this distance, with generation order as the tie-breaker.
+
+Structural ranking begins with three transitions. Shorter trajectories receive a recorded neutral
+score.
+
+### 4. Select a tactic after ranking
+
+After structural ranking, the tactic-selection call receives the current Lean state and the
+best-ranked remaining story. For a disjunction it must spell out the everyday and proof consequences
+of both `left` and `right`, then select one. A tactic that produces an error or unchanged state moves
+recovery to the next ranked revision. The current proof state and visible hypotheses are
+authoritative; the story is secondary context.
+
+The selected tactic passes through the same syntax filter, SAT preflight, Lean verifier, repeated-
+state checks, and semantic pruning as an ordinary tactic. Tactic likelihood is logged afterward for
+analysis. The structural ordering of the analogies remains fixed for that recovery attempt.
+
+```text
+stuck state -> exact path -> abstract actions -> story revisions
+            -> structural ranking -> current-goal tactic -> Lean
+```
+
+## Reproduce the experiment
+
+The MLX backend requires Python 3.11+, Apple Silicon, and Lean 4/Lake. Install the environment:
+
+```bash
+uv sync --extra mlx --extra dev
+```
+
+The experiment uses `Qwen3-14B-4bit` for every model role in both conditions: ordinary tactic
+generation, direct deliberation, analogy story and tactic calls, likelihood scoring, and state
+embeddings. The structural scorer uses the packaged layer-12 calibration from the same model at
+revision `a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4`. [`config.yaml`](config.yaml) provides a complete
+14B default setup, and [`prompts.yaml`](prompts.yaml) contains every model-facing prompt.
+
+The frozen suite, exact commands, four run configurations, seed-specific theorem sets, complete
+prompt/response traces, run summaries, and verified proofs live in
+[`experiments/compute-matched-5`](experiments/compute-matched-5/README.md). Both conditions share
+ordinary search, deterministic moves, SAT checks, Lean verification, and the intervention-generation
+envelope. Analogy also performs structural embedding and ranking; later search work varies with the
+proof states produced by each intervention.
+
+For a fresh 30-problem run with the main configuration:
+
+```bash
+uv run python -m analogy solve --deliberation --all-problems
+uv run python -m analogy solve --analogy --all-problems
+```
+
+Each command writes `report.md`, `run.json`, and per-problem records under
+`.artifacts/runs/solve/<run-id>/`. Current run records retain the effective configuration, model
+revisions, file hashes, run seed, and individual generation seeds.
+
+The frozen five-trial capability suite produced:
+
+| Metric | Direct deliberation | Analogy |
+|---|---:|---:|
+| Trials solved | 2/5 | **4/5** |
+| Intervention tactics submitted to Lean | 4 | 6 |
+| Intervention tactics on winning paths | 1 | **3** |

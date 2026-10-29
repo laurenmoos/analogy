@@ -179,6 +179,117 @@ def proof_goals(expression: str) -> tuple[ProofGoal, ...]:
     return tuple(goals)
 
 
+def _projection_terms(
+    term: str, proposition: str
+) -> tuple[tuple[str, str], ...]:
+    """Return a conjunction hypothesis and every recursively visible projection."""
+
+    terms = [(term, proposition)]
+    root = proposition_root(proposition)
+    if root.operator == "∧" and root.parts is not None:
+        terms.extend(_projection_terms(f"{term}.1", root.parts[0]))
+        terms.extend(_projection_terms(f"{term}.2", root.parts[1]))
+    return tuple(terms)
+
+
+def _disjunction_evidence(target: str, proposition: str, term: str) -> str | None:
+    """Build nested `Or` evidence when one target disjunct matches a local fact."""
+
+    normalized_target = " ".join(target.split())
+    normalized_proposition = " ".join(proposition.split())
+    if normalized_target == normalized_proposition:
+        return term
+    root = proposition_root(target)
+    if root.operator != "∨" or root.parts is None:
+        return None
+    left = _disjunction_evidence(root.parts[0], proposition, term)
+    if left is not None:
+        return f"Or.inl ({left})"
+    right = _disjunction_evidence(root.parts[1], proposition, term)
+    if right is not None:
+        return f"Or.inr ({right})"
+    return None
+
+
+def matching_hypothesis_tactic(expression: str) -> str | None:
+    """Finish the focused goal from a local hypothesis or conjunction projection."""
+
+    try:
+        goal = proof_goals(expression)[0]
+    except (InventoryError, IndexError):
+        return None
+    target = " ".join(goal.target.split())
+    visible = tuple(
+        projected
+        for name, proposition in goal.declarations
+        for projected in _projection_terms(name, proposition)
+    )
+    for term, proposition in visible:
+        if " ".join(proposition.split()) == target:
+            return f"exact {term}"
+    for term, proposition in visible:
+        if " ".join(proposition.split()) == "False":
+            return f"exact False.elim {term}"
+    for term, proposition in visible:
+        evidence = _disjunction_evidence(goal.target, proposition, term)
+        if evidence is not None:
+            return f"exact {evidence}"
+    return None
+
+
+def _fresh_semantic_name(proposition: str, occupied: set[str]) -> str:
+    ignored = {"Prop", "Type", "Sort", "forall", "True", "False"}
+    atoms = re.findall(r"[A-Za-z_][A-Za-z0-9_']*", proposition)
+    suffix = "".join(atom for atom in atoms if atom not in ignored)[:18] or "Part"
+    base = "h" + suffix
+    candidate = base
+    index = 2
+    while candidate in occupied:
+        candidate = f"{base}_{index}"
+        index += 1
+    occupied.add(candidate)
+    return candidate
+
+
+def _conjunction_pattern(proposition: str, occupied: set[str]) -> str:
+    root = proposition_root(proposition)
+    if root.operator == "∧" and root.parts is not None:
+        left = _conjunction_pattern(root.parts[0], occupied)
+        right = _conjunction_pattern(root.parts[1], occupied)
+        return f"⟨{left}, {right}⟩"
+    return _fresh_semantic_name(proposition, occupied)
+
+
+def eager_conjunction_tactic(
+    expression: str, context: tuple[str, ...]
+) -> str | None:
+    """Unpack a newly introduced conjunction before the proof creates branches."""
+
+    if not context or not context[-1].strip().startswith("intro "):
+        return None
+    intro_arguments = context[-1].strip().split()[1:]
+    introduced_names = {
+        argument for argument in intro_arguments if _IDENTIFIER.fullmatch(argument)
+    }
+    if not introduced_names:
+        return None
+    try:
+        goals = proof_goals(expression)
+    except InventoryError:
+        return None
+    if len(goals) != 1:
+        return None
+    goal = goals[0]
+    occupied = {name for name, _ in goal.declarations}
+    for name, proposition in goal.declarations:
+        if name not in introduced_names:
+            continue
+        root = proposition_root(proposition)
+        if root.operator == "∧" and root.parts is not None:
+            return f"obtain {_conjunction_pattern(proposition, occupied)} := {name}"
+    return None
+
+
 def _split_component(expression: str, operator: str) -> tuple[str, str] | None:
     """Split syntax outside literals, quoted names, nested terms, and let binders.
 
@@ -246,4 +357,12 @@ def _split_component(expression: str, operator: str) -> tuple[str, str] | None:
 
 
 
-__all__ = ["InventoryError", "ProofGoal", "PropositionRoot", "proof_goals", "proposition_root"]
+__all__ = [
+    "InventoryError",
+    "ProofGoal",
+    "PropositionRoot",
+    "eager_conjunction_tactic",
+    "matching_hypothesis_tactic",
+    "proof_goals",
+    "proposition_root",
+]

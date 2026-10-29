@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,9 +19,9 @@ FROZEN_EMBEDDING_LAYER = 12
 FROZEN_MATRIX_SIZE = 24
 FROZEN_PRINCIPAL_COMPONENTS = 2
 FROZEN_SOURCE_TEXT_COUNT = 838
-FROZEN_EMBEDDING_MODEL = "mlx-community/Qwen3-8B-4bit"
+FROZEN_EMBEDDING_MODEL = "mlx-community/Qwen3-14B-4bit"
 FROZEN_EMBEDDING_REVISION = (
-    "mlx-community/Qwen3-8B-4bit@545dc4251c05440727734bcd94334791f6ab0192"
+    "mlx-community/Qwen3-14B-4bit@a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4"
 )
 FROZEN_EMBEDDING_POOLING = "mean"
 FROZEN_SCORE_METHOD = "ordered-transition-resized-correlation-v1"
@@ -90,6 +90,61 @@ class ProofBelief:
 
 
 @dataclass(frozen=True, slots=True)
+class ProofTrajectory:
+    states: tuple[str, ...]
+    tactics: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        states = tuple(self.states)
+        tactics = tuple(self.tactics)
+        if len(states) != len(tactics) + 1:
+            raise StructuralScoringError(
+                "proof trajectory must contain one more state than tactic"
+            )
+        object.__setattr__(self, "states", states)
+        object.__setattr__(self, "tactics", tactics)
+
+
+def proof_trajectory(belief: ProofBelief) -> ProofTrajectory:
+    return ProofTrajectory(
+        tuple(
+            item.text for item in belief.graph.elements if item.role == "proof-state"
+        ),
+        tuple(
+            item.text for item in belief.graph.elements if item.role == "proof-tactic"
+        ),
+    )
+
+
+def abstract_proof_transition(tactic: str) -> str:
+    """Describe an accepted tactic without exposing any Lean operand."""
+
+    normalized = " ".join(tactic.split())
+    head = normalized.split(maxsplit=1)[0].casefold() if normalized else ""
+    if head in {"intro", "intros", "rintro"}:
+        return "take on an assumption"
+    if head in {"obtain", "cases", "rcases"}:
+        return "break a combined fact into its parts"
+    if head == "apply":
+        return "use a rule to reduce the goal"
+    if head in {"exact", "assumption"}:
+        return "finish using something already in hand"
+    if head == "constructor":
+        return "split the task into required parts"
+    if head == "left":
+        return "commit to the left available choice"
+    if head == "right":
+        return "commit to the right available choice"
+    if head in {"rw", "rewrite"}:
+        return "rewrite the situation using a known relationship"
+    if head in {"simp", "simpa"}:
+        return "simplify the situation using known relationships"
+    if "false.elim" in normalized.casefold() or head == "contradiction":
+        return "finish because the starting conditions conflict"
+    return "make the next proof move"
+
+
+@dataclass(frozen=True, slots=True)
 class EmbeddingCalibration:
     """Frozen anisotropy correction fitted on the 838-text experiment corpus."""
 
@@ -135,6 +190,7 @@ class MentalModelFit:
     coupling: tuple[tuple[float, ...], ...]
     mental_model_graph: StructuralGraph
     proof_belief_graph: StructuralGraph
+    discriminative: bool = True
 
 
 def build_proof_belief(search: Any) -> ProofBelief:
@@ -189,43 +245,6 @@ def _active_ancestry(active_node: Any, nodes_by_id: dict[str, Any]) -> list[Any]
                 f"proof ancestry is missing parent state {parent_id!r}"
             ) from error
     return list(reversed(reversed_path))
-
-
-def _graph_distances(
-    graph: StructuralGraph,
-) -> tuple[tuple[float, ...], ...]:
-    """Retain normalized graph distances for historical experiment readers."""
-
-    identifiers = [item.id for item in graph.elements]
-    indices = {identifier: index for index, identifier in enumerate(identifiers)}
-    neighbors = [set() for _ in identifiers]
-    for source, target in graph.edges:
-        left, right = indices[source], indices[target]
-        neighbors[left].add(right)
-        neighbors[right].add(left)
-    raw: list[list[float]] = []
-    maximum = 0.0
-    for origin in range(len(identifiers)):
-        distances = [math.inf] * len(identifiers)
-        distances[origin] = 0.0
-        queue = deque([origin])
-        while queue:
-            current = queue.popleft()
-            for neighbor in neighbors[current]:
-                if math.isinf(distances[neighbor]):
-                    distances[neighbor] = distances[current] + 1.0
-                    maximum = max(maximum, distances[neighbor])
-                    queue.append(neighbor)
-        raw.append(distances)
-    disconnected = maximum + 1.0 if maximum else 1.0
-    scale = max(maximum, disconnected, 1.0)
-    return tuple(
-        tuple(
-            (value if math.isfinite(value) else disconnected) / scale
-            for value in row
-        )
-        for row in raw
-    )
 
 
 def ordered_mental_model_state_texts(model: MentalModel) -> tuple[str, ...]:
@@ -298,8 +317,24 @@ def load_frozen_embedding_calibration() -> EmbeddingCalibration:
     """Load the frozen Qwen layer-12 mean-token calibration shipped with the solver."""
 
     resource = resources.files(__package__).joinpath(_CALIBRATION_RESOURCE)
+    with resources.as_file(resource) as path:
+        return load_embedding_calibration(
+            path,
+            expected_model_id=FROZEN_EMBEDDING_MODEL,
+            expected_model_revision=FROZEN_EMBEDDING_REVISION,
+        )
+
+
+def load_embedding_calibration(
+    path: Path,
+    *,
+    expected_model_id: str | None = None,
+    expected_model_revision: str | None = None,
+) -> EmbeddingCalibration:
+    """Load one immutable calibration and validate its scoring contract."""
+
     try:
-        with resources.as_file(resource) as path, np.load(path) as payload:
+        with np.load(Path(path)) as payload:
             metadata = {
                 "score_method": str(payload["score_method"].reshape(-1)[0]),
                 "model_id": str(payload["model_id"].reshape(-1)[0]),
@@ -311,18 +346,36 @@ def load_frozen_embedding_calibration() -> EmbeddingCalibration:
                 "embedding_layer": int(payload["embedding_layer"].reshape(-1)[0]),
                 "matrix_size": int(payload["matrix_size"].reshape(-1)[0]),
             }
-            expected = {
+            frozen_contract = {
                 "score_method": FROZEN_SCORE_METHOD,
-                "model_id": FROZEN_EMBEDDING_MODEL,
-                "model_revision": FROZEN_EMBEDDING_REVISION,
                 "pooling": FROZEN_EMBEDDING_POOLING,
                 "source_text_count": FROZEN_SOURCE_TEXT_COUNT,
                 "embedding_layer": FROZEN_EMBEDDING_LAYER,
                 "matrix_size": FROZEN_MATRIX_SIZE,
             }
-            if metadata != expected:
+            actual_contract = {
+                key: metadata[key] for key in frozen_contract
+            }
+            if actual_contract != frozen_contract:
                 raise StructuralScoringError(
                     f"frozen score calibration metadata mismatch: {metadata!r}"
+                )
+            if (
+                expected_model_id is not None
+                and metadata["model_id"] != expected_model_id
+            ):
+                raise StructuralScoringError(
+                    "frozen score calibration model id mismatch: "
+                    f"expected {expected_model_id!r}, got {metadata['model_id']!r}"
+                )
+            if (
+                expected_model_revision is not None
+                and metadata["model_revision"] != expected_model_revision
+            ):
+                raise StructuralScoringError(
+                    "frozen score calibration model revision mismatch: "
+                    f"expected {expected_model_revision!r}, "
+                    f"got {metadata['model_revision']!r}"
                 )
             mean = tuple(float(value) for value in payload["mean"])
             components = tuple(
@@ -339,6 +392,62 @@ def load_frozen_embedding_calibration() -> EmbeddingCalibration:
         model_id=metadata["model_id"],
         model_revision=metadata["model_revision"],
     )
+
+
+def fit_embedding_calibration(
+    embeddings: tuple[tuple[float, ...], ...],
+    *,
+    model_id: str,
+    model_revision: str,
+) -> EmbeddingCalibration:
+    """Fit frozen mean and top-two principal components from a fixed corpus."""
+
+    vectors = np.asarray(embeddings, dtype=np.float64)
+    if vectors.ndim != 2 or vectors.shape[0] < 3 or vectors.shape[1] < 2:
+        raise StructuralScoringError(
+            "calibration fitting requires at least three equal-sized embeddings"
+        )
+    if not np.all(np.isfinite(vectors)):
+        raise StructuralScoringError("calibration embeddings must be finite")
+    mean = vectors.mean(axis=0)
+    centered = vectors - mean
+    _, _, right_vectors = np.linalg.svd(centered, full_matrices=False)
+    return EmbeddingCalibration(
+        tuple(float(value) for value in mean),
+        tuple(
+            tuple(float(value) for value in component)
+            for component in right_vectors[:FROZEN_PRINCIPAL_COMPONENTS]
+        ),
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+
+
+def validate_calibration_embeddings(
+    records: tuple[Embedding, ...],
+) -> tuple[tuple[tuple[float, ...], ...], str]:
+    """Require one exact immutable model revision across a calibration corpus."""
+
+    if not records or any(not isinstance(record, Embedding) for record in records):
+        raise StructuralScoringError(
+            "calibration requires nonempty embedding records"
+        )
+    revisions = {record.model_revision for record in records}
+    if len(revisions) != 1:
+        raise StructuralScoringError(
+            "calibration embeddings must use the same model revision"
+        )
+    revision = next(iter(revisions))
+    if revision is None or revision.startswith("unresolved:"):
+        raise StructuralScoringError(
+            "calibration requires a resolved immutable revision"
+        )
+    dimensions = {len(record.values) for record in records}
+    if len(dimensions) != 1:
+        raise StructuralScoringError(
+            "calibration embedding dimensions must agree"
+        )
+    return tuple(record.values for record in records), revision
 
 
 def remove_embedding_anisotropy(
@@ -464,14 +573,24 @@ def score_mental_model_revision(
 
     mental_texts = ordered_mental_model_state_texts(model)
     proof_texts = ordered_proof_state_texts(belief)
-    if len(proof_texts) < 2:
+    calibration = calibration or load_frozen_embedding_calibration()
+    # One transition has no relationship to compare. Two transitions always
+    # reduce to the same normalized 2x2 distance matrix. Neither case can
+    # discriminate a useful analogy from an irrelevant one.
+    if len(proof_texts) < 4:
+        probe = embed_mean_pooled_states(
+            (mental_texts[0],),
+            embedder,
+            expected_model_revision=calibration.model_revision,
+        )
+        remove_embedding_anisotropy(probe, calibration)
         return MentalModelFit(
-            0.0,
+            0.5,
             fixed_order_alignment(),
             _mental_model_graph(model),
             belief.graph,
+            discriminative=False,
         )
-    calibration = calibration or load_frozen_embedding_calibration()
     mental_states = remove_embedding_anisotropy(
         embed_mean_pooled_states(
             mental_texts,
@@ -562,6 +681,8 @@ __all__ = [
     "compute_state_change_vectors",
     "embed_mean_pooled_states",
     "fixed_order_alignment",
+    "fit_embedding_calibration",
+    "load_embedding_calibration",
     "load_frozen_embedding_calibration",
     "ordered_mental_model_state_texts",
     "ordered_proof_state_texts",
@@ -569,4 +690,5 @@ __all__ = [
     "resize_step_distance_matrix",
     "score_mental_model_revision",
     "upper_triangle_correlation_distance",
+    "validate_calibration_embeddings",
 ]

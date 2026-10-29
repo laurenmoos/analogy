@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "selection": "category-selected stuck-state branch-choice capability suite",
+  "model": {
+    "id": "mlx-community/Qwen3-14B-4bit",
+    "revision": "a4d9b2df59d2c150bef02fcbe0d91046b7ca33a4"
+  },
+  "files": {
+    "prompts_sha256": "710f767a4423f44f721e4eb9d6c9fce5b751c26afb843d20b30417c92c9cca9e",
+    "calibration_sha256": "2ed71f3213605a040af8a7f8dfac9dffc7177fd6f295102e2d11e58a483a130f",
+    "seed0_problems_sha256": "70f457ac48b12e74ebf12d98796f497728f9758cecb1e56cecc8bcfea701dd3f",
+    "seed1_problems_sha256": "3f228d7b8e6d7e161a450c66bb78a864a4267f0e872bb0ae61659c40ae3fe6fd"
+  },
+  "recorded_runs": {
+    "deliberation_seed0": "3afbd6be46554c898e2e8beac66f6e28",
+    "analogy_seed0": "a4237fc50ff94622958bb3944cc19a7d",
+    "deliberation_seed1": "51d0cbafb4594f2fad4fc6742f8dd451",
+    "analogy_seed1": "2e6c9a3ecb744657ad89a4c39d58ca8e"
+  },
+  "trials": [
+    {
+      "problem_id": "propl_ood_265557872740597889312779794693",
+      "title": "PropL OOD 09",
+      "seed": 0,
+      "deliberation": {"status": "exhausted", "submitted": 1, "winning": 0},
+      "analogy": {"status": "complete", "submitted": 1, "winning": 1}
+    },
+    {
+      "problem_id": "propl_ood_254637624771904022244407550769",
+      "title": "PropL OOD 19",
+      "seed": 1,
+      "deliberation": {"status": "exhausted", "submitted": 1, "winning": 0},
+      "analogy": {"status": "complete", "submitted": 1, "winning": 1}
+    },
+    {
+      "problem_id": "propl_ood_168469097189615988227299206974",
+      "title": "PropL OOD 26",
+      "seed": 0,
+      "deliberation": {"status": "exhausted", "submitted": 1, "winning": 0},
+      "analogy": {"status": "exhausted", "submitted": 1, "winning": 0}
+    },
+    {
+      "problem_id": "propl_ood_168469097189615988227299206974",
+      "title": "PropL OOD 26",
+      "seed": 1,
+      "deliberation": {"status": "complete", "submitted": 1, "winning": 1},
+      "analogy": {"status": "complete", "submitted": 2, "winning": 1}
+    },
+    {
+      "problem_id": "propl_ood_358233606958956408248147497163",
+      "title": "PropL OOD 18",
+      "seed": 0,
+      "deliberation": {"status": "complete", "submitted": 0, "winning": 0},
+      "analogy": {"status": "complete", "submitted": 1, "winning": 0}
+    }
+  ],
+  "aggregate": {
+    "deliberation_solved": 2,
+    "analogy_solved": 4,
+    "trial_count": 5,
+    "recorded_completed_proofs_reverified_with_lean": 6
+  }
+}

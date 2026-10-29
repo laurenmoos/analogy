@@ -569,11 +569,11 @@ def score_mental_model_revision(
     *,
     calibration: EmbeddingCalibration | None = None,
 ) -> MentalModelFit:
-    """Score ordered transition fit with the frozen 24×24 correlation method."""
+    """Score ordered transition fit, optionally using frozen normalization."""
 
     mental_texts = ordered_mental_model_state_texts(model)
     proof_texts = ordered_proof_state_texts(belief)
-    calibration = calibration or load_frozen_embedding_calibration()
+    expected_revision = calibration.model_revision if calibration is not None else None
     # One transition has no relationship to compare. Two transitions always
     # reduce to the same normalized 2x2 distance matrix. Neither case can
     # discriminate a useful analogy from an irrelevant one.
@@ -581,9 +581,10 @@ def score_mental_model_revision(
         probe = embed_mean_pooled_states(
             (mental_texts[0],),
             embedder,
-            expected_model_revision=calibration.model_revision,
+            expected_model_revision=expected_revision,
         )
-        remove_embedding_anisotropy(probe, calibration)
+        if calibration is not None:
+            remove_embedding_anisotropy(probe, calibration)
         return MentalModelFit(
             0.5,
             fixed_order_alignment(),
@@ -591,22 +592,19 @@ def score_mental_model_revision(
             belief.graph,
             discriminative=False,
         )
-    mental_states = remove_embedding_anisotropy(
-        embed_mean_pooled_states(
-            mental_texts,
-            embedder,
-            expected_model_revision=calibration.model_revision,
-        ),
-        calibration,
+    mental_states = embed_mean_pooled_states(
+        mental_texts,
+        embedder,
+        expected_model_revision=expected_revision,
     )
-    proof_states = remove_embedding_anisotropy(
-        embed_mean_pooled_states(
-            proof_texts,
-            embedder,
-            expected_model_revision=calibration.model_revision,
-        ),
-        calibration,
+    proof_states = embed_mean_pooled_states(
+        proof_texts,
+        embedder,
+        expected_model_revision=expected_revision,
     )
+    if calibration is not None:
+        mental_states = remove_embedding_anisotropy(mental_states, calibration)
+        proof_states = remove_embedding_anisotropy(proof_states, calibration)
     try:
         mental_resized = build_resized_transition_structure(mental_states)
     except StructuralScoringError as error:

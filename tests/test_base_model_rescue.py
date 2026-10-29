@@ -47,6 +47,7 @@ from analogy.solver.analogy.protocol import (
 )
 from analogy.solver.analogy.harness import (
     EqualAnalogyScorer,
+    _record_initial_structural_score,
     initialize_analogy_harness,
     initialize_story_model,
 )
@@ -404,6 +405,45 @@ def test_initial_harness_keeps_every_valid_story_candidate(tmp_path):
         "the cook opens the first container",
         "the cook follows the shorter preparation route",
     ]
+
+
+def test_initial_score_disables_frozen_calibration_when_config_path_is_null(
+    monkeypatch,
+):
+    captured = []
+
+    def score(*_args, **kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            distance=0.2,
+            discriminative=True,
+            coupling=((1.0,),),
+        )
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.harness.score_mental_model_revision", score
+    )
+    config = SimpleNamespace(
+        analogy=SimpleNamespace(calibration_path=None, model_name="remote/model"),
+        model=SimpleNamespace(name="remote/model"),
+    )
+    events = []
+
+    _record_initial_structural_score(
+        config,
+        object(),
+        events,
+        "stuck",
+        MentalModel(
+            "travel or navigation",
+            (MentalModelCorrespondence("home", "take a train", "station"),),
+        ),
+        _proof_belief(),
+        skip_expensive_score=False,
+        generation_index=0,
+    )
+
+    assert captured == [{}]
 
 
 def test_recovery_story_cache_shares_candidates_but_never_tactics(

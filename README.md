@@ -264,3 +264,21 @@ The combined `manifest.json` and `report.md` appear under
 `.artifacts/evaluations/<evaluation-id>/`. Each manifest references the six ordinary solve-run
 directories, records input and environment hashes, and refuses completion when the two arms have
 different ordinary prefixes or the analogy arm lacks its initial candidate and selection evidence.
+
+## Run the small evaluation
+
+The small evaluation runs 10 additional problems under the same direct-deliberation and
+structurally ranked analogy conditions, for 20 trials at seed `0`. Problems are selected before
+either condition runs: take the highest-ranked source examples by failed proof-construction
+attempts, then reference-proof length and target length, while excluding the three probe problems.
+This deliberately enriches the set for branching complexity that can produce stuck states. It does
+not select on this solver's failures or on analogy outcomes, and it is a capability-focused sample
+rather than a population estimate.
+
+```bash
+uv run python -m analogy evaluate --phase small --config config.yaml
+```
+
+The small evaluation records invalid or absent analogy candidates as outcomes. It requires all 20
+trials and matched ordinary prefixes whenever a recoverable stuck state occurs, while reserving the
+probe's stricter “two valid candidates and one selection” requirement for the plumbing check.

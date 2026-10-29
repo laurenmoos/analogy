@@ -255,6 +255,21 @@ def test_runtime_score_uses_frozen_mean_layer_and_prefers_matching_order():
     assert sum(sum(row) for row in matching.coupling) == pytest.approx(1.0)
 
 
+def test_runtime_score_without_calibration_skips_frozen_calibration(monkeypatch):
+    monkeypatch.setattr(
+        "analogy.solver.analogy.structural_scoring.load_frozen_embedding_calibration",
+        lambda: pytest.fail("disabled calibration must not be loaded"),
+    )
+
+    fit = score_mental_model_revision(
+        _model(),
+        _belief(),
+        _MeanSemanticEmbedder(),
+    )
+
+    assert math.isfinite(fit.distance)
+
+
 def test_runtime_score_is_neutral_until_the_proof_has_a_transition():
     belief = ProofBelief(
         StructuralGraph((StructuralElement("only", "proof-state", "shore", 0.0),), ())

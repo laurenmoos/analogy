@@ -33,6 +33,18 @@ PROBE_PROBLEM_IDS = (
     "propl_ood_358233606958956408248147497163",
     "propl_ood_265557872740597889312779794693",
 )
+SMALL_PROBLEM_IDS = (
+    "propl_ood_307714199757159990961917100773",
+    "propl_ood_301873284032250623028148772769",
+    "propl_ood_249474521826265955663880755174",
+    "propl_ood_317064830399563761278070121273",
+    "propl_ood_198299705576588914912737276887",
+    "propl_ood_208645874253727215108588452622",
+    "propl_ood_252955983084163427303699743884",
+    "propl_ood_54781560256269106948607279652",
+    "propl_ood_205602444047427159151729097987",
+    "propl_ood_55195369758345374712361994170",
+)
 CONDITIONS = (
     "direct_deliberation",
     "ranked_analogy",
@@ -52,14 +64,62 @@ def execute_probe(
 ) -> EvaluationRecord:
     """Run or resume the fixed six-trial probe."""
 
+    return _execute_evaluation(
+        config,
+        problems,
+        model,
+        verifier,
+        phase="probe",
+        required_problem_ids=PROBE_PROBLEM_IDS,
+        evaluation_id=evaluation_id,
+        trial_executor=trial_executor,
+    )
+
+
+def execute_small(
+    config: AppConfig,
+    problems: Sequence[Problem],
+    model: Any,
+    verifier: Any,
+    *,
+    evaluation_id: str | None = None,
+    trial_executor: TrialExecutor | None = None,
+) -> EvaluationRecord:
+    """Run or resume the frozen twenty-trial small evaluation."""
+
+    return _execute_evaluation(
+        config,
+        problems,
+        model,
+        verifier,
+        phase="small",
+        required_problem_ids=SMALL_PROBLEM_IDS,
+        evaluation_id=evaluation_id,
+        trial_executor=trial_executor,
+    )
+
+
+def _execute_evaluation(
+    config: AppConfig,
+    problems: Sequence[Problem],
+    model: Any,
+    verifier: Any,
+    *,
+    phase: str,
+    required_problem_ids: tuple[str, ...],
+    evaluation_id: str | None,
+    trial_executor: TrialExecutor | None,
+) -> EvaluationRecord:
+
     normalized = tuple(problems)
     problem_ids = tuple(problem.id for problem in normalized)
-    if problem_ids != PROBE_PROBLEM_IDS:
+    if problem_ids != required_problem_ids:
         raise ValueError(
-            f"probe requires ordered problem IDs {PROBE_PROBLEM_IDS!r}; got {problem_ids!r}"
+            f"{phase} requires ordered problem IDs {required_problem_ids!r}; "
+            f"got {problem_ids!r}"
         )
-    identity = _evaluation_identity(config, normalized)
-    active_id = evaluation_id or f"probe-{identity[:16]}"
+    identity = _evaluation_identity(config, normalized, phase=phase)
+    active_id = evaluation_id or f"{phase}-{identity[:16]}"
     output_directory = config.run.output_dir.parent / "evaluations" / active_id
     manifest_path = output_directory / "manifest.json"
     if manifest_path.exists():
@@ -69,7 +129,9 @@ def execute_probe(
                 f"evaluation {active_id!r} belongs to different frozen inputs"
             )
     else:
-        manifest = _new_manifest(active_id, identity, config, problem_ids)
+        manifest = _new_manifest(
+            active_id, identity, config, problem_ids, phase=phase
+        )
         write_evaluation_manifest(manifest_path, manifest)
 
     executor = trial_executor or _execute_trial
@@ -135,21 +197,27 @@ def execute_probe(
 def run_evaluation(config_path: Path, *, phase: str) -> int:
     """Load expensive dependencies once and execute one supported phase."""
 
-    if phase != "probe":
+    if phase not in {"probe", "small"}:
         raise ValueError(f"unsupported evaluation phase {phase!r}")
     config = load_config(Path(config_path))
     if config.analogy.model_name not in {None, config.model.name}:
         raise ValueError(
-            "probe requires one shared model for ordinary and analogy calls"
+            f"{phase} requires one shared model for ordinary and analogy calls"
         )
+    required_problem_ids = (
+        PROBE_PROBLEM_IDS if phase == "probe" else SMALL_PROBLEM_IDS
+    )
     by_id = {problem.id: problem for problem in load_problems(config.benchmark.corpus)}
-    missing = [problem_id for problem_id in PROBE_PROBLEM_IDS if problem_id not in by_id]
+    missing = [
+        problem_id for problem_id in required_problem_ids if problem_id not in by_id
+    ]
     if missing:
-        raise ValueError(f"probe corpus is missing problem IDs: {missing}")
-    problems = tuple(by_id[problem_id] for problem_id in PROBE_PROBLEM_IDS)
+        raise ValueError(f"{phase} corpus is missing problem IDs: {missing}")
+    problems = tuple(by_id[problem_id] for problem_id in required_problem_ids)
     model = get_model_provider(config.model)
     verifier = LeanSubprocessVerifier(LEAN_PROJECT_ROOT)
-    record = execute_probe(config, problems, model, verifier)
+    executor = execute_probe if phase == "probe" else execute_small
+    record = executor(config, problems, model, verifier)
     print(f"EVALUATION: {record.status}")
     print(f"DETAILS: {record.output_directory}")
     return 0 if record.complete else 1
@@ -193,9 +261,11 @@ def _condition_config(config: AppConfig, condition: str) -> AppConfig:
     )
 
 
-def _evaluation_identity(config: AppConfig, problems: tuple[Problem, ...]) -> str:
+def _evaluation_identity(
+    config: AppConfig, problems: tuple[Problem, ...], *, phase: str
+) -> str:
     payload = {
-        "protocol": "analogy-probe-v2",
+        "protocol": "analogy-probe-v2" if phase == "probe" else "analogy-small-v1",
         "problem_ids": [problem.id for problem in problems],
         "conditions": CONDITIONS,
         "seed": 0,
@@ -218,6 +288,8 @@ def _new_manifest(
     identity: str,
     config: AppConfig,
     problem_ids: tuple[str, ...],
+    *,
+    phase: str,
 ) -> dict[str, Any]:
     environment = {
         "python": sys.version.split()[0],
@@ -229,7 +301,7 @@ def _new_manifest(
         "schema_version": 1,
         "evaluation_id": evaluation_id,
         "identity_sha256": identity,
-        "phase": "probe",
+        "phase": phase,
         "status": "pending",
         "conditions": list(CONDITIONS),
         "problem_ids": list(problem_ids),
@@ -313,6 +385,8 @@ def _sha256_json(value: object) -> str:
 __all__ = [
     "CONDITIONS",
     "PROBE_PROBLEM_IDS",
+    "SMALL_PROBLEM_IDS",
     "execute_probe",
+    "execute_small",
     "run_evaluation",
 ]

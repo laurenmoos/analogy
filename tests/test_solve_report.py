@@ -9,7 +9,9 @@ from analogy.main import load_config
 from analogy.evaluation import (
     CONDITIONS,
     PROBE_PROBLEM_IDS,
+    SMALL_PROBLEM_IDS,
     execute_probe,
+    execute_small,
     run_evaluation,
 )
 from analogy.lean_gym.models import Problem
@@ -794,6 +796,55 @@ def test_probe_runs_six_unique_trials_with_shared_order_and_resumes(
         (first.output_directory / "manifest.json").read_text(encoding="utf-8")
     )
     assert len(manifest["trials"]) == 6
+
+
+def test_small_eval_runs_twenty_trials_on_frozen_non_probe_problems(tmp_path):
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path / "runs"))
+    problems = tuple(
+        Problem(problem_id, "small", "", "P", "test", "test", "small", 1)
+        for problem_id in SMALL_PROBLEM_IDS
+    )
+    calls = []
+
+    def execute(condition, _config, problem, *_args):
+        calls.append((condition, problem.id))
+        run = _write_probe_trial_artifact(
+            tmp_path / "solve", condition, problem.id
+        )
+        if condition == "ranked_analogy":
+            artifact = run.output_directory / f"{problem.id}.json"
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            payload["model_events"] = [
+                event
+                for event in payload["model_events"]
+                if not str(event.get("kind", "")).startswith("analogy_")
+            ]
+            payload["outcome"]["analogy_fallback_count"] = 0
+            payload["outcome"]["analogy_winning_path_count"] = 0
+            artifact.write_text(json.dumps(payload), encoding="utf-8")
+        return run
+
+    record = execute_small(
+        config,
+        problems,
+        object(),
+        object(),
+        evaluation_id="small-test",
+        trial_executor=execute,
+    )
+    manifest = json.loads(
+        (record.output_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert len(SMALL_PROBLEM_IDS) == 10
+    assert set(SMALL_PROBLEM_IDS).isdisjoint(PROBE_PROBLEM_IDS)
+    assert len(calls) == 20
+    assert record.complete is True
+    assert manifest["phase"] == "small"
+    assert manifest["expected_trial_count"] == 20
+    assert manifest["metrics"]["ranked_analogy"]["intervention_submissions"] == 0
+    assert manifest["validation"]["errors"] == []
 
 
 def test_probe_config_hash_ignores_machine_specific_output_path(tmp_path):

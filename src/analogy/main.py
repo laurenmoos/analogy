@@ -298,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation.add_argument(
         "--phase",
         required=True,
-        choices=("probe",),
+        choices=("probe", "small"),
         help="evaluation phase",
     )
     evaluation.add_argument(

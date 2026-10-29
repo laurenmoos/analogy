@@ -35,6 +35,7 @@ from .rescue import (
 from .state import AnalogyScratchpad, MentalModel
 from .validation import MentalModelValidationError, validate_story_model
 from .structural_scoring import (
+    EmbeddingCalibration,
     ProofBelief,
     UnscorableMentalModelError,
     abstract_proof_transition,
@@ -110,6 +111,7 @@ class StructuralAnalogyScorer:
     """Rank active tracks by the frozen ordered-transition fit score."""
 
     embedder: Any
+    calibration: EmbeddingCalibration | None = None
 
     def score(
         self, track: AnalogyTrack, search: SearchSession | None
@@ -126,6 +128,7 @@ class StructuralAnalogyScorer:
                 model,
                 build_proof_belief(search),
                 self.embedder,
+                calibration=self.calibration,
             )
         except UnscorableMentalModelError:
             return UNSCORABLE_ANALOGY_SCORE
@@ -432,8 +435,14 @@ def initialize_analogy_harness(
         raise AnalogyHarnessInitializationError(
             "no valid initial analogy tactics were generated"
         )
+    calibration = None
+    if config.analogy.calibration_path is not None:
+        calibration = load_embedding_calibration(
+            config.analogy.calibration_path,
+            expected_model_id=config.analogy.model_name or config.model.name,
+        )
     return AnalogyHarness(
-        tuple(tracks), scorer or StructuralAnalogyScorer(generator)
+        tuple(tracks), scorer or StructuralAnalogyScorer(generator, calibration)
     )
 
 

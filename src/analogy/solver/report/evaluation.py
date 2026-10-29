@@ -94,24 +94,30 @@ def finalize_evaluation(path: Path) -> EvaluationRecord:
         }
         if any(value is None for value in condition_evidence.values()):
             continue
-        try:
-            prefixes = {
-                condition: _first_stuck_prefix_sha256(value["problem"])
-                for condition, value in condition_evidence.items()
-            }
-        except ValueError as error:
-            errors.append(f"first-stuck prefix evidence missing for {problem_id}: {error}")
-        else:
+        prefixes = {}
+        prefix_errors = {}
+        for condition, value in condition_evidence.items():
+            try:
+                prefixes[condition] = _first_stuck_prefix_sha256(value["problem"])
+            except ValueError as error:
+                prefix_errors[condition] = str(error)
+        if not prefix_errors:
             if len(set(prefixes.values())) != 1:
                 errors.append(
                     f"first-stuck prefix mismatch for {problem_id}: {prefixes}"
                 )
-        try:
-            _first_selection_evidence(
-                condition_evidence["ranked_analogy"]["problem"]
+        elif manifest.get("phase") == "probe" or len(prefix_errors) == 1:
+            errors.append(
+                f"first-stuck prefix evidence missing for {problem_id}: "
+                f"{prefix_errors}"
             )
-        except ValueError as error:
-            errors.append(f"candidate evidence missing for {problem_id}: {error}")
+        if manifest.get("phase") == "probe":
+            try:
+                _first_selection_evidence(
+                    condition_evidence["ranked_analogy"]["problem"]
+                )
+            except ValueError as error:
+                errors.append(f"candidate evidence missing for {problem_id}: {error}")
 
     metrics = {
         condition: _condition_metrics(

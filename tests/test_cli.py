@@ -69,9 +69,15 @@ def test_cli_exposes_exact_probe_evaluation_command():
     assert parsed.handler is run_evaluate
 
 
+def test_cli_exposes_small_evaluation_phase():
+    parsed = build_parser().parse_args(["evaluate", "--phase", "small"])
+
+    assert parsed.phase == "small"
+
+
 def test_cli_rejects_unsupported_evaluation_phase():
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["evaluate", "--phase", "small"])
+        build_parser().parse_args(["evaluate", "--phase", "full"])
 
 
 def test_condition_banner_names_direct_deliberation_instead_of_disabled_analogy():

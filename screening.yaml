@@ -1,0 +1,35 @@
+prompts:
+  path: prompts.yaml
+
+model:
+  backend: transformers
+  name: Qwen/Qwen3-14B-AWQ
+  revision: 31c69efc29464b6bb0aee1398b5a7b50a99340c3
+  device: cuda
+  hidden_layer: -1
+  max_new_tokens: 2048
+  timeout_seconds: 180.0
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.9
+
+benchmark:
+  corpus: src/analogy/lean_gym/corpus/screening_pool.json
+  selection: exhaustive
+
+search:
+  top_k: 3
+  max_steps: 32
+  stuck_after: 2
+  samples_per_state: 3
+
+analogy:
+  enabled: false
+  selection: structural
+  max_model_calls: 2
+  model_name: Qwen/Qwen3-14B-AWQ
+  calibration_path: null
+
+run:
+  output_dir: .artifacts/stuck-screen
+  seed: 0

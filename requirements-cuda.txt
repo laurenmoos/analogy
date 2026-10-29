@@ -1,0 +1,7 @@
+# Reproduce Qwen's tested Qwen3 AutoAWQ environment.
+torch==2.6.0
+transformers==4.51.3
+autoawq==0.2.9
+autoawq-kernels==0.0.9
+accelerate
+

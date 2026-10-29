@@ -25,6 +25,7 @@ search:
 
 analogy:
   enabled: true
+  selection: structural
   max_model_calls: 2
   model_name: mlx-community/Qwen3-14B-4bit
   calibration_path: src/analogy/solver/analogy/score_calibration.npz

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
@@ -185,6 +186,24 @@ class _ScoredRevision:
     generation_messages: tuple[Message, ...]
 
 
+def order_analogy_revisions(
+    revisions: tuple[Any, ...] | list[Any],
+    *,
+    selection: str,
+    seed: int,
+) -> tuple[Any, ...]:
+    """Return a deterministic ordering without changing candidate records."""
+
+    if selection not in {"structural", "random"}:
+        raise ValueError("selection must be 'structural' or 'random'")
+    ordered = list(revisions)
+    if selection == "structural":
+        ordered.sort(key=lambda item: (item.distance, item.generation_index))
+    else:
+        random.Random(seed).shuffle(ordered)
+    return tuple(ordered)
+
+
 @dataclass(frozen=True, slots=True)
 class RescueAttempt:
     proposal: RescueProposal
@@ -341,6 +360,7 @@ def initialize_analogy_fallback(
         trace_sink=model_events.append,
         analogy_scratchpad=scratchpad,
         calibration=calibration,
+        selection=getattr(config.analogy, "selection", "structural"),
         initial_proposal=initial_proposal,
         initial_state_id=initial_state_id,
     )
@@ -579,6 +599,7 @@ class AnalogyFallback:
         analogy_scratchpad: AnalogyScratchpad,
         trace_sink: Any | None = None,
         calibration: EmbeddingCalibration | None = None,
+        selection: str = "structural",
         initial_proposal: RescueProposal | None = None,
         initial_state_id: str | None = None,
     ) -> None:
@@ -588,11 +609,14 @@ class AnalogyFallback:
             raise ValueError("seed must be a non-negative integer")
         if not isinstance(analogy_scratchpad, AnalogyScratchpad):
             raise ValueError("analogy_scratchpad must be an AnalogyScratchpad")
+        if selection not in {"structural", "random"}:
+            raise ValueError("selection must be 'structural' or 'random'")
         self._generator = generator
         self._max_model_calls = max_model_calls
         self._seed = seed
         self._trace_sink = trace_sink
         self._calibration = calibration
+        self._selection = selection
         if (initial_proposal is None) != (initial_state_id is None):
             raise ValueError("initial proposal and state id must be supplied together")
         self._initial_proposal = initial_proposal
@@ -1158,8 +1182,10 @@ class AnalogyFallback:
                     )
                 )
 
-        ordered = sorted(
-            ranked, key=lambda item: (item.distance, item.generation_index)
+        ordered = order_analogy_revisions(
+            ranked,
+            selection=self._selection,
+            seed=_fallback_seed(self._seed + 20_000, state, 0),
         )
         for rank, candidate in enumerate(ordered):
             if cancellation.is_cancelled():
@@ -1178,7 +1204,9 @@ class AnalogyFallback:
                 tactic_card=lean_tactic_card(state.expression),
                 story_model=render_story_model(candidate.model),
             )
-            tactic_seed = _fallback_seed(self._seed + 10_000, state, rank)
+            tactic_seed = _fallback_seed(
+                self._seed + 10_000, state, candidate.generation_index
+            )
             raw_tactic = ""
             try:
                 raw_tactic = self._generator.generate(
@@ -1549,5 +1577,6 @@ __all__ = [
     "RescueProposal", "RescueRollout", "RescueTermination", "TacticEvaluation",
     "generate_analogy_rescue", "parse_analogy_update",
     "initialize_analogy_fallback",
+    "order_analogy_revisions",
     "submit_analogy_rescue_to_lean",
 ]

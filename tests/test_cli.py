@@ -61,7 +61,14 @@ def test_condition_banner_names_direct_deliberation_instead_of_disabled_analogy(
     configured = load_config(ROOT / "config.yaml")
 
     assert _condition_name(configured, deliberation_enabled=True) == "deliberation"
-    assert _condition_name(configured, deliberation_enabled=False) == "analogy"
+    assert _condition_name(configured, deliberation_enabled=False) == "ranked_analogy"
+    assert _condition_name(
+        replace(
+            configured,
+            analogy=replace(configured.analogy, selection="random"),
+        ),
+        deliberation_enabled=False,
+    ) == "random_analogy"
     assert _condition_name(
         replace(configured, analogy=replace(configured.analogy, enabled=False)),
         deliberation_enabled=False,
@@ -81,6 +88,19 @@ def test_boolean_override_changes_only_analogy_enabled():
     assert disabled.analogy.enabled is False
     assert disabled.analogy.max_model_calls == configured.analogy.max_model_calls
     assert replace(disabled, analogy=configured.analogy) == configured
+
+
+def test_config_rejects_unknown_analogy_selection(tmp_path):
+    source = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    invalid = source.replace("selection: structural", "selection: closest")
+    path = tmp_path / "invalid.yaml"
+    path.write_text(invalid, encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="config.analogy.selection must be 'structural' or 'random'",
+    ):
+        load_config(path)
 
 
 def test_session_checkpoint_identity_receives_deliberation_condition(
@@ -104,6 +124,32 @@ def test_session_checkpoint_identity_receives_deliberation_condition(
     get_session(ROOT / "config.yaml", False, None, True)
 
     assert conditions == ["deliberation"]
+    get_session.cache_clear()
+
+
+def test_session_checkpoint_identity_includes_analogy_selection(monkeypatch):
+    configured = load_config(ROOT / "config.yaml")
+    configured = replace(
+        configured,
+        analogy=replace(configured.analogy, selection="random"),
+    )
+    conditions = []
+    checkpoint = SimpleNamespace()
+    from analogy.main import get_session
+
+    get_session.cache_clear()
+    monkeypatch.setattr("analogy.main.load_config", lambda _path: configured)
+    monkeypatch.setattr("analogy.main.load_problems", lambda _path: ())
+    monkeypatch.setattr(
+        "analogy.main.load_checkpoint",
+        lambda _config, _problems, *, condition: conditions.append(condition)
+        or checkpoint,
+    )
+    monkeypatch.setattr("analogy.main.select_problems", lambda *_args: ())
+
+    get_session(ROOT / "config.yaml", None, None, False)
+
+    assert conditions == ["random_analogy"]
     get_session.cache_clear()
 
 

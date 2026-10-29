@@ -25,9 +25,11 @@ from analogy.solver.analogy.rescue import (
     RescueProposal,
     RescueTermination,
     TacticEvaluation,
+    _fallback_seed,
     _parse_tactic_only,
     initialize_analogy_fallback,
     _analogy_correction_feedback,
+    order_analogy_revisions,
     parse_analogy_update,
 )
 from analogy.solver.analogy.protocol import (
@@ -160,6 +162,31 @@ def _decision_tactic_response(tactic, predicted_state="SOLVED"):
         "tactic": tactic,
         "predicted_state": predicted_state,
     })
+
+
+def test_analogy_revision_ordering_is_structural_or_seeded_without_mutation():
+    candidates = (
+        SimpleNamespace(distance=0.2, generation_index=0, content="first"),
+        SimpleNamespace(distance=0.1, generation_index=1, content="second"),
+        SimpleNamespace(distance=0.1, generation_index=2, content="third"),
+    )
+
+    structural = order_analogy_revisions(
+        candidates, selection="structural", seed=7
+    )
+    random_once = order_analogy_revisions(candidates, selection="random", seed=7)
+    random_twice = order_analogy_revisions(candidates, selection="random", seed=7)
+
+    assert tuple(item.generation_index for item in structural) == (1, 2, 0)
+    assert tuple(item.generation_index for item in random_once) == (2, 0, 1)
+    assert random_once == random_twice
+    assert {id(item) for item in random_once} == {id(item) for item in candidates}
+    assert tuple(item.content for item in candidates) == ("first", "second", "third")
+
+
+def test_analogy_revision_ordering_rejects_unknown_selection():
+    with pytest.raises(ValueError, match="selection must be 'structural' or 'random'"):
+        order_analogy_revisions((), selection="closest", seed=0)
 
 
 def test_disjunction_tactic_requires_a_prospective_analogy_of_both_branches():
@@ -485,6 +512,7 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
         )
     )
     events = []
+    generation_seeds = []
     generated = iter(
         (
             _mental_response("travel or navigation", "middle", "exact middle"),
@@ -497,6 +525,7 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
 
     class Generator:
         def generate(self, _messages, *, seed):
+            generation_seeds.append(seed)
             return next(generated)
 
         def score_completions(self, _messages, completions):
@@ -555,6 +584,10 @@ def test_mental_model_candidates_are_all_scored_before_lean_and_tried_by_fit(
         ("lean", "exact best"),
         ("tactic_score", "exact middle"),
         ("lean", "exact middle"),
+    ]
+    assert generation_seeds[3:] == [
+        _fallback_seed(10_007, STATE, 1),
+        _fallback_seed(10_007, STATE, 0),
     ]
     assert outcome.completed_proof == "done"
     assert scratchpad.current.correspondences[0].domain_transition == "middle"

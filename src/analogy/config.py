@@ -45,6 +45,7 @@ class AnalogyConfig:
     max_model_calls: int
     model_name: str | None = None
     calibration_path: Path | None = None
+    selection: str = "structural"
 
 
 @dataclass(frozen=True)

@@ -65,8 +65,13 @@ def load_config(path: Path) -> AppConfig:
             "config.benchmark.selection must be 'exhaustive' or "
             "'previous_failures'"
         )
-    if not isinstance(data["analogy"].get("enabled"), bool):
+    analogy = {"selection": "structural", **data["analogy"]}
+    if not isinstance(analogy.get("enabled"), bool):
         raise ValueError("config.analogy.enabled must be a boolean")
+    if analogy["selection"] not in {"structural", "random"}:
+        raise ValueError(
+            "config.analogy.selection must be 'structural' or 'random'"
+        )
     data["search"] = {"samples_per_state": 3, **data["search"]}
     if (
         isinstance(data["search"]["samples_per_state"], bool)
@@ -87,10 +92,10 @@ def load_config(path: Path) -> AppConfig:
         search=SearchConfig(**data["search"]),
         analogy=AnalogyConfig(
             **{
-                **data["analogy"],
+                **analogy,
                 "calibration_path": (
-                    resolve(data["analogy"]["calibration_path"])
-                    if data["analogy"].get("calibration_path") is not None
+                    resolve(analogy["calibration_path"])
+                    if analogy.get("calibration_path") is not None
                     else None
                 ),
             }
@@ -144,7 +149,13 @@ def with_problem_selection(
 def _condition_name(config: AppConfig, *, deliberation_enabled: bool) -> str:
     if deliberation_enabled:
         return "deliberation"
-    return "analogy" if config.analogy.enabled else "ordinary"
+    if not config.analogy.enabled:
+        return "ordinary"
+    return (
+        "ranked_analogy"
+        if config.analogy.selection == "structural"
+        else "random_analogy"
+    )
 
 
 @lru_cache(maxsize=None)
@@ -160,12 +171,8 @@ def get_session(
     config = with_analogy_enabled(config, analogy_enabled)
     config = with_problem_selection(config, problem_selection)
     all_problems = tuple(load_problems(config.benchmark.corpus))
-    condition = (
-        "deliberation"
-        if deliberation_enabled
-        else "analogy"
-        if config.analogy.enabled
-        else "ordinary"
+    condition = _condition_name(
+        config, deliberation_enabled=deliberation_enabled
     )
     checkpoint = load_checkpoint(config, all_problems, condition=condition)
     problems = select_problems(checkpoint, config.benchmark.selection)

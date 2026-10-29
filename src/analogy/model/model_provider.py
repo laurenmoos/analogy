@@ -126,10 +126,14 @@ class QwenGenerator:
                     "the model extra is not installed; install analogy[model]"
                 ) from error
 
-        tokenizer = transformers_module.AutoTokenizer.from_pretrained(config.name)
+        revision = {"revision": config.revision} if config.revision else {}
+        tokenizer = transformers_module.AutoTokenizer.from_pretrained(
+            config.name, **revision
+        )
         if device == "mps":
             model = transformers_module.AutoModelForCausalLM.from_pretrained(
                 config.name,
+                **revision,
                 torch_dtype="auto",
                 low_cpu_mem_usage=True,
             )
@@ -138,6 +142,7 @@ class QwenGenerator:
             device_map: Any = "auto" if config.device == "auto" else {"": device}
             model = transformers_module.AutoModelForCausalLM.from_pretrained(
                 config.name,
+                **revision,
                 device_map=device_map,
                 torch_dtype="auto",
             )

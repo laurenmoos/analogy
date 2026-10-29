@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from analogy.config import ModelConfig
+from analogy.model.model_provider import QwenGenerator
 from analogy.model.parser import (
     FilteredCandidatePool,
     IncompleteCandidatePool,
@@ -62,6 +64,63 @@ def test_mlx_loader_resolves_an_immutable_model_revision_before_loading():
         ),
         ("load", "/cache/snapshots/abc123"),
     ]
+
+
+def test_transformers_loader_uses_the_configured_immutable_revision():
+    calls = []
+
+    class Loader:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def from_pretrained(self, name, **kwargs):
+            calls.append((self.kind, name, kwargs))
+            if self.kind == "tokenizer":
+                return object()
+            return type("Model", (), {
+                "config": type("Config", (), {
+                    "_commit_hash": "abc123",
+                    "hidden_size": 8,
+                    "name_or_path": name,
+                })(),
+                "device": "cuda",
+                "parameters": lambda self: (),
+                "eval": lambda self: None,
+            })()
+
+    transformers = type("Transformers", (), {
+        "AutoTokenizer": Loader("tokenizer"),
+        "AutoModelForCausalLM": Loader("model"),
+    })()
+    torch = type("Torch", (), {
+        "cuda": type("Cuda", (), {"is_available": lambda self: True})(),
+        "backends": type("Backends", (), {
+            "mps": type("Mps", (), {"is_available": lambda self: False})()
+        })(),
+    })()
+    config = ModelConfig(
+        backend="transformers",
+        name="example/model",
+        revision="abc123",
+        device="cuda",
+        hidden_layer=-1,
+        max_new_tokens=8,
+        timeout_seconds=10.0,
+        do_sample=False,
+        temperature=1.0,
+        top_p=1.0,
+    )
+
+    QwenGenerator.from_config(
+        config,
+        torch_module=torch,
+        transformers_module=transformers,
+    )
+
+    assert calls[0] == (
+        "tokenizer", "example/model", {"revision": "abc123"}
+    )
+    assert calls[1][2]["revision"] == "abc123"
 
 
 @pytest.mark.parametrize("source", ["tauto", "itauto", "modus_tollens h1 h2"])

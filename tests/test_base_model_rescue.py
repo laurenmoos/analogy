@@ -1,4 +1,6 @@
 import json
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -6,7 +8,8 @@ import pytest
 from analogy.model.model_provider import CompletionScore
 from analogy.model import prompts as prompts_module
 from analogy.model.prompt_runner import GenerationStatus
-from analogy.model.prompts import PromptCatalog
+from analogy.model.prompts import PromptCatalog, configure_prompt_catalog
+from analogy.main import load_config
 from analogy.utils.records import (
     CandidateOrigin,
     DiscardReason,
@@ -32,11 +35,17 @@ from analogy.solver.analogy.rescue import (
     order_analogy_revisions,
     parse_analogy_update,
 )
+from analogy.solver.analogy.candidate_cache import (
+    CandidateCacheKey,
+    StoryCandidateCache,
+    StoryCandidateCacheError,
+)
 from analogy.solver.analogy.protocol import (
     render_analogy_state,
     render_mental_model,
     render_scratchpad_context,
 )
+from analogy.solver.analogy.harness import initialize_story_model
 from analogy.solver.analogy.state import (
     AnalogyScratchpad,
     AnalogyState,
@@ -60,6 +69,7 @@ from analogy.solver.proof.semantic import (
 
 STATE = SymbolicState("state", "P", "lean4")
 GOAL = SymbolicState("goal", "P", "lean4")
+ROOT = Path(__file__).parents[1]
 
 
 def _search(
@@ -187,6 +197,243 @@ def test_analogy_revision_ordering_is_structural_or_seeded_without_mutation():
 def test_analogy_revision_ordering_rejects_unknown_selection():
     with pytest.raises(ValueError, match="selection must be 'structural' or 'random'"):
         order_analogy_revisions((), selection="closest", seed=0)
+
+
+def _candidate_cache_key(**overrides):
+    values = {
+        "model_revision": "model@abc",
+        "prompt_sha256": "1" * 64,
+        "corpus_sha256": "2" * 64,
+        "problem_id": "problem-1",
+        "run_seed": 0,
+        "trajectory_sha256": "3" * 64,
+        "state_fingerprint": "4" * 64,
+        "domain": "travel or navigation",
+        "generation_index": 0,
+        "messages_sha256": "5" * 64,
+    }
+    values.update(overrides)
+    return CandidateCacheKey(**values)
+
+
+def test_story_candidate_cache_reuses_exact_raw_output_and_hash(tmp_path):
+    cache = StoryCandidateCache(tmp_path / "stories.json")
+    calls = []
+
+    first = cache.get_or_generate(
+        _candidate_cache_key(),
+        lambda: calls.append("generated") or "not valid JSON",
+    )
+    second = StoryCandidateCache(tmp_path / "stories.json").get_or_generate(
+        _candidate_cache_key(),
+        lambda: pytest.fail("exact cache hit regenerated a story"),
+    )
+
+    assert calls == ["generated"]
+    assert first.raw_text == second.raw_text == "not valid JSON"
+    assert first.content_sha256 == second.content_sha256
+    assert first.key_sha256 == second.key_sha256
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("model_revision", "model@def"),
+        ("prompt_sha256", "a" * 64),
+        ("corpus_sha256", "b" * 64),
+        ("problem_id", "problem-2"),
+        ("run_seed", 1),
+        ("trajectory_sha256", "c" * 64),
+        ("state_fingerprint", "d" * 64),
+        ("domain", "gardening"),
+        ("generation_index", 1),
+        ("messages_sha256", "e" * 64),
+    ),
+)
+def test_story_candidate_cache_misses_when_any_identity_field_changes(
+    tmp_path, field, value
+):
+    cache = StoryCandidateCache(tmp_path / "stories.json")
+    cache.get_or_generate(_candidate_cache_key(), lambda: "first")
+
+    changed = cache.get_or_generate(
+        replace(_candidate_cache_key(), **{field: value}),
+        lambda: "second",
+    )
+
+    assert changed.cache_hit is False
+    assert changed.raw_text == "second"
+
+
+def test_story_candidate_cache_refuses_corruption_without_regeneration(tmp_path):
+    path = tmp_path / "stories.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(StoryCandidateCacheError, match="corrupt"):
+        StoryCandidateCache(path).get_or_generate(
+            _candidate_cache_key(),
+            lambda: pytest.fail("corrupt cache must not be replaced"),
+        )
+
+    assert path.read_text(encoding="utf-8") == "{broken"
+
+
+def test_story_candidate_cache_keeps_prior_file_if_atomic_replace_fails(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "stories.json"
+    cache = StoryCandidateCache(path)
+    cache.get_or_generate(_candidate_cache_key(), lambda: "first")
+    original = path.read_bytes()
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.candidate_cache.os.replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+    with pytest.raises(OSError, match="replace failed"):
+        cache.get_or_generate(
+            replace(_candidate_cache_key(), generation_index=1),
+            lambda: "second",
+        )
+
+    assert path.read_bytes() == original
+
+
+def test_initial_story_generation_reuses_raw_candidate_across_conditions(tmp_path):
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    base = load_config(ROOT / "config.yaml")
+    config = replace(base, run=replace(base.run, output_dir=tmp_path))
+    raw = _mental_response(
+        "cooking or restaurant preparation",
+        "the cook takes responsibility for an order",
+        "exact h",
+    )
+
+    class FirstGenerator:
+        model_revision = "shared@abc"
+
+        def generate(self, _messages, *, seed):
+            return raw
+
+    class CacheOnlyGenerator:
+        model_revision = "shared@abc"
+
+        def generate(self, _messages, *, seed):
+            pytest.fail("paired condition regenerated the initial story")
+
+    first_events = []
+    second_events = []
+    first, _ = initialize_story_model(
+        config,
+        FirstGenerator(),
+        first_events,
+        "problem-1:state",
+        _proof_belief(),
+        skip_expensive_score=True,
+    )
+    second, _ = initialize_story_model(
+        config,
+        CacheOnlyGenerator(),
+        second_events,
+        "problem-1:state",
+        _proof_belief(),
+        skip_expensive_score=True,
+    )
+
+    first_cache = next(
+        event for event in first_events if event["kind"] == "analogy_story_candidate_cache"
+    )
+    second_cache = next(
+        event for event in second_events if event["kind"] == "analogy_story_candidate_cache"
+    )
+    assert first == second
+    assert first_cache["cache_hit"] is False
+    assert second_cache["cache_hit"] is True
+    assert first_cache["candidate_sha256"] == second_cache["candidate_sha256"]
+
+
+def test_recovery_story_cache_shares_candidates_but_never_tactics(
+    tmp_path, monkeypatch
+):
+    configure_prompt_catalog(ROOT / "prompts.yaml")
+    cache = StoryCandidateCache(tmp_path / "stories.json")
+    story = _mental_response(
+        "travel or navigation", "take the available route", "exact h"
+    )
+    tactic_calls = []
+
+    class Generator:
+        model_revision = "shared@abc"
+
+        def __init__(self, *, allow_story):
+            self.allow_story = allow_story
+
+        def generate(self, messages, *, seed):
+            if "Selected everyday story" in messages[-1].content:
+                tactic_calls.append((self.allow_story, seed))
+                return _tactic_response("exact h")
+            if not self.allow_story:
+                pytest.fail("paired condition regenerated a recovery story")
+            return story
+
+        def score_completions(self, _messages, completions):
+            return (CompletionScore(completions[0], -0.1, -0.1, 1),)
+
+    monkeypatch.setattr(
+        "analogy.solver.analogy.rescue.score_mental_model_revision",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            distance=0.1, coupling=((1.0,),), discriminative=True
+        ),
+    )
+
+    def run(selection, generator, traces):
+        fallback = AnalogyFallback(
+            generator,
+            max_model_calls=1,
+            seed=7,
+            selection=selection,
+            trace_sink=traces.append,
+            analogy_scratchpad=AnalogyScratchpad(
+                MentalModel(
+                    "travel or navigation",
+                    (MentalModelCorrespondence("start", "old", "finish"),),
+                )
+            ),
+            candidate_cache=cache,
+            cache_model_revision="shared@abc",
+            cache_prompt_sha256="1" * 64,
+            cache_corpus_sha256="2" * 64,
+        )
+        return fallback.search(
+            SymbolicState("problem-1:state", "P : Prop\nh : P\n⊢ P", "lean4"),
+            GOAL,
+            (),
+            lambda candidate: TacticEvaluation(
+                TacticResult(candidate, TacticStatus.COMPLETE, proof="done"),
+                completed_proof="done",
+            ),
+            NeverCancelled(),
+            "guidance",
+            proof_belief=_proof_belief(),
+        )
+
+    ranked_events = []
+    random_events = []
+    assert run("structural", Generator(allow_story=True), ranked_events).completed_proof
+    assert run("random", Generator(allow_story=False), random_events).completed_proof
+
+    ranked_cache = next(
+        event for event in ranked_events if event["kind"] == "analogy_story_candidate_cache"
+    )
+    random_cache = next(
+        event for event in random_events if event["kind"] == "analogy_story_candidate_cache"
+    )
+    assert ranked_cache["cache_hit"] is False
+    assert random_cache["cache_hit"] is True
+    assert ranked_cache["candidate_sha256"] == random_cache["candidate_sha256"]
+    assert len(tactic_calls) == 2
 
 
 def test_disjunction_tactic_requires_a_prospective_analogy_of_both_branches():
@@ -394,14 +641,21 @@ def test_initialize_fallback_loads_model_matched_configured_calibration(
     monkeypatch.setattr(
         "analogy.solver.analogy.rescue.load_embedding_calibration", load
     )
+    prompts = tmp_path / "prompts.yaml"
+    corpus = tmp_path / "problems.json"
+    prompts.write_text("prompts", encoding="utf-8")
+    corpus.write_text("[]", encoding="utf-8")
     config = SimpleNamespace(
         analogy=SimpleNamespace(
             max_model_calls=3,
             calibration_path=tmp_path / "frozen.npz",
             model_name="example/14b",
+            selection="structural",
         ),
-        model=SimpleNamespace(name="example/8b"),
-        run=SimpleNamespace(seed=11),
+        model=SimpleNamespace(name="example/8b", revision="revision-1"),
+        prompts=SimpleNamespace(path=prompts),
+        benchmark=SimpleNamespace(corpus=corpus),
+        run=SimpleNamespace(seed=11, output_dir=tmp_path / "runs"),
     )
 
     fallback = initialize_analogy_fallback(

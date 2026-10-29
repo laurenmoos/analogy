@@ -52,6 +52,12 @@ from .protocol import (
     render_scratchpad_context,
     render_story_model,
 )
+from .candidate_cache import (
+    StoryCandidateCache,
+    build_candidate_cache_key,
+    file_sha256,
+    story_candidate_cache_path,
+)
 from .state import (
     AnalogyScratchpad,
     AnalogyState,
@@ -361,6 +367,15 @@ def initialize_analogy_fallback(
         analogy_scratchpad=scratchpad,
         calibration=calibration,
         selection=getattr(config.analogy, "selection", "structural"),
+        candidate_cache=StoryCandidateCache(story_candidate_cache_path(config)),
+        cache_model_revision=(
+            getattr(generator, "model_revision", None)
+            or config.model.revision
+            or config.analogy.model_name
+            or config.model.name
+        ),
+        cache_prompt_sha256=file_sha256(config.prompts.path),
+        cache_corpus_sha256=file_sha256(config.benchmark.corpus),
         initial_proposal=initial_proposal,
         initial_state_id=initial_state_id,
     )
@@ -600,6 +615,10 @@ class AnalogyFallback:
         trace_sink: Any | None = None,
         calibration: EmbeddingCalibration | None = None,
         selection: str = "structural",
+        candidate_cache: StoryCandidateCache | None = None,
+        cache_model_revision: str | None = None,
+        cache_prompt_sha256: str | None = None,
+        cache_corpus_sha256: str | None = None,
         initial_proposal: RescueProposal | None = None,
         initial_state_id: str | None = None,
     ) -> None:
@@ -617,6 +636,17 @@ class AnalogyFallback:
         self._trace_sink = trace_sink
         self._calibration = calibration
         self._selection = selection
+        cache_fields = (
+            cache_model_revision,
+            cache_prompt_sha256,
+            cache_corpus_sha256,
+        )
+        if candidate_cache is not None and any(item is None for item in cache_fields):
+            raise ValueError("candidate cache requires model, prompt, and corpus identity")
+        self._candidate_cache = candidate_cache
+        self._cache_model_revision = cache_model_revision
+        self._cache_prompt_sha256 = cache_prompt_sha256
+        self._cache_corpus_sha256 = cache_corpus_sha256
         if (initial_proposal is None) != (initial_state_id is None):
             raise ValueError("initial proposal and state id must be supplied together")
         self._initial_proposal = initial_proposal
@@ -1014,7 +1044,39 @@ class AnalogyFallback:
             raw = ""
             traced_story_call = False
             try:
-                raw = self._generator.generate(active_story_messages, seed=seed)
+                if self._candidate_cache is None:
+                    raw = self._generator.generate(active_story_messages, seed=seed)
+                else:
+                    key = build_candidate_cache_key(
+                        model_revision=self._cache_model_revision,
+                        prompt_sha256=self._cache_prompt_sha256,
+                        corpus_sha256=self._cache_corpus_sha256,
+                        state_id=state.id,
+                        state_expression=state.expression,
+                        run_seed=self._seed,
+                        trajectory_states=trajectory.states,
+                        trajectory_tactics=trajectory.tactics,
+                        domain=required_domain,
+                        generation_index=index,
+                        messages=active_story_messages,
+                    )
+                    cached = self._candidate_cache.get_or_generate(
+                        key,
+                        lambda: self._generator.generate(
+                            active_story_messages, seed=seed
+                        ),
+                    )
+                    raw = cached.raw_text
+                    if self._trace_sink is not None:
+                        self._trace_sink({
+                            "kind": "analogy_story_candidate_cache",
+                            "phase": "recovery",
+                            "state_id": state.id,
+                            "generation_index": index,
+                            "cache_hit": cached.cache_hit,
+                            "cache_key_sha256": cached.key_sha256,
+                            "candidate_sha256": cached.content_sha256,
+                        })
                 candidate_model = validate_story_model(
                     extract_story_model(raw),
                     required_domain=required_domain,

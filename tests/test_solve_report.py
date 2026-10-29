@@ -546,6 +546,11 @@ def test_run_artifact_records_effective_config_hashes_and_model_revisions(
     assert len(payload["prompts_sha256"]) == 64
     assert len(payload["corpus_sha256"]) == 64
     assert len(payload["calibration_sha256"]) == 64
+    assert payload["story_candidate_cache"] == {
+        "path": str(tmp_path / "story-candidates-v1.json"),
+        "sha256": None,
+        "schema_version": 1,
+    }
 
 
 def test_problem_report_shows_analogy_as_one_fallback_inside_shared_search():

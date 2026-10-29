@@ -20,6 +20,12 @@ from ..proof.semantic import SemanticResult
 from ..search.tactic_generator import TacticGenerator, initialize_tactic_generator
 from .protocol import extract_story_model, render_mental_model
 from .domains import ANALOGY_DOMAINS, next_unused_domain
+from .candidate_cache import (
+    StoryCandidateCache,
+    build_candidate_cache_key,
+    file_sha256,
+    story_candidate_cache_path,
+)
 from .rescue import (
     AnalogyFallback,
     RescueProposal,
@@ -180,11 +186,46 @@ def initialize_story_model(
     )
     active_messages = base_messages
     previous_error_class: str | None = None
+    candidate_cache = StoryCandidateCache(story_candidate_cache_path(config))
+    model_revision = (
+        getattr(generator, "model_revision", None)
+        or config.model.revision
+        or config.analogy.model_name
+        or config.model.name
+    )
+    prompt_sha256 = file_sha256(config.prompts.path)
+    corpus_sha256 = file_sha256(config.benchmark.corpus)
     for index in range(max_story_attempts):
         seed = config.run.seed + index
         raw_text: str | None = None
         try:
-            raw_text = generator.generate(active_messages, seed=seed)
+            key = build_candidate_cache_key(
+                model_revision=model_revision,
+                prompt_sha256=prompt_sha256,
+                corpus_sha256=corpus_sha256,
+                state_id=state_id,
+                state_expression=trajectory.states[-1],
+                run_seed=config.run.seed,
+                trajectory_states=trajectory.states,
+                trajectory_tactics=trajectory.tactics,
+                domain=required_domain,
+                generation_index=index,
+                messages=active_messages,
+            )
+            cached = candidate_cache.get_or_generate(
+                key,
+                lambda: generator.generate(active_messages, seed=seed),
+            )
+            raw_text = cached.raw_text
+            model_events.append({
+                "kind": "analogy_story_candidate_cache",
+                "phase": "initialization",
+                "state_id": state_id,
+                "generation_index": index,
+                "cache_hit": cached.cache_hit,
+                "cache_key_sha256": cached.key_sha256,
+                "candidate_sha256": cached.content_sha256,
+            })
             story = extract_story_model(raw_text)
             state = validate_story_model(
                 story,

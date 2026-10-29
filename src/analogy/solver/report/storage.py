@@ -12,6 +12,10 @@ from typing import Any
 
 from ...config import AppConfig
 from ...utils.checkpoint import Checkpoint, record_status
+from ..analogy.candidate_cache import (
+    SCHEMA_VERSION as STORY_CACHE_SCHEMA_VERSION,
+    story_candidate_cache_path,
+)
 from .records import ProblemRunRecord, RunState, SolveRunRecord
 from .render import render_run_report
 
@@ -76,6 +80,7 @@ def write_run_record(run_state: RunState, run: SolveRunRecord) -> None:
 
     config = run_state.config
     checkpoint = run_state.checkpoint
+    candidate_cache = story_candidate_cache_path(config)
     _write_json(
         run.output_directory / "run.json",
         {
@@ -92,6 +97,11 @@ def write_run_record(run_state: RunState, run: SolveRunRecord) -> None:
             "calibration_sha256": _sha256_file(
                 config.analogy.calibration_path
             ),
+            "story_candidate_cache": {
+                "path": str(candidate_cache),
+                "sha256": _sha256_file(candidate_cache),
+                "schema_version": STORY_CACHE_SCHEMA_VERSION,
+            },
             "top_k": config.search.top_k,
             "samples_per_state": config.search.samples_per_state,
             "max_steps": config.search.max_steps,

@@ -14,7 +14,7 @@ model:
   top_p: 0.9
 
 benchmark:
-  corpus: src/analogy/lean_gym/corpus/screening_pool.json
+  corpus: src/analogy/lean_gym/corpus/screening_candidates_100.json
   selection: exhaustive
 
 search:

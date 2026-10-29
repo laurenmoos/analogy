@@ -1,0 +1,1009 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "https://huggingface.co/datasets/KomeijiForce/PropL",
+    "license": "MIT"
+  },
+  "problems": [
+    {
+      "id": "propl_screen_265721357506205940440352786905",
+      "title": "PropL screen 082",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "True \u2227 (p3 \u2228 (p5 \u2228 (True \u2227 p5) \u2227 (p4 \u2228 False)) \u2228 (p2 \u2192 p2 \u2192 p3 \u2192 (True \u2228 (p3 \u2192 p5)) \u2228 p5 \u2192 p4 \u2228 p2 \u2228 p5))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/265721357506205940440352786905",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_175182714651172617766631061364",
+      "title": "PropL screen 026",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "True \u2228 p3 \u2228 (((p1 \u2228 p3 \u2192 p4) \u2192 p3) \u2192 p1 \u2192 p1 \u2192 p2 \u2228 p4) \u2192 (p1 \u2227 p3 \u2228 p3) \u2228 True \u2227 (True \u2228 False) \u2228 p3",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/175182714651172617766631061364",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_321215504322383440430888628908",
+      "title": "PropL screen 360",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2228 p3 \u2228 p1 \u2228 (p4 \u2228 ((p2 \u2192 p4) \u2192 p3)) \u2228 ((p1 \u2192 p3) \u2227 (((p5 \u2192 p5) \u2192 True \u2228 p1 \u2228 p3) \u2192 p2) \u2228 p2 \u2192 p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/321215504322383440430888628908",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_148941694917045016808752970117",
+      "title": "PropL screen 706",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p3 \u2228 p3 \u2227 False \u2227 False \u2192 p4 \u2228 ((False \u2192 p2) \u2228 p3 \u2192 p2 \u2228 (p4 \u2192 False \u2228 True \u2228 p5))) \u2228 ((p5 \u2192 p3) \u2192 True) \u2227 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/148941694917045016808752970117",
+      "connective": "mixed",
+      "difficulty": 25
+    },
+    {
+      "id": "propl_screen_57396836521007708028379093650",
+      "title": "PropL screen 142",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((False \u2228 p4 \u2227 p1) \u2228 ((p3 \u2228 p3) \u2228 (True \u2192 p3 \u2227 p3) \u2192 (p4 \u2227 ((False \u2192 p1) \u2192 p5) \u2228 (p3 \u2192 p4 \u2192 p4)) \u2228 p5)) \u2228 p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/57396836521007708028379093650",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_180081721622687043406351325855",
+      "title": "PropL screen 230",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p5 \u2192 p2 \u2192 (p2 \u2192 (False \u2192 p1 \u2227 p2) \u2227 p1) \u2227 p1) \u2228 p2 \u2192 ((p4 \u2192 (p1 \u2228 p1 \u2228 True \u2227 True) \u2228 False) \u2228 p1) \u2228 p3",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/180081721622687043406351325855",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_231086892272286667270865833276",
+      "title": "PropL screen 207",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2228 p1) \u2228 p3 \u2192 p2 \u2228 (p4 \u2228 p1) \u2228 (False \u2228 ((p4 \u2227 True \u2227 p1 \u2192 p2 \u2227 False) \u2228 (p2 \u2192 True \u2192 p1) \u2192 p3) \u2192 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/231086892272286667270865833276",
+      "connective": "mixed",
+      "difficulty": 20
+    },
+    {
+      "id": "propl_screen_163787152653858783195588763396",
+      "title": "PropL screen 837",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(True \u2227 (p3 \u2228 (p1 \u2228 True \u2192 True \u2227 ((p4 \u2228 (False \u2228 False \u2192 True \u2228 p2)) \u2228 False)))) \u2227\n    (p4 \u2228 (p5 \u2228 False \u2227 p1 \u2192 True \u2228 p4))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/163787152653858783195588763396",
+      "connective": "mixed",
+      "difficulty": 36
+    },
+    {
+      "id": "propl_screen_206710228845887071123087005918",
+      "title": "PropL screen 602",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p3 \u2192 ((p4 \u2228 p1) \u2228 p2) \u2227 p1) \u2228 (True \u2192 (p5 \u2228 (p2 \u2227 (p2 \u2228 (True \u2192 p2 \u2227 p4)) \u2192 p3 \u2192 p2 \u2228 False)) \u2227 True \u2228 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/206710228845887071123087005918",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_140833735813769236240361487432",
+      "title": "PropL screen 210",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p2 \u2228 p4 \u2227 p1) \u2228 ((p1 \u2192 p5) \u2192 p4 \u2227 p5) \u2228 p4) \u2228 ((p3 \u2192 False) \u2228 p5 \u2192 False \u2227 (p5 \u2228 p5)) \u2192 p2 \u2192 p3 \u2228 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/140833735813769236240361487432",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_42941081277516009724162072843",
+      "title": "PropL screen 002",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p4 \u2192 ((p3 \u2228 p3) \u2228 p4 \u2227 p4) \u2227 (p4 \u2228 p3 \u2192 (p5 \u2228 (False \u2227 p3 \u2192 True \u2228 False \u2228 (p3 \u2192 p4))) \u2228 p2)) \u2228 p3) \u2228 p5",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/42941081277516009724162072843",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_226149546942004291555139246626",
+      "title": "PropL screen 694",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((False \u2228 p5) \u2228 p3) \u2228 (((p2 \u2192 p5) \u2227 p4) \u2227 p4 \u2228 False \u2192 (p4 \u2192 (False \u2227 True \u2228 p4) \u2228 p5) \u2228 ((p2 \u2192 p5) \u2192 p3) \u2227 p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/226149546942004291555139246626",
+      "connective": "mixed",
+      "difficulty": 15
+    },
+    {
+      "id": "propl_screen_247927570760898907940850835355",
+      "title": "PropL screen 651",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2228 p3) \u2228 (p3 \u2228 p3) \u2228 (((p4 \u2192 (False \u2228 p2) \u2227 True) \u2227 p5) \u2227 p5 \u2227 p4 \u2192 (p3 \u2192 p3) \u2228 True \u2227 p4 \u2228 p3) \u2228 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/247927570760898907940850835355",
+      "connective": "mixed",
+      "difficulty": 13
+    },
+    {
+      "id": "propl_screen_310610550834502269151043459168",
+      "title": "PropL screen 588",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p2 \u2228 ((p3 \u2228 p3) \u2227 p4 \u2228 p5) \u2228 (False \u2192 (True \u2227 (p2 \u2192 (True \u2192 p5) \u2228 p2) \u2228 False) \u2227 (p3 \u2227 p2 \u2192 False \u2228 False) \u2192 False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/310610550834502269151043459168",
+      "connective": "mixed",
+      "difficulty": 13
+    },
+    {
+      "id": "propl_screen_258868169083574782649190010517",
+      "title": "PropL screen 726",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(True \u2192 p1) \u2192 False \u2228 (p4 \u2228 p3) \u2228 True \u2227 (p5 \u2228 ((p1 \u2228 p2) \u2227 p5 \u2192 (p2 \u2192 p5) \u2227 (False \u2192 p4 \u2227 p3 \u2227 (p4 \u2192 p2))))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/258868169083574782649190010517",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_322579708519307246228041587831",
+      "title": "PropL screen 593",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2228 (p5 \u2228 ((p1 \u2227 False) \u2227 p2 \u2228 p5) \u2228 (p3 \u2192 False \u2192 p3 \u2227 (False \u2192 p4 \u2227 False \u2192 (p5 \u2227 p2 \u2227 True) \u2227 False))) \u2228 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/322579708519307246228041587831",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_339136692192407268997585668642",
+      "title": "PropL screen 445",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p1 \u2192 p1 \u2227 ((p2 \u2228 ((p1 \u2228 (p5 \u2192 p4)) \u2228 False \u2192 p1 \u2227 ((True \u2192 p4 \u2228 p1) \u2228 False))) \u2228 (p1 \u2228 p1) \u2227 (p4 \u2192 p4 \u2192 False))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/339136692192407268997585668642",
+      "connective": "mixed",
+      "difficulty": 31
+    },
+    {
+      "id": "propl_screen_306596944689251401031357315794",
+      "title": "PropL screen 624",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p1 \u2228 ((False \u2192 p3) \u2192 p2 \u2228 (p4 \u2228 True) \u2227 (True \u2228 p3 \u2227 (p3 \u2192 True) \u2192 p3 \u2192 p2 \u2228 (False \u2192 True \u2227 p2 \u2228 p2) \u2228 p2))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/306596944689251401031357315794",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_180847318562481521221480663805",
+      "title": "PropL screen 053",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p4 \u2228 p4) \u2228 p3) \u2228 ((p3 \u2228 p2 \u2228 p4 \u2228 p4) \u2228 p4 \u2192 True) \u2192 p5 \u2228 ((False \u2192 p1) \u2228 p4) \u2228 False \u2227 p5 \u2227 True \u2227 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/180847318562481521221480663805",
+      "connective": "mixed",
+      "difficulty": 30
+    },
+    {
+      "id": "propl_screen_319304683744291962027849847831",
+      "title": "PropL screen 740",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2228 ((p2 \u2228 (p1 \u2192 (p2 \u2227 True \u2192 p5 \u2192 p4) \u2227 (p3 \u2228 True))) \u2228 p3 \u2228 p4 \u2192 ((p4 \u2228 (False \u2192 p1)) \u2228 True) \u2228 p1 \u2227 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/319304683744291962027849847831",
+      "connective": "mixed",
+      "difficulty": 30
+    },
+    {
+      "id": "propl_screen_206619812199658094072344510282",
+      "title": "PropL screen 474",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2192 (p2 \u2228 p2 \u2228 p4) \u2227 p1) \u2228 (False \u2192 (((p5 \u2192 p4) \u2227 False) \u2227 p4 \u2228 (p4 \u2228 p1) \u2227 ((True \u2192 True) \u2192 p2) \u2192 p5) \u2227 False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/206619812199658094072344510282",
+      "connective": "mixed",
+      "difficulty": 20
+    },
+    {
+      "id": "propl_screen_226300508418968208934942881490",
+      "title": "PropL screen 304",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p4 \u2228 p4) \u2228 p2) \u2228\n    (((p1 \u2228 (p2 \u2192 False) \u2192 False) \u2228 (p3 \u2192 p2)) \u2227 p3 \u2228 True \u2192 (True \u2228 p1 \u2227 False \u2227 False) \u2227 (False \u2192 p2))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/226300508418968208934942881490",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_249068417552068553882568272305",
+      "title": "PropL screen 845",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p4 \u2228 p1) \u2228 (p3 \u2228 (p3 \u2227 (False \u2228 True) \u2192 False \u2228 True \u2227 (p1 \u2228 p3 \u2192 p3))) \u2228 ((p5 \u2192 True) \u2192 p1) \u2227 (False \u2192 p1 \u2227 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/249068417552068553882568272305",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_228629401889350441786927160263",
+      "title": "PropL screen 076",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2228 (p5 \u2192 p3)) \u2228 (p5 \u2227 p3 \u2228 False \u2192 (((True \u2192 True) \u2192 False \u2228 p5 \u2228 False \u2227 (p5 \u2227 False) \u2227 p5) \u2227 (p3 \u2228 False)) \u2227 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/228629401889350441786927160263",
+      "connective": "mixed",
+      "difficulty": 29
+    },
+    {
+      "id": "propl_screen_145541286167766875988964311820",
+      "title": "PropL screen 022",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p1 \u2227 p2 \u2228 p1) \u2228 (p3 \u2227 p5 \u2192 (p5 \u2192 p4) \u2192 p2 \u2228 (p1 \u2228 p2 \u2192 p3 \u2227 p4 \u2192 p4))) \u2227 (False \u2228 (False \u2192 p1 \u2228 p2))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/145541286167766875988964311820",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_204454428538156250517085024931",
+      "title": "PropL screen 173",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p2 \u2227 (p3 \u2192 p1)) \u2227 False \u2228 False) \u2228 p3 \u2227 p1 \u2227 p3 \u2228 p1 \u2228 (p3 \u2228 p5 \u2228 p1 \u2227 False \u2192 True \u2227 p4 \u2192 p2 \u2192 p4)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/204454428538156250517085024931",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_50786601906675587086407461847",
+      "title": "PropL screen 920",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p4 \u2228 p3 \u2228 (p4 \u2228 (p4 \u2192 p2 \u2227 p4) \u2192 p4 \u2227 (p2 \u2228 p1 \u2228 p5 \u2192 p5)) \u2228 p5 \u2192 p1 \u2228 (p1 \u2192 True) \u2228 p2) \u2228 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/50786601906675587086407461847",
+      "connective": "mixed",
+      "difficulty": 27
+    },
+    {
+      "id": "propl_screen_195547097225702722148441928765",
+      "title": "PropL screen 301",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2227 (True \u2192 p2) \u2192 p1 \u2227 p2 \u2228 p4) \u2227 (p5 \u2227 p2 \u2228 p3 \u2192 False \u2227 p2 \u2228 p2 \u2227 p5 \u2228 p3) \u2227 (p3 \u2228 (p2 \u2192 True))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/195547097225702722148441928765",
+      "connective": "mixed",
+      "difficulty": 29
+    },
+    {
+      "id": "propl_screen_113570465398020960189329129321",
+      "title": "PropL screen 704",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p4 \u2228 True \u2192 ((True \u2192 p4) \u2192 (p1 \u2228 p4) \u2227 (False \u2227 p2 \u2192 (p2 \u2192 p5) \u2228 p4 \u2227 p4)) \u2228 p5) \u2228 p5 \u2227 p3) \u2228 (p1 \u2192 p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/113570465398020960189329129321",
+      "connective": "mixed",
+      "difficulty": 27
+    },
+    {
+      "id": "propl_screen_136590809494349071697905103791",
+      "title": "PropL screen 609",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((False \u2228 p2 \u2227 p1) \u2228 (p1 \u2227 (p2 \u2228 (p4 \u2192 p1 \u2228 False)) \u2192 True \u2227 (p4 \u2228 True \u2228 p3 \u2227 p2 \u2227 p4))) \u2228 (False \u2228 p2) \u2228 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/136590809494349071697905103791",
+      "connective": "mixed",
+      "difficulty": 16
+    },
+    {
+      "id": "propl_screen_257718496773279698528709329451",
+      "title": "PropL screen 415",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2228 p3 \u2192 p5 \u2228 p5 \u2228 ((True \u2228 p1) \u2228 p1) \u2227 (p2 \u2192 ((p4 \u2192 p4) \u2228 p1) \u2228 ((p4 \u2228 p1 \u2192 p1) \u2227 p2) \u2227 (p5 \u2228 p3))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/257718496773279698528709329451",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_251702866754832317304398304901",
+      "title": "PropL screen 115",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p3 \u2192 p2) \u2228 p1 \u2228 (p1 \u2228 p4) \u2228 (p1 \u2192 ((True \u2228 (False \u2192 p5)) \u2227 True \u2192 p2) \u2192 (p1 \u2227 False) \u2227 p4 \u2192 p4 \u2227 (False \u2228 p3))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/251702866754832317304398304901",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_219470458918180701852311461595",
+      "title": "PropL screen 574",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2228 p5 \u2228 p5 \u2228 p2 \u2192 (False \u2228 ((p2 \u2192 p1) \u2227 p2 \u2192 True)) \u2228 ((p2 \u2227 (False \u2228 p2 \u2192 True \u2192 p2) \u2228 p2) \u2228 p4 \u2192 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/219470458918180701852311461595",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_302829905586043483385880370262",
+      "title": "PropL screen 476",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "False \u2228 p5 \u2228 ((p2 \u2228 p2) \u2228 True) \u2227 ((p5 \u2227 p5) \u2227 (p4 \u2228 (True \u2192 True)) \u2192 p5 \u2228 ((p5 \u2192 p4 \u2227 p1 \u2192 True) \u2227 True \u2192 p5))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/302829905586043483385880370262",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_258796586258273498353585444355",
+      "title": "PropL screen 708",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(True \u2192 False) \u2192\n    (p3 \u2228 False) \u2227 (p1 \u2192 (((p2 \u2227 (p1 \u2228 False) \u2192 p2) \u2227 p1) \u2227 (False \u2228 p1)) \u2227 (p5 \u2228 (True \u2228 True) \u2227 (False \u2192 p3)))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/258796586258273498353585444355",
+      "connective": "mixed",
+      "difficulty": 27
+    },
+    {
+      "id": "propl_screen_204181456544492811200981951512",
+      "title": "PropL screen 723",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p5 \u2228 (p5 \u2192 True)) \u2228 False) \u2227 p2 \u2228 (((p1 \u2192 p2 \u2192 p1) \u2228 p1) \u2228 True \u2192 True \u2192 p1 \u2228 True \u2227 (False \u2227 (p5 \u2228 p5) \u2192 p4))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/204181456544492811200981951512",
+      "connective": "mixed",
+      "difficulty": 25
+    },
+    {
+      "id": "propl_screen_168853737341868213020194066705",
+      "title": "PropL screen 200",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2228 p3 \u2228 p3 \u2228 p5 \u2227 (p2 \u2192 ((p4 \u2228 p4) \u2228 p1 \u2192 p5 \u2192 p4) \u2228 p2) \u2192 p4 \u2228 (False \u2192 p3 \u2228 p1 \u2228 True \u2227 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/168853737341868213020194066705",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_161020476157800235157677675275",
+      "title": "PropL screen 885",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p4 \u2228 (p2 \u2192 True)) \u2228 ((False \u2192 False) \u2227 p4 \u2227 False \u2227 p1 \u2192 p5 \u2227 p4 \u2192 p1) \u2228 p1 \u2192 p5 \u2228 (p4 \u2192 False \u2192 p1 \u2228 p4)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/161020476157800235157677675275",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_345691680151906771533498810627",
+      "title": "PropL screen 639",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2192 (p4 \u2228 (p5 \u2192 (p2 \u2228 p2) \u2227 True \u2228 p5 \u2227 (((p5 \u2192 False) \u2192 (p2 \u2192 p5) \u2227 (p1 \u2228 p2 \u2192 False)) \u2228 (p5 \u2192 p2)))) \u2228 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/345691680151906771533498810627",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_233881591283532431989038585477",
+      "title": "PropL screen 079",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2228 p1 \u2228 p3 \u2192 p3 \u2228 (((p2 \u2192 p4) \u2227 (p1 \u2228 p4) \u2228 p1) \u2228 True) \u2228 (p1 \u2192 (False \u2228 p3 \u2227 p2) \u2228 (p2 \u2192 p1 \u2227 p5))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/233881591283532431989038585477",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_324909217928958963565765339361",
+      "title": "PropL screen 699",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2228 p3 \u2227 p3 \u2228 p4 \u2228 p5 \u2228 (p4 \u2227 False \u2192 p3 \u2228 p2 \u2227 (p3 \u2227 (p3 \u2228 False \u2228 p3) \u2192 p4 \u2192 p5) \u2228 p4 \u2192 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/324909217928958963565765339361",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_170155898391705192198416882171",
+      "title": "PropL screen 325",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p4 \u2227 True \u2228 (False \u2192 p5) \u2228 p5 \u2192 False) \u2192 (True \u2192 p5) \u2227 p1 \u2227 True) \u2227 (p2 \u2227 p3 \u2227 p3 \u2228 (p3 \u2228 True) \u2228 (True \u2192 p4))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/170155898391705192198416882171",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_343116046831179962062490690343",
+      "title": "PropL screen 069",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p2 \u2192 (False \u2192 p3 \u2228 p1) \u2227 (((p4 \u2192 False) \u2227 p4 \u2228 p4 \u2192 p1 \u2228 (p2 \u2192 p5) \u2228 (p4 \u2192 False \u2228 p4)) \u2228 p3 \u2227 False \u2227 False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/343116046831179962062490690343",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_206653813731864289212696181339",
+      "title": "PropL screen 248",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2192 p3 \u2228 (p4 \u2192 p5 \u2227 p1)) \u2228 ((False \u2228 (p2 \u2228 (p4 \u2192 p4)) \u2227 False) \u2228 p4 \u2192 p2 \u2192 p5 \u2192 p3 \u2228 True \u2228 False \u2227 p4)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/206653813731864289212696181339",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_167551583291329822460319532118",
+      "title": "PropL screen 954",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((True \u2227 ((p2 \u2192 p4) \u2192 (p5 \u2228 True) \u2227 p1) \u2227 False \u2228 p5) \u2228 True) \u2228 True \u2228 p4 \u2192 (p5 \u2228 True) \u2228 ((False \u2192 p4) \u2228 True) \u2228 p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/167551583291329822460319532118",
+      "connective": "mixed",
+      "difficulty": 30
+    },
+    {
+      "id": "propl_screen_247578893677468977375961226663",
+      "title": "PropL screen 857",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2228 p4) \u2228 (p1 \u2192 p3 \u2228 True \u2192 ((((p5 \u2192 (p1 \u2192 p5 \u2227 p3 \u2227 p2) \u2192 p1 \u2192 p5) \u2228 p2) \u2228 p1) \u2227 (p5 \u2192 p5)) \u2227 p1)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/247578893677468977375961226663",
+      "connective": "mixed",
+      "difficulty": 31
+    },
+    {
+      "id": "propl_screen_207459509084223153699715318570",
+      "title": "PropL screen 539",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(True \u2192 (p4 \u2227 p3) \u2227 p5) \u2228 p2 \u2192 p5 \u2228 (p2 \u2192 True \u2228 p2 \u2192 p2 \u2192 True \u2228 (p3 \u2227 False \u2192 p2 \u2228 (False \u2192 p4)) \u2228 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/207459509084223153699715318570",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_204033747092185579298630374714",
+      "title": "PropL screen 724",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p4 \u2192 p3 \u2227 p4 \u2192 p3 \u2228 p2) \u2227 (p4 \u2192 True \u2227 (((p1 \u2228 p1 \u2192 False) \u2192 p3) \u2228 (((p2 \u2227 p5) \u2227 p3) \u2227 (p3 \u2192 False) \u2192 p1)))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/204033747092185579298630374714",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_345512372225547079421523906872",
+      "title": "PropL screen 383",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2192 (((p3 \u2192 (p3 \u2192 p2) \u2227 p3 \u2228 (True \u2192 p2) \u2227 p5) \u2192 False) \u2228 p5 \u2192 (False \u2228 p1 \u2228 p3) \u2227 (p4 \u2227 p3 \u2192 p4)) \u2228 p4",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/345512372225547079421523906872",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_167744043600601714186974968580",
+      "title": "PropL screen 247",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2227 p2 \u2192 p5 \u2228 (p4 \u2192 (False \u2192 False) \u2228 p3 \u2192 p2)) \u2228 p3 \u2228 True \u2228 p2 \u2192 p5 \u2192 p1 \u2192 False \u2227 p2 \u2227 p5 \u2228 p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/167744043600601714186974968580",
+      "connective": "mixed",
+      "difficulty": 20
+    },
+    {
+      "id": "propl_screen_111098630329736550334374093395",
+      "title": "PropL screen 292",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p4 \u2228 (p1 \u2192 p4) \u2227 ((p3 \u2192 False) \u2228 p2 \u2192 p2 \u2228 p2) \u2192 (p5 \u2228 (p1 \u2192 p5 \u2228 True)) \u2228 (True \u2192 p4)) \u2227 True \u2228 (p4 \u2192 p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/111098630329736550334374093395",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_167083254232594521567780438346",
+      "title": "PropL screen 353",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2227 (False \u2192 (True \u2227 True \u2228 p1) \u2227 (p5 \u2192 True \u2228 p4 \u2192 p3)) \u2192 p5) \u2228 p2 \u2192 p4 \u2228 p1 \u2228 (p5 \u2227 False \u2227 p2 \u2192 p4)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/167083254232594521567780438346",
+      "connective": "mixed",
+      "difficulty": 20
+    },
+    {
+      "id": "propl_screen_249706667841888415682701340074",
+      "title": "PropL screen 299",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p5 \u2228 p4) \u2228 (p4 \u2192 (((True \u2192 (p3 \u2192 True) \u2192 p5) \u2192 p5) \u2227 p3 \u2192 p4) \u2227 (p5 \u2227 (False \u2227 p5 \u2228 p2) \u2192 p1 \u2228 p2 \u2228 p1))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/249706667841888415682701340074",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_349062308549390365159719452807",
+      "title": "PropL screen 804",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2192 p5 \u2228 ((p2 \u2228 p4 \u2192 p2) \u2192 p2 \u2228 p5 \u2227 (p4 \u2192 (p5 \u2228 p4) \u2228 True \u2227 False \u2227 (p2 \u2228 p2)) \u2228 True \u2192 p4 \u2228 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/349062308549390365159719452807",
+      "connective": "mixed",
+      "difficulty": 18
+    },
+    {
+      "id": "propl_screen_343321570644839087754799618700",
+      "title": "PropL screen 398",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p2 \u2192 (p3 \u2228 p2) \u2227 ((((p5 \u2227 (p4 \u2192 False) \u2192 False) \u2192 True) \u2192 p4 \u2227 False) \u2192 (p3 \u2228 (p1 \u2192 p5 \u2228 p2 \u2227 (p2 \u2228 p4))) \u2227 False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/343321570644839087754799618700",
+      "connective": "mixed",
+      "difficulty": 19
+    },
+    {
+      "id": "propl_screen_215942723106378990543573120957",
+      "title": "PropL screen 525",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p3 \u2228 (p5 \u2192 False \u2227 p1)) \u2228\n    ((False \u2192 False) \u2227 False \u2192 p2 \u2227 (((p3 \u2228 True) \u2228 False) \u2228 ((False \u2192 True \u2228 p1) \u2192 False) \u2192 p3)) \u2227 True",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/215942723106378990543573120957",
+      "connective": "mixed",
+      "difficulty": 28
+    },
+    {
+      "id": "propl_screen_313189002581649506475584650212",
+      "title": "PropL screen 196",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2228 (((p4 \u2227 False) \u2227 p3) \u2227 p1 \u2228 p2 \u2192 (p5 \u2228 (p5 \u2227 p1) \u2227 p2) \u2228 ((False \u2227 False) \u2227 False \u2192 p2 \u2192 True) \u2228 p4) \u2228 p3",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/313189002581649506475584650212",
+      "connective": "mixed",
+      "difficulty": 18
+    },
+    {
+      "id": "propl_screen_315029578305896264069137434455",
+      "title": "PropL screen 056",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p3 \u2228 (p1 \u2228 (p3 \u2192 p5) \u2227 ((p4 \u2192 p1) \u2192 p2)) \u2228 (p2 \u2192 p2 \u2192 ((p4 \u2228 True) \u2227 p5) \u2227 p5 \u2192 p2 \u2228 True) \u2228 p1 \u2228 p3",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/315029578305896264069137434455",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_207338258573842242131544742769",
+      "title": "PropL screen 909",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p1 \u2228 p2) \u2228 False \u2228 p3) \u2228 True \u2192 (p3 \u2228 True) \u2228 (False \u2192 p4 \u2227 (p2 \u2192 p4 \u2228 False \u2228 p3 \u2227 (p3 \u2192 p3 \u2228 p1)) \u2192 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/207338258573842242131544742769",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_213797342324920111778067177273",
+      "title": "PropL screen 698",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p2 \u2227 p3 \u2227 p1 \u2228 p3) \u2228 (False \u2192 (p1 \u2228 p1 \u2227 p2) \u2227 p4) \u2227 (p4 \u2227 (p4 \u2228 False) \u2227 p1 \u2192 (p5 \u2227 p4 \u2228 True) \u2228 p2)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/213797342324920111778067177273",
+      "connective": "mixed",
+      "difficulty": 18
+    },
+    {
+      "id": "propl_screen_264156445410082411835620627416",
+      "title": "PropL screen 160",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "True \u2227 (((p1 \u2192 (p2 \u2192 p3) \u2192 True \u2227 p4) \u2228 p4) \u2228 (p5 \u2227 ((p3 \u2192 ((False \u2192 p3) \u2228 p5) \u2227 p3) \u2228 True) \u2192 True \u2227 True \u2228 p4))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/264156445410082411835620627416",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_59044321145586419461146984491",
+      "title": "PropL screen 483",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p4 \u2227 p2 \u2228 (p5 \u2228 p5) \u2228 (False \u2192 p1 \u2227 (False \u2192 ((False \u2192 (p5 \u2227 True \u2227 p5) \u2227 False) \u2227 p4 \u2228 p2) \u2227 p2 \u2192 p3))) \u2228 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/59044321145586419461146984491",
+      "connective": "mixed",
+      "difficulty": 17
+    },
+    {
+      "id": "propl_screen_106581324493610071403441457882",
+      "title": "PropL screen 205",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p2 \u2228 p4 \u2192 p1 \u2228 True) \u2228 p1 \u2228 p5 \u2192 p5 \u2192 p3 \u2228 (p2 \u2192 p3 \u2192 True \u2228 (p5 \u2192 (p4 \u2192 p4) \u2227 p4))) \u2227 (True \u2228 False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/106581324493610071403441457882",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_116621651120923009269221568559",
+      "title": "PropL screen 404",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2192 p3) \u2227 ((False \u2228 False) \u2228 (True \u2227 (p4 \u2192 False) \u2192 p2 \u2192 (True \u2228 p5) \u2228 p2 \u2192 p2 \u2228 (p5 \u2192 p1 \u2227 False))) \u2228 (p2 \u2192 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/116621651120923009269221568559",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_116370947424898392033625526694",
+      "title": "PropL screen 406",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((False \u2228 p4 \u2192 p5) \u2192 (p3 \u2192 False) \u2227 p5 \u2228 (p4 \u2227 (((False \u2192 p2 \u2227 p1 \u2227 p5 \u2228 False) \u2228 p1) \u2228 p5) \u2192 p4)) \u2228 (p2 \u2192 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/116370947424898392033625526694",
+      "connective": "mixed",
+      "difficulty": 15
+    },
+    {
+      "id": "propl_screen_319772308428229232174483945218",
+      "title": "PropL screen 535",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2228 ((p1 \u2227 p5 \u2228 (p2 \u2192 p1)) \u2228 False \u2192 (p2 \u2228 (True \u2192 False) \u2192 True) \u2227 (False \u2227 (False \u2192 False) \u2228 True \u2228 p4) \u2228 p4 \u2227 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/319772308428229232174483945218",
+      "connective": "mixed",
+      "difficulty": 25
+    },
+    {
+      "id": "propl_screen_252475161457119972833049701152",
+      "title": "PropL screen 897",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p5 \u2192 p1) \u2228 (True \u2228 p4 \u2228 (p4 \u2192 True) \u2227 p1 \u2192 ((p4 \u2228 (((p3 \u2227 (p2 \u2227 False \u2228 p5)) \u2227 True \u2192 p3) \u2192 True)) \u2228 True) \u2228 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/252475161457119972833049701152",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_247620703268805727693317627041",
+      "title": "PropL screen 397",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2228 p5) \u2228 ((p1 \u2192 False) \u2227 p1 \u2192 ((p3 \u2227 (p5 \u2192 p2)) \u2227 True) \u2227 ((False \u2227 p3 \u2192 (p2 \u2192 True \u2228 False \u2227 p4) \u2228 p5) \u2192 p3))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/247620703268805727693317627041",
+      "connective": "mixed",
+      "difficulty": 26
+    },
+    {
+      "id": "propl_screen_205369001854094960497119162031",
+      "title": "PropL screen 506",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2227 p4 \u2228 p1 \u2192 p4 \u2227 p2) \u2228 (p3 \u2227 p5 \u2192 p2 \u2228 False \u2192 (True \u2227 (p2 \u2192 p2)) \u2227 (p5 \u2192 p1 \u2228 p4 \u2228 p3)) \u2228 p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/205369001854094960497119162031",
+      "connective": "mixed",
+      "difficulty": 25
+    },
+    {
+      "id": "propl_screen_161761433395123086384978579437",
+      "title": "PropL screen 512",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2228 ((((p1 \u2227 p5 \u2228 p3 \u2192 p3) \u2192 p4 \u2227 p1) \u2192 p5) \u2227 False \u2228 p1) \u2228 (p5 \u2192 True) \u2192 p1 \u2227 p4 \u2228 (p4 \u2192 p3 \u2192 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/161761433395123086384978579437",
+      "connective": "mixed",
+      "difficulty": 25
+    },
+    {
+      "id": "propl_screen_325842795791420794015786087738",
+      "title": "PropL screen 784",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2228 p3 \u2228 (True \u2192 p2 \u2228 (p4 \u2192 p4 \u2227 (p2 \u2228 p5 \u2192 ((p4 \u2227 False \u2192 p4 \u2228 (p5 \u2192 p3)) \u2228 (p4 \u2192 p5 \u2228 p1)) \u2228 p5)))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/325842795791420794015786087738",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_183143487579333063486240437255",
+      "title": "PropL screen 122",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(True \u2227 ((True \u2228 (True \u2192 True \u2228 (p3 \u2192 p2) \u2228 p3)) \u2228 p1)) \u2227 (True \u2227 (p5 \u2227 (p4 \u2228 p1 \u2227 p5) \u2192 p3 \u2228 p4 \u2228 p1) \u2228 p4)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/183143487579333063486240437255",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_54819598036505728533803003026",
+      "title": "PropL screen 392",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p5 \u2228 p2 \u2228 (p1 \u2192 True \u2227 (False \u2192 p5)) \u2192 p3 \u2192 p5 \u2227 False \u2228 (p3 \u2228 True \u2227 True \u2228 p2 \u2227 (p2 \u2192 False)) \u2227 p3) \u2228 p4",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/54819598036505728533803003026",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_66639785756589316661268428125",
+      "title": "PropL screen 792",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(True \u2192 ((p3 \u2228 True) \u2228 True \u2192 p3 \u2227 True \u2192 p5 \u2228 p3 \u2228 True) \u2228 (p1 \u2192 (True \u2228 p4) \u2228 p5) \u2227 (p5 \u2228 p2) \u2228 p5) \u2228 p1",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/66639785756589316661268428125",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_59627991285054374250468374805",
+      "title": "PropL screen 875",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p5 \u2192 p1) \u2228 ((False \u2228 p5 \u2192 (p3 \u2228 p2 \u2192 p5) \u2228 p1) \u2228 p5 \u2227 p5 \u2192 p5 \u2192 (p2 \u2227 p1 \u2228 (False \u2192 p5)) \u2227 p5)) \u2228 p4",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/59627991285054374250468374805",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_150210945127593780357173854598",
+      "title": "PropL screen 680",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p2 \u2192 (True \u2228 p2 \u2227 True) \u2228 (p4 \u2192 p4) \u2192 (False \u2227 ((p5 \u2192 p5) \u2228 p4) \u2228 (False \u2192 p3)) \u2228 p4) \u2228 p3 \u2227 p4 \u2228 p2 \u2227 p3",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/150210945127593780357173854598",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_247564408230640150737525258853",
+      "title": "PropL screen 331",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2228 p4) \u2228 (p5 \u2227 p4 \u2192 p4 \u2227 (p3 \u2192 p5) \u2192 (False \u2227 False \u2227 p1 \u2228 (False \u2227 (p2 \u2192 p2 \u2192 p2) \u2192 p5 \u2192 p2)) \u2228 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/247564408230640150737525258853",
+      "connective": "mixed",
+      "difficulty": 14
+    },
+    {
+      "id": "propl_screen_312069881020975006292184596798",
+      "title": "PropL screen 902",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p2 \u2228 p5 \u2228 (((p4 \u2228 p4) \u2228 p2) \u2228 False \u2192 True \u2228 p4 \u2227 p3) \u2227 (((True \u2192 p1) \u2192 p2 \u2227 p3 \u2192 True \u2227 p1 \u2227 True) \u2228 p1)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/312069881020975006292184596798",
+      "connective": "mixed",
+      "difficulty": 33
+    },
+    {
+      "id": "propl_screen_199994815307667339277573655144",
+      "title": "PropL screen 879",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((False \u2192 p1 \u2192 p3) \u2228 p1 \u2192 False \u2227 p2) \u2192 ((p4 \u2228 p5) \u2228 (p3 \u2192 (p2 \u2228 (p4 \u2192 p5)) \u2228 (False \u2227 False) \u2227 p3) \u2228 p3) \u2227 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/199994815307667339277573655144",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_52410568644632881365996862027",
+      "title": "PropL screen 497",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((p5 \u2228 p3 \u2192 p5) \u2228 (p2 \u2192 ((True \u2228 p1) \u2228 p4) \u2227 False \u2192 p2)) \u2227 ((True \u2192 False \u2228 False) \u2227 p2 \u2192 p5 \u2228 p1 \u2228 p2) \u2228 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/52410568644632881365996862027",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_175218891616649899251218742771",
+      "title": "PropL screen 362",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p1 \u2228 (True \u2227 False \u2227 (p5 \u2227 (False \u2227 p4 \u2192 True)) \u2227 (p2 \u2192 p1)) \u2227 p4 \u2192 (p3 \u2228 (True \u2192 (p5 \u2227 True) \u2227 True)) \u2228 False \u2228 True",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/175218891616649899251218742771",
+      "connective": "mixed",
+      "difficulty": 14
+    },
+    {
+      "id": "propl_screen_341722731250659498058643723262",
+      "title": "PropL screen 569",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p2 \u2192 ((p4 \u2192 p1 \u2227 p2) \u2228 p5 \u2227 p1 \u2192 (p1 \u2192 (False \u2192 p3 \u2227 p2) \u2192 p1) \u2227 (p1 \u2192 p1 \u2192 False \u2228 True)) \u2228 p4 \u2227 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/341722731250659498058643723262",
+      "connective": "mixed",
+      "difficulty": 24
+    },
+    {
+      "id": "propl_screen_338774901224245158974220399598",
+      "title": "PropL screen 067",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p1 \u2192 p3 \u2227 True \u2228 ((True \u2228 p4 \u2192 False) \u2228 False \u2192 (False \u2227 ((p3 \u2192 p3 \u2227 p1) \u2227 False \u2228 False) \u2228 p5 \u2227 p2) \u2227 (p3 \u2192 p5))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/338774901224245158974220399598",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_142954968978390760590654273186",
+      "title": "PropL screen 444",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2228 False \u2228 (p3 \u2228 p3 \u2228 p1 \u2227 p3 \u2192 (p1 \u2228 False) \u2228 (False \u2192 False)) \u2227 p4 \u2227 p1 \u2228 (p5 \u2192 p4) \u2192 p1 \u2192 p3 \u2228 True",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/142954968978390760590654273186",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_185506663378975124324552818413",
+      "title": "PropL screen 359",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p2 \u2228 False \u2227 (((False \u2227 False) \u2227 p5) \u2227 p2 \u2228 (p2 \u2192 p1))) \u2228\n    ((p3 \u2227 True \u2227 p4) \u2227 (p5 \u2192 False) \u2192 False \u2228 True \u2227 True \u2228 p1)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/185506663378975124324552818413",
+      "connective": "mixed",
+      "difficulty": 13
+    },
+    {
+      "id": "propl_screen_343019331665829510385234223697",
+      "title": "PropL screen 858",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p2 \u2192 (p4 \u2227 p2 \u2228 True) \u2228 p5 \u2192 ((False \u2228 True) \u2228 (p2 \u2192 (p3 \u2227 True) \u2227 p3 \u2192 True \u2192 p2 \u2227 p4) \u2228 True \u2228 False) \u2228 True",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/343019331665829510385234223697",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_251867719782693605062984550974",
+      "title": "PropL screen 557",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p3 \u2192 p5) \u2228 (((p1 \u2192 p3 \u2228 p1) \u2192 p4 \u2227 p4) \u2192 (p4 \u2192 True) \u2227 (p1 \u2228 ((True \u2192 p5 \u2227 False \u2192 p1) \u2192 False \u2227 p5) \u2192 p4))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/251867719782693605062984550974",
+      "connective": "mixed",
+      "difficulty": 23
+    },
+    {
+      "id": "propl_screen_263857823087606502417048024485",
+      "title": "PropL screen 305",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "True \u2227 (p3 \u2228 ((p4 \u2192 p3 \u2228 (p2 \u2192 p2)) \u2228 p4 \u2192 p3) \u2227 p1 \u2192 p3) \u2227 (p5 \u2192 (p3 \u2227 p2 \u2192 p1 \u2192 p4) \u2228 p2 \u2228 True)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/263857823087606502417048024485",
+      "connective": "mixed",
+      "difficulty": 22
+    },
+    {
+      "id": "propl_screen_247516825145094085645222342203",
+      "title": "PropL screen 869",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2228 p3) \u2228 (False \u2192 ((True \u2192 p4 \u2228 (p1 \u2192 p4) \u2228 True \u2228 (p5 \u2192 p5)) \u2227 (p5 \u2192 False) \u2192 (True \u2228 True) \u2228 True \u2192 p4) \u2227 p4)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/247516825145094085645222342203",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_183887559960028800337034071890",
+      "title": "PropL screen 431",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p3 \u2228 p4 \u2227 p3 \u2192 (p2 \u2227 p5 \u2228 p1) \u2227 p3) \u2227 p4 \u2228 (((p5 \u2228 p2) \u2228 True) \u2227 p5 \u2228 p1 \u2192 True \u2228 True \u2228 (p5 \u2192 p5))",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/183887559960028800337034071890",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_219534647865788295319657266542",
+      "title": "PropL screen 916",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2228 p4 \u2228 False \u2228 p3 \u2192 (p3 \u2228 ((p3 \u2192 True) \u2228 p2) \u2227 True \u2228 False) \u2228 (True \u2228 p1) \u2227 (False \u2228 (False \u2192 p2)) \u2227 p3 \u2228 p2",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/219534647865788295319657266542",
+      "connective": "mixed",
+      "difficulty": 30
+    },
+    {
+      "id": "propl_screen_247998959992097824087586445644",
+      "title": "PropL screen 887",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2228 p4) \u2228 p2 \u2228 ((p5 \u2227 ((p3 \u2192 p2 \u2227 p3) \u2192 True)) \u2227 p1 \u2227 False \u2227 (False \u2192 p3 \u2228 False) \u2192 (p4 \u2192 p4 \u2227 p3) \u2228 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/247998959992097824087586445644",
+      "connective": "mixed",
+      "difficulty": 12
+    },
+    {
+      "id": "propl_screen_115900497639884886842617651737",
+      "title": "PropL screen 739",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "((((p3 \u2192 True) \u2192 p5) \u2192 False) \u2228 p4 \u2228 (p2 \u2228 p5 \u2227 True \u2192 (True \u2192 p1 \u2227 (p5 \u2228 (p2 \u2192 p2))) \u2192 p1) \u2228 p2) \u2228 p4 \u2227 p5",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/115900497639884886842617651737",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_234357363005753374886767986992",
+      "title": "PropL screen 394",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p1 \u2192 p2 \u2228 p1) \u2192 ((p4 \u2228 p2) \u2228 (True \u2228 True) \u2228 True) \u2227 True \u2227 ((True \u2228 p1) \u2227 p2 \u2227 (p1 \u2228 p4 \u2192 False) \u2192 p2) \u2228 False",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/234357363005753374886767986992",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_352184489000407389584974365045",
+      "title": "PropL screen 877",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p4 \u2192 ((p1 \u2228 True) \u2227 (p3 \u2192 True)) \u2227 ((p2 \u2228 ((p4 \u2228 p4 \u2192 False) \u2192 ((p1 \u2192 p1) \u2192 True) \u2227 p1 \u2227 p2 \u2227 False \u2227 True)) \u2228 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/352184489000407389584974365045",
+      "connective": "mixed",
+      "difficulty": 32
+    },
+    {
+      "id": "propl_screen_231000571330426102207333487662",
+      "title": "PropL screen 544",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2227 False \u2228 p1 \u2192 (((p5 \u2227 False \u2228 True \u2228 (p1 \u2192 True)) \u2227 ((p3 \u2192 p5) \u2227 p1 \u2228 True)) \u2227 True) \u2227 ((True \u2228 p4 \u2228 p3) \u2228 p1)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/231000571330426102207333487662",
+      "connective": "mixed",
+      "difficulty": 31
+    },
+    {
+      "id": "propl_screen_215721191326983040532965095458",
+      "title": "PropL screen 709",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(False \u2228 p4 \u2227 (True \u2228 p2)) \u2228 p1 \u2228 (p3 \u2227 ((p4 \u2192 p3 \u2228 (p3 \u2227 p5 \u2192 p3) \u2227 p2) \u2227 True) \u2227 False \u2227 False \u2227 p1 \u2192 p3)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/215721191326983040532965095458",
+      "connective": "mixed",
+      "difficulty": 12
+    },
+    {
+      "id": "propl_screen_249459815252949974051324647598",
+      "title": "PropL screen 423",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "(p5 \u2228 False) \u2228\n    (True \u2192 True \u2228 p2 \u2227 (p4 \u2192 True) \u2192 ((p2 \u2227 (((True \u2192 p1) \u2192 True) \u2228 True \u2192 True) \u2192 p2) \u2228 True \u2227 p2) \u2228 False)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/249459815252949974051324647598",
+      "connective": "mixed",
+      "difficulty": 20
+    },
+    {
+      "id": "propl_screen_168914635685098590478652473368",
+      "title": "PropL screen 085",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2228 p2 \u2227 (p1 \u2227 (p2 \u2227 (p4 \u2192 True) \u2192 p1 \u2228 p4 \u2192 True) \u2192 p5) \u2227 False \u2192 p5 \u2227 ((p2 \u2228 p4 \u2227 (p4 \u2228 p1)) \u2228 p5)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/168914635685098590478652473368",
+      "connective": "mixed",
+      "difficulty": 21
+    },
+    {
+      "id": "propl_screen_356706076936801917160426410241",
+      "title": "PropL screen 319",
+      "binders": "(p1 p2 p3 p4 p5 : Prop)",
+      "target": "p5 \u2192 (p2 \u2228 (False \u2192 p1) \u2228 p4 \u2227 p1) \u2227 ((p2 \u2228 (False \u2227 False \u2228 p3) \u2228 p3) \u2228 ((p4 \u2228 p1) \u2228 p3) \u2228 True \u2192 p1 \u2192 p1)",
+      "source_path": "normal/test_ood.csv",
+      "source_level": "test_ood/356706076936801917160426410241",
+      "connective": "mixed",
+      "difficulty": 39
+    }
+  ]
+}
